@@ -8,7 +8,7 @@
 //!   readback once a hardware encoder backend exists.
 //! * [`input`] — `SendInput` with scan codes for keys and absolute
 //!   virtual-desktop coordinates for the mouse.
-//! * `gamepad` — stage 2: `ViGEm` bus, virtual DualShock 4 or Xbox 360.
+//! * `gamepad` — stage 2: `ViGEm` bus, virtual `DualShock` 4 or Xbox 360.
 //!
 //! Viewer: software decoder until the Media Foundation / D3D11 decoder
 //! lands (stage 5 hardware work).

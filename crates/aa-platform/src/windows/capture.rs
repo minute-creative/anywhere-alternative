@@ -104,8 +104,7 @@ impl DxgiCapture {
             let desc = dup.GetDesc();
             let res = Resolution::new(desc.ModeDesc.Width, desc.ModeDesc.Height);
             let rr = desc.ModeDesc.RefreshRate;
-            let refresh_hz =
-                if rr.Denominator == 0 { 60 } else { (rr.Numerator / rr.Denominator).clamp(1, 1000) as u16 };
+            let refresh_hz = rr.Numerator.checked_div(rr.Denominator).map_or(60, |hz| hz.clamp(1, 1000) as u16);
 
             let staging = Self::make_staging(&device, res)?;
             tracing::info!(?res, refresh_hz, "desktop duplication ready");
