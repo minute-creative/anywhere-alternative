@@ -12,7 +12,14 @@ it here first, then in code.
 
 - Feels local on LAN: our own overhead (capture → encode → send → decode →
   present) under 10 ms, so total latency ≈ network RTT + one display frame.
-- Highest refresh rate the display pair supports (120 Hz+ where available).
+- Two hard performance targets:
+  - **4K at a locked 60 fps**: every frame on exactly one display refresh,
+    never doubled or skipped. A software commitment; frame pacing in the
+    presenter is a stage-1 requirement.
+  - **1080p at 240 fps**: requires a 240 Hz display on *both* ends and a host
+    encoder that sustains 240 frames/s (~4 ms per frame). NVENC/AMF/QuickSync
+    do; Apple VideoToolbox must be benchmarked per chip (`aa-host bench`,
+    stage 1). Everything per-frame is budgeted for 4 ms from the start.
 - Steam and CrossOver games playable from a Mac host with a PS controller.
 - After Effects / design work usable at full resolution and colour fidelity.
 - Works on every GPU we and our friends have: Apple Silicon, NVIDIA, AMD,
@@ -165,13 +172,13 @@ Gamepad state is a 15-byte snapshot in DualSense layout.
 
 | # | Deliverable | Pass when |
 |---|-------------|-----------|
-| 1 | Mac host → Windows/Mac viewer, LAN, keyboard + mouse, real window | 1080p60 at < 20 ms glass-to-glass (phone camera at 240 fps) |
+| 1 | Mac host → Windows/Mac viewer, LAN, keyboard + mouse, real window; `bench` command | 1080p60 at < 20 ms glass-to-glass (phone camera at 240 fps); encoder fps measured on each machine |
 | 1b | macOS virtual-controller spike | Steam sees a virtual DualSense **or** we know we need DriverKit |
 | 2 | DualSense end-to-end + rumble; audio; adaptive bitrate | 30 min of a game without noticing |
 | 3 | Pairing, signalling, hole-punch, relay, encryption | works from a phone hotspot |
 | 4 | Clipboard, file transfer, multi-monitor, wake-on-LAN | daily-driveable for design work |
 | 5 | Windows host: DXGI + NVENC/AMF/QSV/MF, SendInput, ViGEm | stage-1 test passes Win→Mac |
-| 6 | HDR, 4K120, auto-start daemon/service, installers | friends can install it unassisted |
+| 6 | HDR, 4K60 locked, 1080p240, batched UDP sends, auto-start daemon/service, installers | 4K60 with zero dropped/doubled frames over 10 min; 1080p240 on 240 Hz hardware both ends; friends can install it unassisted |
 
 ## 9. Coding standards
 
