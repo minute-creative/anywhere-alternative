@@ -133,6 +133,14 @@ pipeline runs anywhere. `aa-host --mock` + `aa-viewer --mock` is the smoke test.
 - **Loss recovery:** viewer NACKs a frame it gave up on → host starts an
   intra-refresh cycle. No retransmission of video; by the time a retransmit
   arrives the frame is stale.
+- **Frame rate is the viewer's display refresh rate, locked.** The viewer
+  reports its refresh rate in the handshake; the host captures at exactly
+  that rate (both capture APIs accept a frame interval), so no frame is
+  encoded that nobody will see. If the host display is slower than the
+  viewer, the stream runs at the host's rate and the viewer shows each
+  frame for a whole number of refreshes (60 fps on a 240 Hz screen = 4
+  refreshes per frame, no judder). A monitor or mode change on either
+  side renegotiates mid-session.
 - **No jitter buffer.** A frame is decoded the instant its last slice
   arrives and presented at the next vsync. Smoothness comes from frame
   pacing in the presenter (stage 1, second commit), not from buffering.
