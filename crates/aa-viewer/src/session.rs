@@ -12,11 +12,23 @@ use bytes::{Bytes, BytesMut};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use crate::link::{FrameSlot, ViewerCommand};
+
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 const KEEPALIVE: Duration = Duration::from_millis(500);
 
 #[allow(clippy::too_many_lines)] // one select! loop; splitting it would hide the flow
-pub async fn run(host: SocketAddr, bind: SocketAddr, backends: ViewerBackends, test_input: bool) -> anyhow::Result<()> {
+/// Runs the whole session. `frames` receives decoded pictures (`None` in
+/// headless mode: decode and discard, print stats), `commands` carries
+/// input from the window.
+pub async fn run(
+    host: SocketAddr,
+    bind: SocketAddr,
+    backends: ViewerBackends,
+    frames: Option<FrameSlot>,
+    mut commands: mpsc::Receiver<ViewerCommand>,
+    test_input: bool,
+) -> anyhow::Result<()> {
     let socket = crate::udp::bind(bind)?;
     socket.connect(host).await?;
     tracing::info!("connecting to {host} from {}", socket.local_addr()?);
@@ -47,7 +59,9 @@ pub async fn run(host: SocketAddr, bind: SocketAddr, backends: ViewerBackends, t
 
     // --- decode thread -----------------------------------------------------
     let (frame_tx, frame_rx) = mpsc::channel::<CompleteFrame>(2);
-    std::thread::Builder::new().name("aa-decode".into()).spawn(move || decode_thread(decoder, frame_rx))?;
+    std::thread::Builder::new()
+        .name("aa-decode".into())
+        .spawn(move || decode_thread(decoder, frame_rx, frames.as_ref()))?;
 
     // --- main loop ---------------------------------------------------------
     let mut reassembler = Reassembler::default();
@@ -111,6 +125,27 @@ pub async fn run(host: SocketAddr, bind: SocketAddr, backends: ViewerBackends, t
                 }
             }
 
+            cmd = commands.recv() => {
+                match cmd {
+                    Some(ViewerCommand::Input(first)) => {
+                        // Coalesce everything already queued into one datagram.
+                        let mut batch = vec![first];
+                        while let Ok(ViewerCommand::Input(ev)) = commands.try_recv() {
+                            batch.push(ev);
+                            if batch.len() * InputEvent::MAX_ENCODED >= wire::MAX_PAYLOAD {
+                                break;
+                            }
+                        }
+                        send_input(&socket, &batch, &mut seq).await?;
+                    }
+                    Some(ViewerCommand::Quit) | None => {
+                        tracing::info!("window closed");
+                        send_control(&socket, &ControlMessage::Bye, &mut seq).await?;
+                        return Ok(());
+                    }
+                }
+            }
+
             _ = keepalive.tick() => {
                 // Ping doubles as keepalive so the host knows we're alive.
                 let mut out = BytesMut::with_capacity(wire::HEADER_LEN + 8);
@@ -146,13 +181,18 @@ pub async fn run(host: SocketAddr, bind: SocketAddr, backends: ViewerBackends, t
     }
 }
 
-fn decode_thread(mut decoder: Box<dyn VideoDecoder>, mut rx: mpsc::Receiver<CompleteFrame>) {
+fn decode_thread(
+    mut decoder: Box<dyn VideoDecoder>,
+    mut rx: mpsc::Receiver<CompleteFrame>,
+    frames: Option<&FrameSlot>,
+) {
     while let Some(frame) = rx.blocking_recv() {
         match decoder.decode(frame.frame_id, &frame.data) {
             Ok(Some(picture)) => {
-                // Next commit: hand `decoded` to the presenter. For now we just
-                // prove decode works and time it.
                 tracing::trace!(frame_id = picture.frame_id, ?picture.resolution, "decoded");
+                if let Some(slot) = frames {
+                    slot.publish(picture);
+                }
             }
             Ok(None) => {}
             Err(e) => tracing::warn!(frame_id = frame.frame_id, "decode failed: {e}"),

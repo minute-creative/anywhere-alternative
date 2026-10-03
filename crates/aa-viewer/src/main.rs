@@ -1,18 +1,21 @@
 //! `aa-viewer`: run on the machine you are sitting at.
 //!
-//! Stage 1 scope: connect to a host by IP, receive, reassemble and decode
-//! frames, send keyboard/mouse. Presentation (an actual window drawn with
-//! `wgpu`) is the next commit; this one proves the pipeline and prints
-//! live statistics once a second so we can measure before we draw.
-//!
 //! ```text
-//!  UDP ──► network task ──(complete frames)──► decode thread ──► [window: next commit]
-//!   ▲                                                              │
-//!   └──────────────(input events)──────────────────────────────────┘
+//!  main thread:   winit event loop ──► wgpu present      (window.rs)
+//!                      ▲  frames (latest-frame slot)   │ input events
+//!  tokio thread:  UDP ─┴─► reassemble ─► decode thread ◄┘  (session.rs)
 //! ```
+//!
+//! The window must live on the main thread (every OS insists), so the
+//! network session runs on its own tokio runtime in a background thread.
+//! `--headless` skips the window entirely and only prints statistics; CI
+//! and quick network checks use that.
 
+mod keymap;
+mod link;
 mod session;
 mod udp;
+mod window;
 
 use std::net::SocketAddr;
 
@@ -21,6 +24,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
+#[allow(clippy::struct_excessive_bools)] // CLI flags are bools by nature
 #[command(name = "aa-viewer", about = "Anywhere Alternative viewer", version)]
 struct Args {
     /// Host address, e.g. 192.168.1.20:7700
@@ -34,13 +38,20 @@ struct Args {
     #[arg(long)]
     mock: bool,
 
-    /// Send a synthetic mouse wiggle every second to exercise the input path.
+    /// No window: receive, decode, print stats once a second.
+    #[arg(long)]
+    headless: bool,
+
+    /// Open the window borderless-fullscreen on the current monitor.
+    #[arg(long)]
+    fullscreen: bool,
+
+    /// Headless only: send a synthetic mouse wiggle every second.
     #[arg(long)]
     test_input: bool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
@@ -53,5 +64,38 @@ async fn main() -> anyhow::Result<()> {
         aa_platform::viewer_backends().context("real viewer backends unavailable; try --mock")?
     };
 
-    session::run(args.host, args.bind, backends, args.test_input).await
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+    let (cmd_tx, cmd_rx) = link::command_channel();
+
+    if args.headless {
+        // Keep the sender alive: a closed command channel means "window closed".
+        let result = runtime.block_on(session::run(args.host, args.bind, backends, None, cmd_rx, args.test_input));
+        drop(cmd_tx);
+        return result;
+    }
+
+    let event_loop = window::build_event_loop()?;
+    let proxy = event_loop.create_proxy();
+    let frames = link::FrameSlot::new(move || {
+        let _ = proxy.send_event(window::Wake);
+    });
+
+    // Session on its own thread; if it ends (host gone, error), close the window.
+    let session_frames = frames.clone();
+    let session_proxy = event_loop.create_proxy();
+    let (host, bind) = (args.host, args.bind);
+    std::thread::Builder::new().name("aa-session".into()).spawn(move || {
+        let result = runtime.block_on(session::run(host, bind, backends, Some(session_frames), cmd_rx, false));
+        match result {
+            Ok(()) => tracing::info!("session ended"),
+            Err(e) => tracing::error!("session failed: {e:#}"),
+        }
+        // Waking an exited loop is harmless; this just nudges a redraw path
+        // that will find no new frames. The window stays open until closed.
+        let _ = session_proxy.send_event(window::Wake);
+    })?;
+
+    let mut app = window::App::new(format!("Anywhere — {}", args.host), args.fullscreen, frames, cmd_tx);
+    event_loop.run_app(&mut app)?;
+    Ok(())
 }

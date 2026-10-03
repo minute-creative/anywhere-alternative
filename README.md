@@ -9,8 +9,9 @@ reference for every design decision and the stage plan.
 ## Status
 
 **Stage 1 in progress.** The protocol core, platform abstraction and both
-binaries exist and stream end-to-end with the hardware-free mock pipeline.
-Real macOS capture/encode and the viewer window are the next commits.
+binaries exist and stream end-to-end with the hardware-free mock pipeline,
+including a real viewer window (`winit` + `wgpu`, vsync-locked) with
+keyboard and mouse forwarding. Real macOS capture/encode is next.
 
 ## Setup
 
@@ -55,7 +56,11 @@ Terminal 2:
 cargo run -p aa-viewer -- 127.0.0.1:7700 --mock
 ```
 
-You should see one line per second like:
+A window opens showing the host's moving colour test pattern; your mouse
+and keyboard inside it are sent to the host (the mock host just logs them;
+run it with `RUST_LOG=debug` to see). Add `--fullscreen` for borderless
+fullscreen. Add `--headless` instead to skip the window and print one stats
+line per second:
 
 ```
 stream fps=60 mbps=444.5 rtt_ms=1.57 assembly_ms=3.41 loss=0.00% dropped=0
