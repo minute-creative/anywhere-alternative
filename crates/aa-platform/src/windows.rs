@@ -10,13 +10,13 @@
 //! * `capture` — DXGI Desktop Duplication (`IDXGIOutputDuplication`),
 //!   `AcquireNextFrame` returns an `ID3D11Texture2D` per changed frame.
 //! * `encoder` — one module per vendor behind the same trait:
-//!   `nvenc` (NVIDIA Video Codec SDK), `amf` (AMD AMF), `qsv` (Intel oneVPL,
+//!   `nvenc` (NVIDIA Video Codec SDK), `amf` (AMD AMF), `qsv` (Intel `oneVPL`,
 //!   covers Arc and Core Ultra), and `mf` (Media Foundation, generic
 //!   fallback). The factory probes in that order and takes the first that
 //!   opens a session.
 //! * `input` — `SendInput` with `MOUSEEVENTF_ABSOLUTE` mapped to the virtual
 //!   desktop, and scan codes for keys.
-//! * `gamepad` — ViGEm bus: virtual DualShock 4 or Xbox 360 per user choice.
+//! * `gamepad` — `ViGEm` bus: virtual `DualShock` 4 or Xbox 360 per user choice.
 //!
 //! Crates: `windows` (COM/DXGI/D3D11/MF), `vigem-client`, vendor SDK FFI.
 
@@ -42,7 +42,7 @@ pub mod input {
 }
 
 pub mod gamepad {
-    //! ViGEm virtual controller.
+    //! `ViGEm` virtual controller.
 }
 
 pub fn probe_capabilities() -> Capabilities {

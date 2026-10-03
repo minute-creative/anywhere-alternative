@@ -1,9 +1,9 @@
-//! macOS backends. Stage 1 fills these in, in this order:
+//! `macOS` backends. Stage 1 fills these in, in this order:
 //!
-//! 1. `capture`  — ScreenCaptureKit (`SCStream`) delivering `CMSampleBuffer`s
+//! 1. `capture`  — `ScreenCaptureKit` (`SCStream`) delivering `CMSampleBuffer`s
 //!    backed by `IOSurface`, at the display's native refresh rate. Needs the
 //!    Screen Recording permission (System Settings → Privacy & Security).
-//! 2. `encoder`  — VideoToolbox `VTCompressionSession` fed the same
+//! 2. `encoder`  — `VideoToolbox` `VTCompressionSession` fed the same
 //!    `IOSurface` with zero copies. Properties that matter for latency:
 //!    `RealTime = true`, `AllowFrameReordering = false` (no B-frames),
 //!    `MaxKeyFrameInterval` large + intra-refresh where supported,
@@ -11,11 +11,11 @@
 //! 3. `input`    — `CGEventCreateMouseEvent` / `CGEventCreateKeyboardEvent`
 //!    posted with `CGEventPost(kCGHIDEventTap)`. Needs the Accessibility
 //!    permission.
-//! 4. `decoder`  — VideoToolbox `VTDecompressionSession` → `CVPixelBuffer`
-//!    (IOSurface-backed) → Metal texture for presentation.
+//! 4. `decoder`  — `VideoToolbox` `VTDecompressionSession` → `CVPixelBuffer`
+//!    (`IOSurface`-backed) → Metal texture for presentation.
 //! 5. `gamepad`  — the week-one spike: a user-space virtual HID device via
-//!    IOKit (`IOHIDUserDevice`). If that needs an entitlement we don't have,
-//!    fall back to a DriverKit `IOUserHIDDevice` extension.
+//!    `IOKit` (`IOHIDUserDevice`). If that needs an entitlement we don't have,
+//!    fall back to a `DriverKit` `IOUserHIDDevice` extension.
 //!
 //! Crates we will use: `objc2`, `objc2-screen-capture-kit`,
 //! `objc2-video-toolbox`, `objc2-core-media`, `core-graphics`, `io-kit-sys`.
@@ -26,19 +26,19 @@ use aa_core::video::{Codec, ColorRange, Resolution};
 use crate::{HostBackends, PlatformError, Result, ViewerBackends};
 
 pub mod capture {
-    //! ScreenCaptureKit backend. See module docs in `macos.rs`.
+    //! `ScreenCaptureKit` backend. See module docs in `macos.rs`.
 }
 
 pub mod encoder {
-    //! VideoToolbox encoder backend.
+    //! `VideoToolbox` encoder backend.
 }
 
 pub mod decoder {
-    //! VideoToolbox decoder backend.
+    //! `VideoToolbox` decoder backend.
 }
 
 pub mod input {
-    //! CGEvent input injection.
+    //! `CGEvent` input injection.
 }
 
 pub mod gamepad {
