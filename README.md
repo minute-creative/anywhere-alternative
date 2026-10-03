@@ -12,7 +12,8 @@ reference for every design decision and the stage plan.
 binaries exist and stream end-to-end with the hardware-free mock pipeline,
 including a real viewer window (`winit` + `wgpu`, vsync-locked) with
 keyboard and mouse forwarding, and real H.264 video via the software
-codec (OpenH264). Real screen capture (Windows first, then macOS) is next.
+codec (OpenH264). **Windows can host its real screen** (DXGI Desktop
+Duplication + `SendInput`, software-encoded for now). macOS capture is next.
 
 ## Setup
 
@@ -69,6 +70,24 @@ stream fps=60 mbps=444.5 rtt_ms=1.57 assembly_ms=3.41 loss=0.00% dropped=0
 
 The mock host streams real H.264 (software-encoded). To send raw pixels
 instead for pipeline debugging, pass `--mock-raw` to **both** sides.
+
+## Real screen (Windows host)
+
+On the Windows PC:
+
+```powershell
+cargo run --release -p aa-host
+```
+
+On the viewing machine (Windows or Mac; use the host's LAN IP):
+
+```powershell
+cargo run --release -p aa-viewer -- 192.168.x.x:7700
+```
+
+Viewing the host from *itself* works for a quick look (you'll see the
+infinite-mirror effect) but mouse moves inside the viewer window will move
+the real cursor, which fights you. A second machine is the real test.
 
 To measure how fast this machine can encode (software codec for now):
 

@@ -24,6 +24,7 @@ use aa_core::input::{InputEvent, Rumble};
 use aa_core::video::{EncodedFrameMeta, PixelFormat, Resolution};
 use bytes::Bytes;
 
+pub mod hid_scancode;
 pub mod mock;
 pub mod sw;
 

@@ -63,5 +63,8 @@ pub fn host_backends() -> Result<HostBackends> {
 }
 
 pub fn viewer_backends() -> Result<ViewerBackends> {
-    Err(PlatformError::NotImplemented("macOS viewer backends (stage 1)"))
+    // Software decode until the VideoToolbox decoder lands.
+    let mut capabilities = probe_capabilities();
+    capabilities.codecs = vec![Codec::H264];
+    Ok(ViewerBackends { decoder: Box::new(crate::sw::SwDecoder::new()?), capabilities })
 }
