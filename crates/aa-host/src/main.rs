@@ -47,11 +47,34 @@ struct Args {
     /// Mock capture frame rate.
     #[arg(long, default_value_t = 60)]
     mock_fps: u16,
+
+    /// With --mock: send raw pixels instead of H.264 (pipeline debugging only).
+    #[arg(long)]
+    mock_raw: bool,
+
+    /// Measure encoder throughput on this machine and exit.
+    #[arg(long)]
+    bench: bool,
 }
 
 fn parse_resolution(s: &str) -> Result<Resolution, String> {
     let (w, h) = s.split_once('x').ok_or_else(|| "expected WxH".to_string())?;
     Ok(Resolution::new(w.parse().map_err(|e| format!("{e}"))?, h.parse().map_err(|e| format!("{e}"))?))
+}
+
+/// Encoder throughput at common resolutions. Software only until hardware
+/// backends exist; then each backend reports its own line.
+fn bench() -> anyhow::Result<()> {
+    println!("encoder throughput (software H.264, synthetic moving picture):");
+    for (name, res) in [
+        ("1080p", Resolution::new(1920, 1080)),
+        ("1440p", Resolution::new(2560, 1440)),
+        ("4K", Resolution::new(3840, 2160)),
+    ] {
+        let fps = aa_platform::sw::bench_encoder(res, 60)?;
+        println!("  {name:>6}: {fps:6.1} fps  ({:.2} ms/frame)", 1000.0 / fps);
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -61,9 +84,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
 
+    if args.bench {
+        return bench();
+    }
+
     let backends = if args.mock {
         tracing::warn!("using MOCK backends: test pattern, no real screen");
-        aa_platform::mock::host_backends(args.mock_res, args.mock_fps)
+        aa_platform::mock::host_backends(args.mock_res, args.mock_fps, args.mock_raw)?
     } else {
         aa_platform::host_backends().context("real host backends unavailable; try --mock")?
     };

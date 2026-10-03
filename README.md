@@ -11,7 +11,8 @@ reference for every design decision and the stage plan.
 **Stage 1 in progress.** The protocol core, platform abstraction and both
 binaries exist and stream end-to-end with the hardware-free mock pipeline,
 including a real viewer window (`winit` + `wgpu`, vsync-locked) with
-keyboard and mouse forwarding. Real macOS capture/encode is next.
+keyboard and mouse forwarding, and real H.264 video via the software
+codec (OpenH264). Real screen capture (Windows first, then macOS) is next.
 
 ## Setup
 
@@ -66,8 +67,14 @@ line per second:
 stream fps=60 mbps=444.5 rtt_ms=1.57 assembly_ms=3.41 loss=0.00% dropped=0
 ```
 
-The mock codec sends raw pixels (no compression), so the bitrate is huge;
-that is expected. It exists to test the pipeline, not to be used.
+The mock host streams real H.264 (software-encoded). To send raw pixels
+instead for pipeline debugging, pass `--mock-raw` to **both** sides.
+
+To measure how fast this machine can encode (software codec for now):
+
+```sh
+cargo run --release -p aa-host -- --bench
+```
 
 Across two machines on the same LAN: run the host with
 `--listen 0.0.0.0:7700` and give the viewer the host's LAN IP.

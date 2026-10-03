@@ -30,6 +30,7 @@ winit = "0.30"
 wgpu = "30"
 pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
+openh264 = "0.9"
 
 # Internal crates
 aa-core = { path = "crates/aa-core" }

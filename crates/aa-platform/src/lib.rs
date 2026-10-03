@@ -25,6 +25,7 @@ use aa_core::video::{EncodedFrameMeta, PixelFormat, Resolution};
 use bytes::Bytes;
 
 pub mod mock;
+pub mod sw;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

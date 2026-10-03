@@ -195,18 +195,29 @@ fn mock_capabilities(res: Resolution, fps: u16) -> Capabilities {
     }
 }
 
-pub fn host_backends(res: Resolution, fps: u16) -> HostBackends {
-    HostBackends {
+/// Mock host. `raw = true` uses the passthrough codec (huge, lossless, for
+/// pipeline debugging); otherwise the software H.264 encoder, which is what
+/// you want for anything resembling a real test.
+pub fn host_backends(res: Resolution, fps: u16, raw: bool) -> crate::Result<HostBackends> {
+    let encoder: Box<dyn VideoEncoder> = if raw {
+        Box::new(MockEncoder::default())
+    } else {
+        let kbps = aa_core::config::StreamConfig::suggested_bitrate_kbps(res, fps);
+        Box::new(crate::sw::SwEncoder::new(res, fps, kbps)?)
+    };
+    Ok(HostBackends {
         capture: Box::new(MockCapture::new(res, fps)),
-        encoder: Box::new(MockEncoder::default()),
+        encoder,
         input: Box::new(MockInput::default()),
         gamepad: Some(Box::new(MockGamepad::default())),
         capabilities: mock_capabilities(res, fps),
-    }
+    })
 }
 
-pub fn viewer_backends() -> ViewerBackends {
-    ViewerBackends { decoder: Box::new(MockDecoder), capabilities: mock_capabilities(Resolution::new(7680, 4320), 240) }
+pub fn viewer_backends(raw: bool) -> crate::Result<ViewerBackends> {
+    let decoder: Box<dyn VideoDecoder> =
+        if raw { Box::new(MockDecoder) } else { Box::new(crate::sw::SwDecoder::new()?) };
+    Ok(ViewerBackends { decoder, capabilities: mock_capabilities(Resolution::new(7680, 4320), 240) })
 }
 
 #[cfg(test)]

@@ -38,6 +38,10 @@ struct Args {
     #[arg(long)]
     mock: bool,
 
+    /// With --mock: expect raw pixels instead of H.264 (pairs with host --mock-raw).
+    #[arg(long)]
+    mock_raw: bool,
+
     /// No window: receive, decode, print stats once a second.
     #[arg(long)]
     headless: bool,
@@ -59,7 +63,7 @@ fn main() -> anyhow::Result<()> {
 
     let backends = if args.mock {
         tracing::warn!("using MOCK decoder");
-        aa_platform::mock::viewer_backends()
+        aa_platform::mock::viewer_backends(args.mock_raw)?
     } else {
         aa_platform::viewer_backends().context("real viewer backends unavailable; try --mock")?
     };

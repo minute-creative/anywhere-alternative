@@ -38,6 +38,8 @@ impl Codec {
 pub enum PixelFormat {
     /// 8-bit BGRA, what Desktop Duplication and `ScreenCaptureKit` hand out by default.
     Bgra8,
+    /// 8-bit RGBA, what the software decoder produces.
+    Rgba8,
     /// 8-bit 4:2:0 semi-planar; what every hardware encoder actually wants.
     Nv12,
     /// 10-bit 4:2:0 semi-planar; required for HDR.

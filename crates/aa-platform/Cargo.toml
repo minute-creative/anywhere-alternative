@@ -12,6 +12,9 @@ anyhow.workspace = true
 thiserror.workspace = true
 bytes.workspace = true
 tracing.workspace = true
+# Software H.264 (Cisco OpenH264, built from source). The universal fallback
+# codec and the encoder the mock host uses so the stream is real video.
+openh264.workspace = true
 
 # Real backends are added per stage. Each one is its own module behind
 # `#[cfg(target_os)]` and, where it needs a vendor SDK, its own feature flag:

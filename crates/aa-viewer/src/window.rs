@@ -182,19 +182,23 @@ impl Gpu {
             tracing::warn!("GPU frame buffers not wired to the presenter yet");
             return;
         };
-        if frame.format != PixelFormat::Bgra8 {
-            tracing::warn!(?frame.format, "presenter only handles BGRA8 CPU frames for now");
-            return;
-        }
+        let tex_format = match frame.format {
+            PixelFormat::Bgra8 => wgpu::TextureFormat::Bgra8Unorm,
+            PixelFormat::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
+            other => {
+                tracing::warn!(?other, "presenter only handles 8-bit RGBA/BGRA CPU frames for now");
+                return;
+            }
+        };
         let res = frame.resolution;
-        if !self.frame.as_ref().is_some_and(|(_, _, r)| *r == res) {
+        if !self.frame.as_ref().is_some_and(|(t, _, r)| *r == res && t.format() == tex_format) {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("frame"),
                 size: wgpu::Extent3d { width: res.width, height: res.height, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Bgra8Unorm,
+                format: tex_format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
