@@ -10,8 +10,9 @@
 //! (`DXGI_ERROR_ACCESS_LOST`) on mode changes, UAC prompts and lock screens;
 //! we recreate the duplication and carry on.
 
-// FFI code: the pedantic cast/pointer lints add noise here, not safety.
-#![allow(clippy::pedantic)]
+// FFI code: `unsafe` is the point here, each block carries a SAFETY note;
+// the pedantic cast/pointer lints add noise, not safety.
+#![allow(unsafe_code, clippy::pedantic)]
 
 use std::time::{Duration, Instant};
 

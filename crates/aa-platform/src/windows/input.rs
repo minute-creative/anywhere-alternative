@@ -7,8 +7,9 @@
 //! desktop rectangle. Keys are sent as scan codes so games that read raw
 //! input see the right physical key regardless of layout.
 
-// FFI code: the pedantic cast/pointer lints add noise here, not safety.
-#![allow(clippy::pedantic)]
+// FFI code: `unsafe` is the point here, each block carries a SAFETY note;
+// the pedantic cast/pointer lints add noise, not safety.
+#![allow(unsafe_code, clippy::pedantic)]
 
 use aa_core::input::{InputEvent, MouseButton};
 use windows::Win32::Foundation::RECT;

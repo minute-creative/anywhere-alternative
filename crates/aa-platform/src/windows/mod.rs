@@ -23,7 +23,7 @@ use aa_core::capability::Capabilities;
 use aa_core::config::StreamConfig;
 use aa_core::video::{Codec, ColorRange, Resolution};
 
-use crate::{HostBackends, Result, ViewerBackends};
+use crate::{HostBackends, Result, ScreenCapture, ViewerBackends};
 
 pub fn host_backends() -> Result<HostBackends> {
     let cap = capture::DxgiCapture::new(0)?;
