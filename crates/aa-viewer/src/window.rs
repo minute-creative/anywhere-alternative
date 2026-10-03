@@ -53,14 +53,17 @@ impl VideoRect {
         Self { x: (ww - w) * 0.5, y: (wh - h) * 0.5, w, h }
     }
 
-    /// Window position → 0..=65535 across the video, or `None` if outside.
+    /// Window position → 0..=65535 across the video, or `None` if the
+    /// cursor is on the letterbox bars. Half a pixel of tolerance at the
+    /// edges absorbs float rounding in the fit, then the value is clamped.
     fn normalise(&self, px: f64, py: f64) -> Option<(u16, u16)> {
         let nx = (px as f32 - self.x) / self.w;
         let ny = (py as f32 - self.y) / self.h;
-        if !(0.0..=1.0).contains(&nx) || !(0.0..=1.0).contains(&ny) {
+        let (tx, ty) = (0.5 / self.w, 0.5 / self.h);
+        if nx < -tx || nx > 1.0 + tx || ny < -ty || ny > 1.0 + ty {
             return None;
         }
-        Some(((nx * 65535.0) as u16, (ny * 65535.0) as u16))
+        Some(((nx.clamp(0.0, 1.0) * 65535.0) as u16, (ny.clamp(0.0, 1.0) * 65535.0) as u16))
     }
 }
 
@@ -428,7 +431,7 @@ mod tests {
         assert!((r.w - 1000.0).abs() < 0.01);
         assert!((r.h - 562.5).abs() < 0.01);
         assert!((r.y - 218.75).abs() < 0.01);
-        assert!(r.x.abs() < f32::EPSILON);
+        assert!(r.x.abs() < 0.01);
     }
 
     #[test]
