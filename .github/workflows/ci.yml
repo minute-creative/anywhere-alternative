@@ -5,8 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: write
+
 env:
-  CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: never
   RUSTFLAGS: -D warnings
 
 jobs:
@@ -17,13 +20,46 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets
-      - run: cargo test
-      - run: cargo build --release
+
+      - name: fmt
+        run: cargo fmt --all -- --check 2>&1 | tee fmt.log; exit ${PIPESTATUS[0]}
+      - name: clippy
+        run: cargo clippy --all-targets 2>&1 | tee clippy.log; exit ${PIPESTATUS[0]}
+      - name: test
+        run: cargo test 2>&1 | tee test.log; exit ${PIPESTATUS[0]}
+      - name: build release
+        run: cargo build --release 2>&1 | tee build.log; exit ${PIPESTATUS[0]}
+
+      # The logs blob store is not reachable from everywhere; a commit
+      # comment is. On failure, post the interesting lines so they can be
+      # read through the API.
+      - name: report failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### CI failed on \`${{ matrix.os }}\`"
+            for f in fmt.log clippy.log test.log build.log; do
+              [ -f "$f" ] || continue
+              if grep -qE "^(error|warning)|FAILED|panicked|Diff in" "$f"; then
+                echo
+                echo "<details><summary>$f</summary>"
+                echo
+                echo '```'
+                grep -nE "^(error|warning)(\[|:)|^\s+-->|^\s+\|.*\^|FAILED|panicked|Diff in" "$f" | head -150
+                echo '```'
+                echo "</details>"
+              fi
+            done
+          } > comment.md
+          gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@comment.md >/dev/null
