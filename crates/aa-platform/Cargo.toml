@@ -1,0 +1,26 @@
+[package]
+name = "aa-platform"
+description = "OS-specific backends (capture, encode, decode, input) behind portable traits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aa-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+
+# Real backends are added per stage. Each one is its own module behind
+# `#[cfg(target_os)]` and, where it needs a vendor SDK, its own feature flag:
+#
+# [target.'cfg(target_os = "macos")'.dependencies]
+# objc2-screen-capture-kit, objc2-video-toolbox, core-graphics ...
+#
+# [target.'cfg(target_os = "windows")'.dependencies]
+# windows (DXGI, D3D11, Media Foundation), vigem-client ...
+
+[lints]
+workspace = true

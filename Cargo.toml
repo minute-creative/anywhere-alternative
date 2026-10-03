@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aa-core",
+    "crates/aa-platform",
+    "crates/aa-host",
+    "crates/aa-viewer",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/<your-username>/anywhere-alternative"
+
+[workspace.dependencies]
+# Shared, version-pinned once here so every crate agrees.
+anyhow = "1"
+thiserror = "2"
+bytes = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+socket2 = "0.6"
+
+# Internal crates
+aa-core = { path = "crates/aa-core" }
+aa-platform = { path = "crates/aa-platform" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Pedantic lints we deliberately turn off for a media pipeline:
+module_name_repetitions = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# Latency-sensitive software: keep release builds fully optimised and
+# make debug builds fast enough to actually test video with.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 1            # keep line tables so crash reports are readable
+
+[profile.dev]
+opt-level = 1        # debug builds that can still push 60 fps
+
+[profile.dev.package."*"]
+opt-level = 3        # dependencies (codecs, crypto) always optimised
