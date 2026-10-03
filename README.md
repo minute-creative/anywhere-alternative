@@ -33,7 +33,7 @@ cargo --version
 ### Both
 
 ```sh
-git clone https://github.com/<your-username>/anywhere-alternative
+git clone https://github.com/minute-creative/anywhere-alternative
 cd anywhere-alternative
 cargo build
 ```
