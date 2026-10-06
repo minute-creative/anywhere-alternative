@@ -21,8 +21,21 @@ opus.workspace = true
 # Real backends are added per stage. Each one is its own module behind
 # `#[cfg(target_os)]` and, where it needs a vendor SDK, its own feature flag.
 #
-# [target.'cfg(target_os = "macos")'.dependencies]
-# objc2-screen-capture-kit, objc2-video-toolbox, core-graphics ...
+[target.'cfg(target_os = "macos")'.dependencies]
+# Apple framework bindings (generated from the SDK headers). Only the
+# pieces the decoder uses are enabled; defaults pull in far more.
+objc2-video-toolbox = { version = "0.3", default-features = false, features = [
+    "std", "VTDecompressionSession", "VTErrors", "objc2-core-media", "objc2-core-video",
+] }
+objc2-core-media = { version = "0.3", default-features = false, features = [
+    "std", "CMFormatDescription", "CMSampleBuffer", "CMBlockBuffer", "CMTime", "CMBase",
+] }
+objc2-core-video = { version = "0.3", default-features = false, features = [
+    "std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std", "CFBase", "CFDictionary", "CFNumber", "CFString",
+] }
 
 # Audio playback. cpal needs ALSA headers on Linux, which CI/dev containers
 # may lack, and we never ship a Linux viewer, so it is Mac/Windows only.

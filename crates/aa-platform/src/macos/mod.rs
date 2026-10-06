@@ -33,9 +33,7 @@ pub mod encoder {
     //! `VideoToolbox` encoder backend.
 }
 
-pub mod decoder {
-    //! `VideoToolbox` decoder backend.
-}
+pub mod decoder;
 
 pub mod input {
     //! `CGEvent` input injection.
@@ -63,8 +61,18 @@ pub fn host_backends() -> Result<HostBackends> {
 }
 
 pub fn viewer_backends() -> Result<ViewerBackends> {
-    // Software decode until the VideoToolbox decoder lands.
     let mut capabilities = probe_capabilities();
+    // The decoder handles HEVC too, but the Windows host does not encode it
+    // yet; advertise it once that exists so negotiation can pick it.
     capabilities.codecs = vec![Codec::H264];
-    Ok(ViewerBackends { decoder: Box::new(crate::sw::SwDecoder::new()?), capabilities })
+    match decoder::VtDecoder::new(Codec::H264) {
+        Ok(d) => {
+            tracing::info!("viewer decoder: VideoToolbox (hardware)");
+            Ok(ViewerBackends { decoder: Box::new(d), capabilities })
+        }
+        Err(e) => {
+            tracing::warn!("VideoToolbox unavailable ({e}); using software decode");
+            Ok(ViewerBackends { decoder: Box::new(crate::sw::SwDecoder::new()?), capabilities })
+        }
+    }
 }
