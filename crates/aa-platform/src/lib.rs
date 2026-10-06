@@ -24,6 +24,7 @@ use aa_core::input::{InputEvent, Rumble};
 use aa_core::video::{EncodedFrameMeta, PixelFormat, Resolution};
 use bytes::Bytes;
 
+pub mod audio;
 pub mod hid_scancode;
 pub mod mock;
 pub mod sw;
@@ -137,6 +138,8 @@ pub struct HostBackends {
     pub encoder: Box<dyn VideoEncoder>,
     pub input: Box<dyn InputInjector>,
     pub gamepad: Option<Box<dyn VirtualGamepad>>,
+    /// System-audio source; `None` on platforms without one yet.
+    pub audio: Option<Box<dyn audio::AudioCapture>>,
     pub capabilities: Capabilities,
 }
 

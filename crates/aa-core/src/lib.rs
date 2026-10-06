@@ -16,6 +16,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod audio;
 pub mod capability;
 pub mod config;
 pub mod control;

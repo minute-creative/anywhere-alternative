@@ -88,6 +88,76 @@ pub fn capture_thread(
     tracing::info!("capture thread exiting");
 }
 
+/// Encoded audio packet ready for the wire (header + opus payload).
+#[derive(Debug)]
+pub struct AudioPacket {
+    pub data: bytes::Bytes,
+}
+
+/// Captures system audio, encodes 10 ms Opus frames, hands them to the
+/// sender. Silent frames are not sent at all. Runs on its own OS thread
+/// because WASAPI waits are blocking.
+pub fn audio_thread(
+    mut capture: Box<dyn aa_platform::audio::AudioCapture>,
+    ctl: &PipelineControl,
+    tx: &mpsc::Sender<AudioPacket>,
+) {
+    use aa_core::audio::{AudioHeader, DEFAULT_BITRATE, HEADER_LEN};
+    use aa_platform::audio::{OpusEncoder, FRAME_LEN_I16};
+    use bytes::BufMut;
+
+    let mut encoder = match OpusEncoder::new(DEFAULT_BITRATE) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!("audio encoder unavailable: {e}");
+            return;
+        }
+    };
+    let mut pcm = vec![0i16; FRAME_LEN_I16];
+    let mut frame_no: u16 = 0;
+    let started = std::time::Instant::now();
+    let mut failures = 0u32;
+
+    while !ctl.shutdown.load(Ordering::Relaxed) {
+        if !ctl.streaming.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        let has_sound = match capture.next_frame(&mut pcm) {
+            Ok(s) => s,
+            Err(e) => {
+                failures += 1;
+                if failures == 1 || failures % 100 == 0 {
+                    tracing::warn!(failures, "audio capture failed: {e}");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+        };
+        failures = 0;
+        if !has_sound {
+            // Keep the sequence contiguous so the player doesn't conceal
+            // "losses" that were silence; it simply gets nothing to play.
+            continue;
+        }
+        let payload = match encoder.encode(&pcm) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("audio encode failed: {e}");
+                continue;
+            }
+        };
+        let mut buf = bytes::BytesMut::with_capacity(HEADER_LEN + payload.len());
+        AudioHeader { ts_ms: started.elapsed().as_millis() as u32, frame_no }.write(&mut buf);
+        buf.put_slice(payload);
+        frame_no = frame_no.wrapping_add(1);
+        if tx.try_send(AudioPacket { data: buf.freeze() }).is_err() {
+            tracing::trace!("audio queue full; dropping frame");
+        }
+    }
+    tracing::info!("audio thread exiting");
+}
+
 /// Applies input events in order on its own thread. Gamepad events are
 /// routed to the virtual pad when one exists, everything else to the injector.
 pub fn input_thread(

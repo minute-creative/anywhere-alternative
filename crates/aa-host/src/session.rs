@@ -32,7 +32,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     let socket = Arc::new(crate::udp::bind(listen)?);
     tracing::info!("listening on {}", socket.local_addr()?);
 
-    let HostBackends { capture, encoder, input, gamepad, capabilities } = backends;
+    let HostBackends { capture, encoder, input, gamepad, audio, capabilities } = backends;
 
     let ctl = Arc::new(PipelineControl::default());
     // A few frames of slack: sending a 250-packet keyframe over Wi-Fi takes
@@ -41,6 +41,8 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     // viewer's latest-frame slot, which always shows the newest.
     let (frame_tx, frame_rx) = mpsc::channel::<EncodedFrame>(6);
     let (input_tx, input_rx) = mpsc::channel::<InputEvent>(256);
+    // Audio: ~100 packets/s; 32 deep is a third of a second of slack.
+    let (audio_tx, audio_rx) = mpsc::channel::<pipeline::AudioPacket>(32);
     // Who to send video to. Written by the receive loop, read by the sender
     // task. Pacing a frame takes most of a frame interval, so sending must
     // never run inside the receive loop or incoming packets starve (which
@@ -54,6 +56,14 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     std::thread::Builder::new()
         .name("aa-input".into())
         .spawn(move || pipeline::input_thread(input, gamepad, input_rx))?;
+    if let Some(audio) = audio {
+        let audio_ctl = Arc::clone(&ctl);
+        std::thread::Builder::new()
+            .name("aa-audio".into())
+            .spawn(move || pipeline::audio_thread(audio, &audio_ctl, &audio_tx))?;
+    } else {
+        drop(audio_tx);
+    }
 
     let mut viewer: Option<Viewer> = None;
     let seq = Arc::new(SeqCounter::default());
@@ -67,7 +77,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     {
         let socket = Arc::clone(&socket);
         let video_dest = Arc::clone(&video_dest);
-        tokio::spawn(sender_task(socket, frame_rx, video_dest, pacer, fps, Arc::clone(&seq)));
+        tokio::spawn(sender_task(socket, frame_rx, audio_rx, video_dest, pacer, fps, Arc::clone(&seq)));
     }
     let mut buf = vec![0u8; wire::MAX_DATAGRAM * 2];
     let mut housekeeping = tokio::time::interval(Duration::from_secs(1));
@@ -240,12 +250,34 @@ async fn handle_packet(
 async fn sender_task(
     socket: Arc<UdpSocket>,
     mut frame_rx: mpsc::Receiver<EncodedFrame>,
+    mut audio_rx: mpsc::Receiver<pipeline::AudioPacket>,
     video_dest: Arc<std::sync::Mutex<Option<SocketAddr>>>,
     pacer: Pacer,
     fps: u16,
     seq: Arc<SeqCounter>,
 ) {
-    while let Some(frame) = frame_rx.recv().await {
+    let mut audio_open = true;
+    loop {
+        let frame = tokio::select! {
+            f = frame_rx.recv() => match f { Some(f) => f, None => break },
+            a = audio_rx.recv(), if audio_open => {
+                match a {
+                    Some(pkt) => {
+                        let dest = *video_dest.lock().expect("dest");
+                        if let Some(dest) = dest {
+                            let mut out = BytesMut::with_capacity(wire::HEADER_LEN + pkt.data.len());
+                            Header { kind: Kind::Audio, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }.write(&mut out);
+                            out.extend_from_slice(&pkt.data);
+                            if let Err(e) = socket.send_to(&out, dest).await {
+                                tracing::warn!("audio send failed: {e}");
+                            }
+                        }
+                    }
+                    None => audio_open = false,
+                }
+                continue;
+            }
+        };
         let Some(dest) = *video_dest.lock().expect("dest") else { continue };
         let slices = match wire::slice_frame(&frame.data, frame.meta.frame_id, frame.meta.is_keyframe, &seq) {
             Ok(s) => s,

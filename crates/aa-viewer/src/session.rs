@@ -88,6 +88,7 @@ pub async fn run(
     let mut last_nack: Option<Instant> = None;
     let mut bytes_this_second = 0usize;
     let mut wiggle = 0u16;
+    let mut audio = crate::audio::AudioSink::new();
 
     loop {
         tokio::select! {
@@ -134,6 +135,7 @@ pub async fn run(
                             last_nack = Some(Instant::now());
                         }
                     }
+                    Kind::Audio => audio.handle(packet.payload),
                     Kind::Pong => {
                         if packet.payload.len() >= 8 {
                             let sent = u64::from_be_bytes(packet.payload[..8].try_into().expect("8 bytes"));

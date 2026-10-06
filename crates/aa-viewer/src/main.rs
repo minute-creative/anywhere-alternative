@@ -11,6 +11,7 @@
 //! `--headless` skips the window entirely and only prints statistics; CI
 //! and quick network checks use that.
 
+mod audio;
 mod keymap;
 mod link;
 mod overlay;

@@ -15,6 +15,7 @@
 //! Viewer: software decoder until the Media Foundation / D3D11 decoder
 //! lands.
 
+pub mod audio;
 pub mod capture;
 pub mod encoder;
 pub mod input;
@@ -91,11 +92,19 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
     codecs.dedup();
 
     let input = input::SendInputInjector::new(desktop_rect)?;
+    let audio: Option<Box<dyn crate::audio::AudioCapture>> = match audio::WasapiLoopback::new() {
+        Ok(a) => Some(Box::new(a)),
+        Err(e) => {
+            tracing::warn!("system audio capture unavailable ({e}); streaming without sound");
+            None
+        }
+    };
     Ok(HostBackends {
         capture: Box::new(cap),
         encoder,
         input: Box::new(input),
         gamepad: None,
+        audio,
         capabilities: Capabilities {
             codecs,
             max_resolution: res,

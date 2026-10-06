@@ -15,12 +15,19 @@ tracing.workspace = true
 # Software H.264 (Cisco OpenH264, built from source). The universal fallback
 # codec and the encoder the mock host uses so the stream is real video.
 openh264.workspace = true
+# Opus (bundled C source via cmake) for audio on every platform.
+opus.workspace = true
 
 # Real backends are added per stage. Each one is its own module behind
 # `#[cfg(target_os)]` and, where it needs a vendor SDK, its own feature flag.
 #
 # [target.'cfg(target_os = "macos")'.dependencies]
 # objc2-screen-capture-kit, objc2-video-toolbox, core-graphics ...
+
+# Audio playback. cpal needs ALSA headers on Linux, which CI/dev containers
+# may lack, and we never ship a Linux viewer, so it is Mac/Windows only.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+cpal.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [
@@ -33,6 +40,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_HiDpi",
+    "Win32_Media_Audio",
+    "Win32_System_Threading",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
