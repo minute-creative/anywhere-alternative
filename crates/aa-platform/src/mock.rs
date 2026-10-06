@@ -211,6 +211,7 @@ pub fn host_backends(res: Resolution, fps: u16, raw: bool) -> crate::Result<Host
         input: Box::new(MockInput::default()),
         gamepad: Some(Box::new(MockGamepad::default())),
         audio: None,
+        speaker: None,
         capabilities: mock_capabilities(res, fps),
     })
 }

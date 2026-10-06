@@ -19,6 +19,8 @@ pub enum ViewerCommand {
     Input(InputEvent),
     /// User changed the bitrate cap in the overlay (kbps).
     SetMaxBitrate(u32),
+    /// User toggled "mute PC speakers" in the overlay.
+    SetHostMute(bool),
     /// The window closed; send `Bye` and exit.
     Quit,
 }

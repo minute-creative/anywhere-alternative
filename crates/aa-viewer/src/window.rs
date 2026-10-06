@@ -392,6 +392,9 @@ impl App {
             let kbps = (self.settings.max_mbps * 1000.0) as u32;
             let _ = self.commands.try_send(ViewerCommand::SetMaxBitrate(kbps));
         }
+        if self.settings.mute_host != self.applied.mute_host {
+            let _ = self.commands.try_send(ViewerCommand::SetHostMute(self.settings.mute_host));
+        }
         self.applied = self.settings;
     }
 

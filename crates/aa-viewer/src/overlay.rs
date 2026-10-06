@@ -13,17 +13,20 @@ use winit::window::Window;
 
 /// What the user can change at runtime.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // it is a settings panel; these are checkboxes
 pub struct Settings {
     pub fullscreen: bool,
     pub stretch: bool,
     /// Bitrate ceiling the host may use, in Mbps.
     pub max_mbps: f32,
     pub show_stats: bool,
+    /// Silence the host PC's own speakers while we stream.
+    pub mute_host: bool,
 }
 
 impl Settings {
     pub const fn new(fullscreen: bool, stretch: bool) -> Self {
-        Self { fullscreen, stretch, max_mbps: 40.0, show_stats: true }
+        Self { fullscreen, stretch, max_mbps: 40.0, show_stats: true, mute_host: false }
     }
 }
 
@@ -159,6 +162,9 @@ impl Overlay {
                     ui.heading("Stream");
                     ui.add(egui::Slider::new(&mut settings.max_mbps, 2.0..=100.0).text("Max Mbps").logarithmic(true));
                     ui.checkbox(&mut settings.show_stats, "Show stats");
+                    ui.add_space(8.0);
+                    ui.heading("Audio");
+                    ui.checkbox(&mut settings.mute_host, "Mute PC speakers (sound plays here only)");
                     ui.add_space(8.0);
                     ui.monospace(format!(
                         "{} fps  {:.1} Mbps  {:.0} ms RTT  {:.1}% loss",

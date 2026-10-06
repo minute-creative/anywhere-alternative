@@ -140,6 +140,8 @@ pub struct HostBackends {
     pub gamepad: Option<Box<dyn VirtualGamepad>>,
     /// System-audio source; `None` on platforms without one yet.
     pub audio: Option<Box<dyn audio::AudioCapture>>,
+    /// Host speaker mute; `None` where not implemented.
+    pub speaker: Option<Box<dyn audio::SpeakerControl>>,
     pub capabilities: Capabilities,
 }
 

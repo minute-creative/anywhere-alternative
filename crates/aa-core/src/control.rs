@@ -22,6 +22,10 @@ pub enum ControlMessage {
     Bye,
     /// Viewer → host: please change the cap (user moved a slider).
     SetMaxBitrate { kbps: u32 },
+    /// Viewer → host: mute (or restore) the host's own speakers so someone
+    /// sitting next to the host PC doesn't hear everything twice. The host
+    /// always restores on disconnect.
+    SetHostMute { muted: bool },
 }
 
 impl ControlMessage {

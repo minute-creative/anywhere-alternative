@@ -90,6 +90,16 @@ pub trait AudioCapture: Send {
     fn next_frame(&mut self, pcm: &mut [i16]) -> Result<bool>;
 }
 
+/// Control over the host's own speakers (not the stream): used to silence
+/// the room while someone streams from the next desk over.
+pub trait SpeakerControl: Send {
+    /// Mute or restore the local output. Implementations remember the
+    /// state they found and put it back on `restore`, so a crashed session
+    /// never leaves the PC silently muted.
+    fn set_muted(&mut self, muted: bool) -> Result<()>;
+    fn restore(&mut self) -> Result<()>;
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub use player::Player;
 

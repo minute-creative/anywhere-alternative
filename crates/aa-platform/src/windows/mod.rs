@@ -99,12 +99,20 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
             None
         }
     };
+    let speaker: Option<Box<dyn crate::audio::SpeakerControl>> = match audio::EndpointMute::new() {
+        Ok(s) => Some(Box::new(s)),
+        Err(e) => {
+            tracing::warn!("speaker mute control unavailable ({e})");
+            None
+        }
+    };
     Ok(HostBackends {
         capture: Box::new(cap),
         encoder,
         input: Box::new(input),
         gamepad: None,
         audio,
+        speaker,
         capabilities: Capabilities {
             codecs,
             max_resolution: res,

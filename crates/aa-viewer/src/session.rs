@@ -165,6 +165,9 @@ pub async fn run(
                                     ViewerCommand::SetMaxBitrate(kbps) => {
                                         send_control(&socket, &ControlMessage::SetMaxBitrate { kbps }, &seq).await?;
                                     }
+                                    ViewerCommand::SetHostMute(muted) => {
+                                        send_control(&socket, &ControlMessage::SetHostMute { muted }, &seq).await?;
+                                    }
                                     ViewerCommand::Quit => {
                                         send_input(&socket, &batch, &seq).await?;
                                         send_control(&socket, &ControlMessage::Bye, &seq).await?;
@@ -183,6 +186,9 @@ pub async fn run(
                     }
                     Some(ViewerCommand::SetMaxBitrate(kbps)) => {
                         send_control(&socket, &ControlMessage::SetMaxBitrate { kbps }, &seq).await?;
+                    }
+                    Some(ViewerCommand::SetHostMute(muted)) => {
+                        send_control(&socket, &ControlMessage::SetHostMute { muted }, &seq).await?;
                     }
                     Some(ViewerCommand::Quit) | None => {
                         tracing::info!("window closed");

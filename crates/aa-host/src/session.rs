@@ -32,7 +32,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     let socket = Arc::new(crate::udp::bind(listen)?);
     tracing::info!("listening on {}", socket.local_addr()?);
 
-    let HostBackends { capture, encoder, input, gamepad, audio, capabilities } = backends;
+    let HostBackends { capture, encoder, input, gamepad, audio, mut speaker, capabilities } = backends;
 
     let ctl = Arc::new(PipelineControl::default());
     // A few frames of slack: sending a 250-packet keyframe over Wi-Fi takes
@@ -94,7 +94,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 if let Some(v) = viewer.as_mut().filter(|v| v.addr == from) {
                     v.last_heard = Instant::now();
                 }
-                handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &seq, &mut bitrate, &video_dest).await?;
+                handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &seq, &mut bitrate, &video_dest, &mut speaker).await?;
             }
 
             _ = housekeeping.tick() => {
@@ -104,6 +104,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                     *video_dest.lock().expect("dest") = None;
                     ctl.streaming.store(false, Ordering::Relaxed);
                     let _ = input_tx.try_send(InputEvent::ReleaseAll);
+                    restore_speakers(&mut speaker);
                 }
             }
 
@@ -112,6 +113,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 if let Some(v) = viewer.as_ref() {
                     send_control(&socket, v.addr, &ControlMessage::Bye, &seq).await?;
                 }
+                restore_speakers(&mut speaker);
                 ctl.shutdown.store(true, Ordering::Relaxed);
                 return Ok(());
             }
@@ -131,6 +133,7 @@ async fn handle_packet(
     seq: &SeqCounter,
     bitrate: &mut BitrateController,
     video_dest: &std::sync::Mutex<Option<SocketAddr>>,
+    speaker: &mut Option<Box<dyn aa_platform::audio::SpeakerControl>>,
 ) -> anyhow::Result<()> {
     let is_current_viewer = viewer.as_ref().is_some_and(|v| v.addr == from);
 
@@ -186,6 +189,16 @@ async fn handle_packet(
                     *video_dest.lock().expect("dest") = None;
                     ctl.streaming.store(false, Ordering::Relaxed);
                     let _ = input_tx.try_send(InputEvent::ReleaseAll);
+                    restore_speakers(speaker);
+                }
+                ControlMessage::SetHostMute { muted } if is_current_viewer => {
+                    if let Some(s) = speaker {
+                        if let Err(e) = s.set_muted(muted) {
+                            tracing::warn!("host mute failed: {e}");
+                        }
+                    } else {
+                        tracing::info!("host mute requested but not supported on this host");
+                    }
                 }
                 ControlMessage::SetMaxBitrate { kbps } if is_current_viewer => {
                     bitrate.set_max_kbps(kbps);
@@ -315,4 +328,14 @@ async fn send_control(
     out.extend_from_slice(&payload);
     socket.send_to(&out, to).await?;
     Ok(())
+}
+
+/// Put the host's speakers back how we found them. Called on every way a
+/// viewer can leave, so a dropped Wi-Fi link never leaves the PC muted.
+fn restore_speakers(speaker: &mut Option<Box<dyn aa_platform::audio::SpeakerControl>>) {
+    if let Some(s) = speaker {
+        if let Err(e) = s.restore() {
+            tracing::warn!("restoring host speakers failed: {e}");
+        }
+    }
 }

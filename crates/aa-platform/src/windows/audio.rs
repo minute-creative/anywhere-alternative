@@ -239,3 +239,69 @@ impl Drop for WasapiLoopback {
         let _ = CHANNELS;
     }
 }
+
+/// Mutes the default output device via `IAudioEndpointVolume`. Why the
+/// endpoint rather than our own process: the sound we want to silence
+/// belongs to the game or browser, not to us.
+pub struct EndpointMute {
+    volume: windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume,
+    /// Mute state before we touched anything; restored on `restore`/drop.
+    original: Option<bool>,
+}
+
+// SAFETY: COM interface used from the session task only; windows-rs
+// interfaces are already Send, this mirrors `WasapiLoopback`.
+unsafe impl Send for EndpointMute {}
+
+impl std::fmt::Debug for EndpointMute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EndpointMute").field("original", &self.original).finish_non_exhaustive()
+    }
+}
+
+impl EndpointMute {
+    pub fn new() -> Result<Self> {
+        // SAFETY: standard MMDevice activation; pointers come from successful calls.
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|e| win(e, "MMDeviceEnumerator"))?;
+            let device =
+                enumerator.GetDefaultAudioEndpoint(eRender, eConsole).map_err(|e| win(e, "default render device"))?;
+            let volume = device.Activate(CLSCTX_ALL, None).map_err(|e| win(e, "IAudioEndpointVolume"))?;
+            Ok(Self { volume, original: None })
+        }
+    }
+}
+
+impl crate::audio::SpeakerControl for EndpointMute {
+    fn set_muted(&mut self, muted: bool) -> Result<()> {
+        // SAFETY: live endpoint-volume interface; null event context is allowed.
+        unsafe {
+            if self.original.is_none() {
+                let was = self.volume.GetMute().map_err(|e| win(e, "GetMute"))?;
+                self.original = Some(was.as_bool());
+            }
+            self.volume.SetMute(muted, std::ptr::null()).map_err(|e| win(e, "SetMute"))?;
+        }
+        tracing::info!(muted, "host speakers");
+        Ok(())
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if let Some(was) = self.original.take() {
+            // SAFETY: as above.
+            unsafe {
+                self.volume.SetMute(was, std::ptr::null()).map_err(|e| win(e, "SetMute(restore)"))?;
+            }
+            tracing::info!(muted = was, "host speakers restored");
+        }
+        Ok(())
+    }
+}
+
+impl Drop for EndpointMute {
+    fn drop(&mut self) {
+        let _ = crate::audio::SpeakerControl::restore(self);
+    }
+}
