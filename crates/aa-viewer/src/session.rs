@@ -1,6 +1,8 @@
 //! Viewer network loop: handshake, receive video, decode, send input.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aa_core::control::ControlMessage;
@@ -16,6 +18,8 @@ use crate::link::{FrameSlot, ViewerCommand};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 const KEEPALIVE: Duration = Duration::from_millis(500);
+/// Don't spam the host with keyframe requests; one in flight at a time.
+const NACK_INTERVAL: Duration = Duration::from_millis(150);
 
 #[allow(clippy::too_many_lines)] // one select! loop; splitting it would hide the flow
 /// Runs the whole session. `frames` receives decoded pictures (`None` in
@@ -59,9 +63,14 @@ pub async fn run(
 
     // --- decode thread -----------------------------------------------------
     let (frame_tx, frame_rx) = mpsc::channel::<CompleteFrame>(2);
+    // Set by the decode thread when it cannot continue (no reference frame);
+    // the network loop turns it into a NACK so the host sends a keyframe, and
+    // the decode thread skips non-keyframes until one arrives.
+    let need_keyframe = Arc::new(AtomicBool::new(true));
+    let decoder_wants_key = Arc::clone(&need_keyframe);
     std::thread::Builder::new()
         .name("aa-decode".into())
-        .spawn(move || decode_thread(decoder, frame_rx, frames.as_ref()))?;
+        .spawn(move || decode_thread(decoder, frame_rx, frames.as_ref(), &decoder_wants_key))?;
 
     // --- main loop ---------------------------------------------------------
     let mut reassembler = Reassembler::default();
@@ -70,6 +79,7 @@ pub async fn run(
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     let mut report = tokio::time::interval(Duration::from_secs(1));
     let mut frames_this_second = 0u32;
+    let mut last_nack: Option<Instant> = None;
     let mut bytes_this_second = 0usize;
     let mut wiggle = 0u16;
 
@@ -97,15 +107,25 @@ pub async fn run(
                                     stats.frame_assembly_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
                                 }
                                 frames_this_second += 1;
+                                let fid = frame.frame_id;
                                 if frame_tx.try_send(frame).is_err() {
+                                    // Decoder is behind; whatever it misses breaks the
+                                    // reference chain, so a keyframe is needed.
                                     stats.frames_dropped += 1;
+                                    need_keyframe.store(true, Ordering::Relaxed);
+                                    let _ = fid;
                                 }
                             }
                             Reassembly::Pending | Reassembly::Stale => {}
                         }
                         for lost in reassembler.take_abandoned() {
                             stats.frames_dropped += 1;
-                            send_nack(&socket, lost, &mut seq).await?;
+                            need_keyframe.store(true, Ordering::Relaxed);
+                            let _ = lost;
+                        }
+                        if need_keyframe.load(Ordering::Relaxed) && !last_nack.is_some_and(|t| t.elapsed() <= NACK_INTERVAL) {
+                            send_nack(&socket, 0, &mut seq).await?;
+                            last_nack = Some(Instant::now());
                         }
                     }
                     Kind::Pong => {
@@ -185,17 +205,34 @@ fn decode_thread(
     mut decoder: Box<dyn VideoDecoder>,
     mut rx: mpsc::Receiver<CompleteFrame>,
     frames: Option<&FrameSlot>,
+    need_keyframe: &AtomicBool,
 ) {
+    let mut skipped = 0u32;
     while let Some(frame) = rx.blocking_recv() {
+        // A P-frame is useless without the frames before it. After any gap,
+        // wait for a keyframe; feeding the decoder garbage only makes it
+        // report errors for every frame until the next keyframe anyway.
+        if need_keyframe.load(Ordering::Relaxed) && !frame.keyframe {
+            skipped += 1;
+            continue;
+        }
+        if frame.keyframe && skipped > 0 {
+            tracing::info!(skipped, frame_id = frame.frame_id, "keyframe arrived; resuming");
+            skipped = 0;
+        }
         match decoder.decode(frame.frame_id, &frame.data) {
             Ok(Some(picture)) => {
+                need_keyframe.store(false, Ordering::Relaxed);
                 tracing::trace!(frame_id = picture.frame_id, ?picture.resolution, "decoded");
                 if let Some(slot) = frames {
                     slot.publish(picture);
                 }
             }
             Ok(None) => {}
-            Err(e) => tracing::warn!(frame_id = frame.frame_id, "decode failed: {e}"),
+            Err(e) => {
+                tracing::warn!(frame_id = frame.frame_id, "decode failed: {e}; requesting keyframe");
+                need_keyframe.store(true, Ordering::Relaxed);
+            }
         }
     }
 }
