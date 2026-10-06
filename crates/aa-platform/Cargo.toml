@@ -49,6 +49,9 @@ windows = { version = "0.62", features = [
     "Win32_System_Ole",
     "Win32_System_Variant",
 ] }
+# The `#[implement]` macro expands to `windows_core::` paths, so the crate
+# must be a direct dependency even though we only use it through `windows`.
+windows-core = "0.62"
 
 [lints]
 workspace = true

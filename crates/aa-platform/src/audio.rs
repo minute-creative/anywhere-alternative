@@ -234,7 +234,7 @@ mod player {
                 )
             };
             // Some devices refuse a fixed buffer size; fall back to default.
-            let stream = match build(config.clone()) {
+            let stream = match build(config) {
                 Ok(s) => s,
                 Err(_) => build(cpal::StreamConfig { buffer_size: cpal::BufferSize::Default, ..config })
                     .map_err(|e| PlatformError::Backend(anyhow::anyhow!("audio output stream: {e}")))?,
