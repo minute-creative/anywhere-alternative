@@ -13,7 +13,6 @@
 use std::collections::VecDeque;
 
 use aa_core::audio::{CHANNELS, FRAME_SAMPLES, SAMPLE_RATE};
-use windows::core::Interface;
 use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
@@ -74,8 +73,10 @@ impl WasapiLoopback {
             let fmt: WAVEFORMATEX = *fmt_ptr;
             let mut is_float = fmt.wFormatTag == WAVE_FORMAT_IEEE_FLOAT as u16;
             if fmt.wFormatTag == WAVE_FORMAT_EXTENSIBLE as u16 {
-                let ext = *(fmt_ptr as *const WAVEFORMATEXTENSIBLE);
-                is_float = ext.SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+                // Packed struct: copy the field out rather than borrow it.
+                let ext: WAVEFORMATEXTENSIBLE = std::ptr::read_unaligned(fmt_ptr as *const WAVEFORMATEXTENSIBLE);
+                let sub = ext.SubFormat;
+                is_float = sub == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
             }
             let (src_rate, src_channels, bits) = (fmt.nSamplesPerSec, fmt.nChannels, fmt.wBitsPerSample);
 
@@ -126,7 +127,7 @@ impl WasapiLoopback {
             let mut got = 0u32;
             let mut flags = 0u32;
             self.capture.GetBuffer(&mut data, &mut got, &mut flags, None, None).map_err(|e| win(e, "GetBuffer"))?;
-            let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT as u32 != 0;
+            let silent = flags as i32 & AUDCLNT_BUFFERFLAGS_SILENT.0 != 0;
             let n = got as usize * self.src_channels as usize;
 
             // Convert to stereo f32 at the source rate first.

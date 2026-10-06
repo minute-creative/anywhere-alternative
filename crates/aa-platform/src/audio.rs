@@ -128,7 +128,7 @@ mod player {
                 .ok_or_else(|| PlatformError::Unavailable("no audio output device".into()))?;
             let config = cpal::StreamConfig {
                 channels: 2,
-                sample_rate: cpal::SampleRate(aa_core::audio::SAMPLE_RATE),
+                sample_rate: aa_core::audio::SAMPLE_RATE,
                 buffer_size: cpal::BufferSize::Default,
             };
             let queue: Arc<Mutex<VecDeque<i16>>> =
@@ -136,7 +136,7 @@ mod player {
             let q = Arc::clone(&queue);
             let stream = device
                 .build_output_stream(
-                    &config,
+                    config,
                     move |out: &mut [f32], _| {
                         let mut q = q.lock().expect("audio queue");
                         for s in out.iter_mut() {
@@ -149,7 +149,8 @@ mod player {
                 )
                 .map_err(|e| PlatformError::Backend(anyhow::anyhow!("audio output stream: {e}")))?;
             stream.play().map_err(|e| PlatformError::Backend(anyhow::anyhow!("audio play: {e}")))?;
-            tracing::info!(device = device.name().unwrap_or_default(), "audio output ready");
+            let name = device.description().map(|d| d.name().to_owned()).unwrap_or_default();
+            tracing::info!(device = name, "audio output ready");
             Ok(Self { queue, _stream: stream })
         }
 
