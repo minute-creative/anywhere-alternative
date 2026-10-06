@@ -100,6 +100,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                     tracing::info!(addr = %v.addr, "viewer timed out");
                     viewer = None;
                     ctl.streaming.store(false, Ordering::Relaxed);
+                    let _ = input_tx.try_send(InputEvent::ReleaseAll);
                 }
             }
 
@@ -178,6 +179,7 @@ async fn handle_packet(
                     tracing::info!(%from, "viewer left");
                     *viewer = None;
                     ctl.streaming.store(false, Ordering::Relaxed);
+                    let _ = input_tx.try_send(InputEvent::ReleaseAll);
                 }
                 ControlMessage::SetMaxBitrate { kbps } if is_current_viewer => {
                     bitrate.set_max_kbps(kbps);

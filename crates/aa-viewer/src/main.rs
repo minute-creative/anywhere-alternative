@@ -50,6 +50,11 @@ struct Args {
     #[arg(long)]
     fullscreen: bool,
 
+    /// Fill the window edge to edge even if the aspect ratio differs
+    /// (distorts the picture; default letterboxes instead).
+    #[arg(long)]
+    stretch: bool,
+
     /// Headless only: send a synthetic mouse wiggle every second.
     #[arg(long)]
     test_input: bool,
@@ -103,7 +108,7 @@ fn main() -> anyhow::Result<()> {
         let _ = session_proxy.send_event(window::Wake::SessionEnded(reason));
     })?;
 
-    let mut app = window::App::new(format!("Anywhere — {}", args.host), args.fullscreen, frames, cmd_tx);
+    let mut app = window::App::new(format!("Anywhere — {}", args.host), args.fullscreen, args.stretch, frames, cmd_tx);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

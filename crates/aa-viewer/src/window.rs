@@ -49,6 +49,11 @@ struct VideoRect {
 }
 
 impl VideoRect {
+    /// Fill the window, ignoring aspect ratio (the picture distorts).
+    fn stretch(window: PhysicalSize<u32>) -> Self {
+        Self { x: 0.0, y: 0.0, w: window.width.max(1) as f32, h: window.height.max(1) as f32 }
+    }
+
     fn fit(video: Resolution, window: PhysicalSize<u32>) -> Self {
         let (ww, wh) = (window.width.max(1) as f32, window.height.max(1) as f32);
         let (vw, vh) = (video.width.max(1) as f32, video.height.max(1) as f32);
@@ -106,6 +111,13 @@ impl Gpu {
             .ok_or_else(|| anyhow::anyhow!("surface not supported by adapter"))?;
         // Fifo = vsync: one frame per refresh, never torn, locked to the display.
         config.present_mode = wgpu::PresentMode::Fifo;
+        // Render in sRGB: the frame bytes are sRGB-encoded, so sample them as
+        // sRGB and write to an sRGB target. Treating them as linear washes
+        // the picture out (greys lift, colours flatten).
+        let caps = surface.get_capabilities(&adapter);
+        if let Some(f) = caps.formats.iter().copied().find(wgpu::TextureFormat::is_srgb) {
+            config.format = f;
+        }
         // Latency: don't let the swapchain queue frames behind our back.
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
@@ -188,8 +200,8 @@ impl Gpu {
             return;
         };
         let tex_format = match frame.format {
-            PixelFormat::Bgra8 => wgpu::TextureFormat::Bgra8Unorm,
-            PixelFormat::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
+            PixelFormat::Bgra8 => wgpu::TextureFormat::Bgra8UnormSrgb,
+            PixelFormat::Rgba8 => wgpu::TextureFormat::Rgba8UnormSrgb,
             other => {
                 tracing::warn!(?other, "presenter only handles 8-bit RGBA/BGRA CPU frames for now");
                 return;
@@ -287,6 +299,7 @@ impl Gpu {
 pub struct App {
     title: String,
     fullscreen: bool,
+    stretch: bool,
     frames: FrameSlot,
     commands: mpsc::Sender<ViewerCommand>,
     window: Option<Arc<Window>>,
@@ -294,6 +307,13 @@ pub struct App {
     video_res: Option<Resolution>,
     rect: VideoRect,
     presented: u64,
+    /// HID usages currently held down, so we can release them all when the
+    /// window loses focus. Otherwise a Cmd+Tab away leaves Ctrl stuck on the
+    /// host and every later click becomes Ctrl+click.
+    held_keys: Vec<u16>,
+    /// Treat the Mac Command key as Control on the host, so Cmd+C / Cmd+V do
+    /// what a Mac user expects on a Windows host.
+    cmd_as_ctrl: bool,
 }
 
 impl std::fmt::Debug for App {
@@ -303,10 +323,17 @@ impl std::fmt::Debug for App {
 }
 
 impl App {
-    pub fn new(title: String, fullscreen: bool, frames: FrameSlot, commands: mpsc::Sender<ViewerCommand>) -> Self {
+    pub fn new(
+        title: String,
+        fullscreen: bool,
+        stretch: bool,
+        frames: FrameSlot,
+        commands: mpsc::Sender<ViewerCommand>,
+    ) -> Self {
         Self {
             title,
             fullscreen,
+            stretch,
             frames,
             commands,
             window: None,
@@ -314,6 +341,8 @@ impl App {
             video_res: None,
             rect: VideoRect::default(),
             presented: 0,
+            held_keys: Vec::new(),
+            cmd_as_ctrl: cfg!(target_os = "macos"),
         }
     }
 
@@ -328,9 +357,17 @@ impl App {
         }
     }
 
+    fn layout(&self, res: Resolution, size: PhysicalSize<u32>) -> VideoRect {
+        if self.stretch {
+            VideoRect::stretch(size)
+        } else {
+            VideoRect::fit(res, size)
+        }
+    }
+
     fn refit(&mut self) {
         if let (Some(res), Some(w)) = (self.video_res, &self.window) {
-            self.rect = VideoRect::fit(res, w.inner_size());
+            self.rect = self.layout(res, w.inner_size());
         }
     }
 }
@@ -396,7 +433,7 @@ impl ApplicationHandler<Wake> for App {
                 if let Some(frame) = self.frames.take() {
                     if self.video_res != Some(frame.resolution) {
                         self.video_res = Some(frame.resolution);
-                        self.rect = VideoRect::fit(frame.resolution, window.inner_size());
+                        self.rect = self.layout(frame.resolution, window.inner_size());
                     }
                     gpu.upload(&frame);
                     self.presented += 1;
@@ -433,10 +470,34 @@ impl ApplicationHandler<Wake> for App {
                     return; // the host OS generates its own repeats
                 }
                 if let PhysicalKey::Code(code) = event.physical_key {
-                    if let Some(hid) = hid_usage(code) {
-                        self.send(InputEvent::Key { hid_usage: hid, pressed: event.state == ElementState::Pressed });
+                    if let Some(mut hid) = hid_usage(code) {
+                        if self.cmd_as_ctrl {
+                            hid = match hid {
+                                0xE3 => 0xE0, // Left GUI -> Left Ctrl
+                                0xE7 => 0xE4, // Right GUI -> Right Ctrl
+                                other => other,
+                            };
+                        }
+                        let pressed = event.state == ElementState::Pressed;
+                        if pressed {
+                            if !self.held_keys.contains(&hid) {
+                                self.held_keys.push(hid);
+                            }
+                        } else {
+                            self.held_keys.retain(|k| *k != hid);
+                        }
+                        self.send(InputEvent::Key { hid_usage: hid, pressed });
                     }
                 }
+            }
+            WindowEvent::Focused(false) => {
+                // macOS does not deliver key-up for keys released while another
+                // app has focus (Cmd during Cmd+Tab is the classic). Release
+                // everything we think is down so nothing sticks on the host.
+                for hid in std::mem::take(&mut self.held_keys) {
+                    self.send(InputEvent::Key { hid_usage: hid, pressed: false });
+                }
+                self.send(InputEvent::ReleaseAll);
             }
             _ => {}
         }

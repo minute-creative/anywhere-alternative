@@ -39,6 +39,9 @@ pub struct SendInputInjector {
     virt_h: i32,
     /// Last absolute position we moved to, in screen pixels.
     last_pos: Option<(i32, i32)>,
+    /// Keys (HID usage) and buttons currently down, for `ReleaseAll`.
+    held_keys: Vec<u16>,
+    held_buttons: Vec<MouseButton>,
 }
 
 impl SendInputInjector {
@@ -64,7 +67,16 @@ impl SendInputInjector {
             return Err(PlatformError::Backend(anyhow::anyhow!("virtual desktop has no size")));
         }
         tracing::info!(?output, virt_x, virt_y, virt_w, virt_h, "input injector ready");
-        Ok(Self { output, virt_x, virt_y, virt_w, virt_h, last_pos: None })
+        Ok(Self {
+            output,
+            virt_x,
+            virt_y,
+            virt_w,
+            virt_h,
+            last_pos: None,
+            held_keys: Vec::new(),
+            held_buttons: Vec::new(),
+        })
     }
 
     /// Stream-normalised (0..=65535 over the captured output) → screen pixels.
@@ -105,6 +117,36 @@ impl SendInputInjector {
 
 impl InputInjector for SendInputInjector {
     fn inject(&mut self, event: InputEvent) -> Result<()> {
+        // Bookkeeping for ReleaseAll.
+        match event {
+            InputEvent::Key { hid_usage, pressed: true } => {
+                if !self.held_keys.contains(&hid_usage) {
+                    self.held_keys.push(hid_usage);
+                }
+            }
+            InputEvent::Key { hid_usage, pressed: false } => self.held_keys.retain(|k| *k != hid_usage),
+            InputEvent::MouseButton { button, pressed: true } => {
+                if !self.held_buttons.contains(&button) {
+                    self.held_buttons.push(button);
+                }
+            }
+            InputEvent::MouseButton { button, pressed: false } => self.held_buttons.retain(|b| *b != button),
+            InputEvent::ReleaseAll => {
+                let keys = std::mem::take(&mut self.held_keys);
+                let buttons = std::mem::take(&mut self.held_buttons);
+                if !keys.is_empty() || !buttons.is_empty() {
+                    tracing::info!(keys = keys.len(), buttons = buttons.len(), "releasing stuck input");
+                }
+                for k in keys {
+                    self.inject(InputEvent::Key { hid_usage: k, pressed: false })?;
+                }
+                for b in buttons {
+                    self.inject(InputEvent::MouseButton { button: b, pressed: false })?;
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
         let input = match event {
             InputEvent::MouseMoveAbs { x, y } => {
                 // SetCursorPos takes real pixels and is immune to the
@@ -168,7 +210,7 @@ impl InputInjector for SendInputInjector {
                 };
                 INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki } }
             }
-            InputEvent::Gamepad { .. } => return Ok(()), // routed to VirtualGamepad when one exists
+            InputEvent::Gamepad { .. } | InputEvent::ReleaseAll => return Ok(()), // handled above / elsewhere
         };
         Self::send(&[input])
     }

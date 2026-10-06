@@ -102,6 +102,9 @@ pub enum InputEvent {
         slot: u8,
         state: GamepadState,
     },
+    /// Release every key and mouse button the host believes is held. Sent
+    /// when the viewer loses focus or disconnects, so nothing stays stuck.
+    ReleaseAll,
 }
 
 /// Feedback from host to viewer for a game controller.
@@ -119,6 +122,7 @@ mod tag {
     pub const MOUSE_SCROLL: u8 = 4;
     pub const KEY: u8 = 5;
     pub const GAMEPAD: u8 = 6;
+    pub const RELEASE_ALL: u8 = 7;
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -162,6 +166,7 @@ impl InputEvent {
                 out.put_u16(hid_usage);
                 out.put_u8(u8::from(pressed));
             }
+            Self::ReleaseAll => out.put_u8(tag::RELEASE_ALL),
             Self::Gamepad { slot, state } => {
                 out.put_u8(tag::GAMEPAD);
                 out.put_u8(slot);
@@ -187,6 +192,7 @@ impl InputEvent {
             tag::MOUSE_BUTTON => 2,
             tag::KEY => 3,
             tag::GAMEPAD => 15,
+            tag::RELEASE_ALL => 0,
             other => return Err(InputDecodeError::UnknownTag(other)),
         };
         if buf.remaining() < need {
@@ -206,6 +212,7 @@ impl InputEvent {
                 let pressed = buf.get_u8() != 0;
                 Self::Key { hid_usage, pressed }
             }
+            tag::RELEASE_ALL => Self::ReleaseAll,
             tag::GAMEPAD => {
                 let slot = buf.get_u8();
                 let state = GamepadState {
@@ -245,6 +252,7 @@ mod tests {
         round_trip(InputEvent::MouseButton { button: MouseButton::Forward, pressed: true });
         round_trip(InputEvent::MouseScroll { dx: 0, dy: -120 });
         round_trip(InputEvent::Key { hid_usage: 0x04, pressed: false });
+        round_trip(InputEvent::ReleaseAll);
         round_trip(InputEvent::Gamepad {
             slot: 1,
             state: GamepadState {
