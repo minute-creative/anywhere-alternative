@@ -27,12 +27,19 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cargo --version
 ```
 
-### Windows (viewer now, host in stage 5)
+CMake is needed to build the Opus audio codec. With Homebrew:
+`brew install cmake`. Without it, install the `.dmg` from
+https://cmake.org/download/ and run
+`sudo "/Applications/CMake.app/Contents/bin/cmake-gui" --install`.
+
+### Windows (host and viewer)
 
 1. Install **Build Tools for Visual Studio** with the "Desktop development
    with C++" workload.
 2. Install Rust from https://rustup.rs (accept defaults).
-3. In a new PowerShell: `cargo --version`
+3. Install CMake (builds the Opus audio codec):
+   `winget install --id Kitware.CMake -e`
+4. In a new PowerShell: `cargo --version` and `cmake --version`
 
 ### Both
 
