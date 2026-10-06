@@ -210,6 +210,7 @@ pub fn host_backends(res: Resolution, fps: u16, raw: bool) -> crate::Result<Host
         encoder,
         input: Box::new(MockInput::default()),
         gamepad: Some(Box::new(MockGamepad::default())),
+        encoder_factory: None,
         audio: None,
         speaker: None,
         capabilities: mock_capabilities(res, fps),
@@ -217,8 +218,13 @@ pub fn host_backends(res: Resolution, fps: u16, raw: bool) -> crate::Result<Host
 }
 
 pub fn viewer_backends(raw: bool) -> crate::Result<ViewerBackends> {
-    let decoder: Box<dyn VideoDecoder> =
-        if raw { Box::new(MockDecoder) } else { Box::new(crate::sw::SwDecoder::new()?) };
+    let decoder: crate::DecoderFactory = Box::new(move |_codec| -> crate::Result<Box<dyn VideoDecoder>> {
+        if raw {
+            Ok(Box::new(MockDecoder))
+        } else {
+            Ok(Box::new(crate::sw::SwDecoder::new()?))
+        }
+    });
     Ok(ViewerBackends { decoder, capabilities: mock_capabilities(Resolution::new(7680, 4320), 240) })
 }
 

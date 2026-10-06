@@ -57,6 +57,7 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
     let kbps = StreamConfig::suggested_bitrate_kbps(res, fps);
 
     let mut codecs = vec![Codec::H264];
+    let mut encoder_factory: Option<crate::EncoderFactory> = None;
     let (cap, encoder): (capture::DxgiCapture, Box<dyn VideoEncoder>) = match choice {
         EncoderChoice::Software => {
             (capture::DxgiCapture::new(0, capture::Output::Cpu)?, Box::new(crate::sw::SwEncoder::new(res, fps, kbps)?))
@@ -75,6 +76,25 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
                         encoder = enc.name(),
                         "windows host: DXGI capture -> hardware H.264 (zero-copy)"
                     );
+                    // HEVC: same pixels, roughly half the bits. Offer it when
+                    // the GPU has an encoder; the viewer decides by what it
+                    // can decode, and the session builds it on demand.
+                    if !encoder::list_hardware_encoders(encoder::HwCodec::Hevc).is_empty() {
+                        codecs.insert(0, Codec::Hevc);
+                        let (dev, ctx) = (device.clone(), context.clone());
+                        encoder_factory = Some(Box::new(move |codec| {
+                            let hw = match codec {
+                                Codec::Hevc => encoder::HwCodec::Hevc,
+                                Codec::H264 => encoder::HwCodec::H264,
+                                other => {
+                                    return Err(crate::PlatformError::Unavailable(format!("no encoder for {other:?}")))
+                                }
+                            };
+                            let enc = encoder::MfEncoder::new(&dev, &ctx, hw, res, fps, kbps)?;
+                            tracing::info!(encoder = enc.name(), ?codec, "switched hardware encoder");
+                            Ok(Box::new(enc) as Box<dyn VideoEncoder>)
+                        }));
+                    }
                     (cap, Box::new(enc))
                 }
                 Err(e) if choice == EncoderChoice::Auto => {
@@ -114,6 +134,7 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
     Ok(HostBackends {
         capture: Box::new(cap),
         encoder,
+        encoder_factory,
         input: Box::new(input),
         gamepad: None,
         audio,
@@ -131,7 +152,7 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
 
 pub fn viewer_backends() -> Result<ViewerBackends> {
     Ok(ViewerBackends {
-        decoder: Box::new(crate::sw::SwDecoder::new()?),
+        decoder: Box::new(|_codec| Ok(Box::new(crate::sw::SwDecoder::new()?) as Box<dyn crate::VideoDecoder>)),
         capabilities: Capabilities {
             codecs: vec![Codec::H264],
             max_resolution: Resolution::new(3840, 2160),

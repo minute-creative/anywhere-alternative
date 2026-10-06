@@ -62,17 +62,22 @@ pub fn host_backends() -> Result<HostBackends> {
 
 pub fn viewer_backends() -> Result<ViewerBackends> {
     let mut capabilities = probe_capabilities();
-    // The decoder handles HEVC too, but the Windows host does not encode it
-    // yet; advertise it once that exists so negotiation can pick it.
-    capabilities.codecs = vec![Codec::H264];
-    match decoder::VtDecoder::new(Codec::H264) {
-        Ok(d) => {
-            tracing::info!("viewer decoder: VideoToolbox (hardware)");
-            Ok(ViewerBackends { decoder: Box::new(d), capabilities })
+    // What we can decode depends on whether VideoToolbox opens; the real
+    // decoder is built after negotiation, so probe once here.
+    let hardware = decoder::VtDecoder::new(Codec::H264).is_ok();
+    capabilities.codecs = if hardware { vec![Codec::Hevc, Codec::H264] } else { vec![Codec::H264] };
+    tracing::info!(hardware, codecs = ?capabilities.codecs, "viewer decoder: VideoToolbox");
+    let decoder: crate::DecoderFactory = Box::new(move |codec| -> Result<Box<dyn crate::VideoDecoder>> {
+        if hardware {
+            match decoder::VtDecoder::new(codec) {
+                Ok(d) => return Ok(Box::new(d)),
+                Err(e) => tracing::warn!("VideoToolbox unavailable ({e}); using software decode"),
+            }
         }
-        Err(e) => {
-            tracing::warn!("VideoToolbox unavailable ({e}); using software decode");
-            Ok(ViewerBackends { decoder: Box::new(crate::sw::SwDecoder::new()?), capabilities })
+        if codec != Codec::H264 {
+            return Err(PlatformError::Unavailable(format!("software decoder only does H.264, not {codec:?}")));
         }
-    }
+        Ok(Box::new(crate::sw::SwDecoder::new()?))
+    });
+    Ok(ViewerBackends { decoder, capabilities })
 }

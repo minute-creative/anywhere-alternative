@@ -32,7 +32,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     let socket = Arc::new(crate::udp::bind(listen)?);
     tracing::info!("listening on {}", socket.local_addr()?);
 
-    let HostBackends { capture, encoder, input, gamepad, audio, mut speaker, capabilities } = backends;
+    let HostBackends { capture, encoder, encoder_factory, input, gamepad, audio, mut speaker, capabilities } = backends;
 
     let ctl = Arc::new(PipelineControl::default());
     // A few frames of slack: sending a 250-packet keyframe over Wi-Fi takes
@@ -50,9 +50,10 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     let video_dest: Arc<std::sync::Mutex<Option<SocketAddr>>> = Arc::new(std::sync::Mutex::new(None));
 
     let cap_ctl = Arc::clone(&ctl);
-    std::thread::Builder::new()
-        .name("aa-capture".into())
-        .spawn(move || pipeline::capture_thread(capture, encoder, &cap_ctl, &frame_tx))?;
+    let initial_codec = capabilities.codecs.first().copied().unwrap_or(aa_core::video::Codec::H264);
+    std::thread::Builder::new().name("aa-capture".into()).spawn(move || {
+        pipeline::capture_thread(capture, encoder, initial_codec, encoder_factory, &cap_ctl, &frame_tx);
+    })?;
     std::thread::Builder::new()
         .name("aa-input".into())
         .spawn(move || pipeline::input_thread(input, gamepad, input_rx))?;
@@ -160,6 +161,7 @@ async fn handle_packet(
                     match negotiate(host_caps, &capabilities) {
                         Ok(negotiated) => {
                             tracing::info!(%from, ?negotiated, "viewer connected");
+                            let codec = negotiated.codec;
                             send_control(
                                 socket,
                                 from,
@@ -175,6 +177,7 @@ async fn handle_packet(
                                 StreamConfig::default().max_bitrate_kbps,
                             );
                             ctl.target_kbps.store(bitrate.current_kbps(), Ordering::Relaxed);
+                            ctl.codec.store(codec as u8, Ordering::Relaxed);
                             ctl.force_keyframe.store(true, Ordering::Relaxed);
                             ctl.streaming.store(true, Ordering::Relaxed);
                         }

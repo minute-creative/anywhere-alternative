@@ -1,14 +1,16 @@
 //! The capture → encode thread and the input-injection thread.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::time::Duration;
+
+use aa_core::video::Codec;
 
 use aa_core::input::InputEvent;
 use aa_platform::{EncodedFrame, InputInjector, ScreenCapture, VideoEncoder, VirtualGamepad};
 use tokio::sync::mpsc;
 
 /// Flags the network task flips to steer the capture thread without locks.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PipelineControl {
     /// A viewer is connected; capture and encode. When false the thread
     /// idles so an unattended host costs nothing.
@@ -19,7 +21,26 @@ pub struct PipelineControl {
     pub force_keyframe: AtomicBool,
     /// Target bitrate from the adaptive controller; 0 = unchanged.
     pub target_kbps: AtomicU32,
+    /// Codec the current viewer negotiated (`Codec as u8`); `NO_CODEC` =
+    /// keep whatever encoder is loaded.
+    pub codec: AtomicU8,
     pub shutdown: AtomicBool,
+}
+
+/// Sentinel for `PipelineControl::codec`: no change requested.
+pub const NO_CODEC: u8 = u8::MAX;
+
+impl Default for PipelineControl {
+    fn default() -> Self {
+        Self {
+            streaming: AtomicBool::new(false),
+            intra_refresh: AtomicBool::new(false),
+            force_keyframe: AtomicBool::new(false),
+            target_kbps: AtomicU32::new(0),
+            codec: AtomicU8::new(NO_CODEC),
+            shutdown: AtomicBool::new(false),
+        }
+    }
 }
 
 /// Runs forever on its own OS thread. Frames go to `tx`; if the network task
@@ -28,17 +49,36 @@ pub struct PipelineControl {
 pub fn capture_thread(
     mut capture: Box<dyn ScreenCapture>,
     mut encoder: Box<dyn VideoEncoder>,
+    initial_codec: Codec,
+    mut factory: Option<aa_platform::EncoderFactory>,
     ctl: &PipelineControl,
     tx: &mpsc::Sender<EncodedFrame>,
 ) {
     let idle_poll = Duration::from_millis(50);
     let frame_timeout = Duration::from_millis(100);
     let mut encode_failures = 0u32;
+    let mut current_codec = initial_codec;
 
     while !ctl.shutdown.load(Ordering::Relaxed) {
         if !ctl.streaming.load(Ordering::Relaxed) {
             std::thread::sleep(idle_poll);
             continue;
+        }
+
+        // A viewer negotiated a different codec: swap encoders before the
+        // first frame goes out. Done here, on the encode thread, because the
+        // encoder is not shared with anyone else.
+        let wanted = ctl.codec.swap(NO_CODEC, Ordering::Relaxed);
+        if let Some(codec) = Codec::from_u8(wanted).filter(|c| *c != current_codec) {
+            match factory.as_mut().map(|f| f(codec)) {
+                Some(Ok(enc)) => {
+                    encoder = enc;
+                    current_codec = codec;
+                    tracing::info!(?codec, "encoder switched");
+                }
+                Some(Err(e)) => tracing::error!(?codec, "could not build encoder ({e}); keeping {current_codec:?}"),
+                None => tracing::error!(?codec, "no encoder factory; keeping {current_codec:?}"),
+            }
         }
 
         let frame = match capture.next_frame(frame_timeout) {

@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use aa_core::capability::Capabilities;
 use aa_core::input::{InputEvent, Rumble};
-use aa_core::video::{EncodedFrameMeta, PixelFormat, Resolution};
+use aa_core::video::{Codec, EncodedFrameMeta, PixelFormat, Resolution};
 use bytes::Bytes;
 
 pub mod audio;
@@ -133,9 +133,19 @@ pub trait VirtualGamepad: Send {
 }
 
 /// Everything a host needs, wired together for the current OS.
+/// Builds an encoder for the codec a viewer negotiated. The codec is only
+/// known once a viewer says Hello, so the host cannot pick its encoder at
+/// startup; it asks this instead.
+pub type EncoderFactory = Box<dyn FnMut(Codec) -> Result<Box<dyn VideoEncoder>> + Send>;
+/// Same idea on the viewer: build the decoder for the codec the host chose.
+pub type DecoderFactory = Box<dyn FnMut(Codec) -> Result<Box<dyn VideoDecoder>> + Send>;
+
 pub struct HostBackends {
     pub capture: Box<dyn ScreenCapture>,
+    /// Encoder for `capabilities.codecs[0]`, ready to go.
     pub encoder: Box<dyn VideoEncoder>,
+    /// Builds an encoder for any other codec in `capabilities.codecs`.
+    pub encoder_factory: Option<EncoderFactory>,
     pub input: Box<dyn InputInjector>,
     pub gamepad: Option<Box<dyn VirtualGamepad>>,
     /// System-audio source; `None` on platforms without one yet.
@@ -153,7 +163,9 @@ impl std::fmt::Debug for HostBackends {
 
 /// Everything a viewer needs, wired together for the current OS.
 pub struct ViewerBackends {
-    pub decoder: Box<dyn VideoDecoder>,
+    /// Builds the decoder once the codec is negotiated; must succeed for
+    /// every codec in `capabilities.codecs`.
+    pub decoder: DecoderFactory,
     pub capabilities: Capabilities,
 }
 

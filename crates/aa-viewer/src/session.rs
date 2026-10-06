@@ -39,7 +39,7 @@ pub async fn run(
     socket.connect(host).await?;
     tracing::info!("connecting to {host} from {}", socket.local_addr()?);
 
-    let ViewerBackends { decoder, capabilities } = backends;
+    let ViewerBackends { decoder: mut decoder_factory, capabilities } = backends;
     let seq = SeqCounter::default();
 
     // --- handshake ---------------------------------------------------------
@@ -62,6 +62,9 @@ pub async fn run(
     .await
     .context_timeout()??;
     tracing::info!(?negotiated, "connected");
+    // Now we know the codec, build the decoder for it.
+    let decoder = decoder_factory(negotiated.codec)
+        .map_err(|e| anyhow::anyhow!("no decoder for negotiated codec {:?}: {e}", negotiated.codec))?;
 
     // --- decode thread -----------------------------------------------------
     let (frame_tx, frame_rx) = mpsc::channel::<CompleteFrame>(2);
