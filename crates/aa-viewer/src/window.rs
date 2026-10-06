@@ -26,9 +26,14 @@ use winit::window::{Fullscreen, Window, WindowId};
 use crate::keymap::hid_usage;
 use crate::link::{FrameSlot, ViewerCommand};
 
-/// The only user event: "a new frame is in the slot, redraw".
-#[derive(Debug, Clone, Copy)]
-pub struct Wake;
+/// Events the session thread sends to the window.
+#[derive(Debug, Clone)]
+pub enum Wake {
+    /// A new frame is in the slot; redraw.
+    Frame,
+    /// The session ended (host gone, error); close the window.
+    SessionEnded(String),
+}
 
 pub fn build_event_loop() -> anyhow::Result<EventLoop<Wake>> {
     Ok(EventLoop::<Wake>::with_user_event().build()?)
@@ -314,7 +319,12 @@ impl App {
 
     fn send(&self, ev: InputEvent) {
         if self.commands.try_send(ViewerCommand::Input(ev)).is_err() {
-            tracing::warn!("input channel full; event dropped");
+            // Rate-limit: this only happens when the session is gone or stalled.
+            if self.presented == 0 {
+                tracing::trace!("input dropped; session not consuming");
+            } else {
+                tracing::warn!("input channel full; event dropped");
+            }
         }
     }
 
@@ -354,9 +364,17 @@ impl ApplicationHandler<Wake> for App {
         self.window = Some(window);
     }
 
-    fn user_event(&mut self, _el: &ActiveEventLoop, _: Wake) {
-        if let Some(w) = &self.window {
-            w.request_redraw();
+    fn user_event(&mut self, el: &ActiveEventLoop, ev: Wake) {
+        match ev {
+            Wake::Frame => {
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            Wake::SessionEnded(reason) => {
+                tracing::info!("closing window: {reason}");
+                el.exit();
+            }
         }
     }
 

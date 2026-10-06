@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
     let event_loop = window::build_event_loop()?;
     let proxy = event_loop.create_proxy();
     let frames = link::FrameSlot::new(move || {
-        let _ = proxy.send_event(window::Wake);
+        let _ = proxy.send_event(window::Wake::Frame);
     });
 
     // Session on its own thread; if it ends (host gone, error), close the window.
@@ -90,13 +90,17 @@ fn main() -> anyhow::Result<()> {
     let (host, bind) = (args.host, args.bind);
     std::thread::Builder::new().name("aa-session".into()).spawn(move || {
         let result = runtime.block_on(session::run(host, bind, backends, Some(session_frames), cmd_rx, false));
-        match result {
-            Ok(()) => tracing::info!("session ended"),
-            Err(e) => tracing::error!("session failed: {e:#}"),
-        }
-        // Waking an exited loop is harmless; this just nudges a redraw path
-        // that will find no new frames. The window stays open until closed.
-        let _ = session_proxy.send_event(window::Wake);
+        let reason = match result {
+            Ok(()) => {
+                tracing::info!("session ended");
+                "session ended".to_string()
+            }
+            Err(e) => {
+                tracing::error!("session failed: {e:#}");
+                format!("session failed: {e:#}")
+            }
+        };
+        let _ = session_proxy.send_event(window::Wake::SessionEnded(reason));
     })?;
 
     let mut app = window::App::new(format!("Anywhere — {}", args.host), args.fullscreen, frames, cmd_tx);
