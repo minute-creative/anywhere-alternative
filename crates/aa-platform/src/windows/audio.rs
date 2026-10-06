@@ -13,15 +13,25 @@
 use std::collections::VecDeque;
 
 use aa_core::audio::{CHANNELS, FRAME_SAMPLES, SAMPLE_RATE};
+use windows::core::Interface;
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-    AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+    eConsole, eRender, ActivateAudioInterfaceAsync, IActivateAudioInterfaceAsyncOperation,
+    IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient,
+    IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
+    AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX,
+    WAVEFORMATEXTENSIBLE,
 };
 use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
 use windows::Win32::Media::Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT};
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, BLOB, CLSCTX_ALL, COINIT_MULTITHREADED,
+};
+use windows::Win32::System::Threading::{CreateEventW, GetCurrentProcessId, SetEvent, WaitForSingleObject};
+use windows::Win32::System::Variant::VT_BLOB;
 
 use crate::audio::{AudioCapture, FRAME_LEN_I16};
 use crate::{PlatformError, Result};
@@ -31,9 +41,10 @@ fn win(e: windows::core::Error, what: &str) -> PlatformError {
 }
 
 pub struct WasapiLoopback {
+    tap: Tap,
     client: IAudioClient,
     capture: IAudioCaptureClient,
-    event: windows::Win32::Foundation::HANDLE,
+    event: HANDLE,
     src_rate: u32,
     src_channels: u16,
     is_float: bool,
@@ -51,14 +62,119 @@ unsafe impl Send for WasapiLoopback {}
 impl std::fmt::Debug for WasapiLoopback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WasapiLoopback")
+            .field("tap", &self.tap)
             .field("src_rate", &self.src_rate)
             .field("src_channels", &self.src_channels)
             .finish_non_exhaustive()
     }
 }
 
+/// Signals an event when `ActivateAudioInterfaceAsync` finishes, so we can
+/// wait for it synchronously (we have no message loop to be called back on).
+#[windows::core::implement(IActivateAudioInterfaceCompletionHandler)]
+struct ActivationDone(HANDLE);
+
+impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationDone_Impl {
+    fn ActivateCompleted(
+        &self,
+        _op: windows::core::Ref<'_, IActivateAudioInterfaceAsyncOperation>,
+    ) -> windows::core::Result<()> {
+        // SAFETY: the event handle outlives the activation (we wait on it).
+        unsafe { SetEvent(self.0) }
+    }
+}
+
+/// Where the audio is tapped. Which one is in use decides whether muting
+/// the PC's speakers also mutes the stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tap {
+    /// Per-process loopback (Windows 10 2004+): every app's audio *before*
+    /// the speaker volume/mute is applied. Muting the PC leaves the stream intact.
+    Process,
+    /// Classic endpoint loopback: the mix *as sent to the speakers*. On
+    /// devices with software volume, muting the PC silences the stream too.
+    Endpoint,
+}
+
 impl WasapiLoopback {
+    /// Prefer the per-process tap; fall back to the endpoint tap on older
+    /// Windows or if activation fails for any reason.
     pub fn new() -> Result<Self> {
+        match Self::process_loopback() {
+            Ok(s) => Ok(s),
+            Err(e) => {
+                tracing::warn!(
+                    "process loopback unavailable ({e}); using endpoint loopback (muting the PC will mute the stream)"
+                );
+                Self::endpoint_loopback()
+            }
+        }
+    }
+
+    /// Everything-but-us process loopback: Windows mixes all other apps for
+    /// us at the format we ask for, independent of the speaker device.
+    pub fn process_loopback() -> Result<Self> {
+        // SAFETY: the activation params and PROPVARIANT live on this stack
+        // frame for the whole synchronous wait; handles come from successful calls.
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
+                ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+                Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+                    ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                        // "Everything except our own process tree": we never
+                        // want to re-stream the viewer's own sound if it ever
+                        // runs on the same machine.
+                        TargetProcessId: GetCurrentProcessId(),
+                        ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+                    },
+                },
+            };
+            let mut pv = PROPVARIANT::default();
+            pv.Anonymous.Anonymous.vt = VT_BLOB;
+            pv.Anonymous.Anonymous.Anonymous.blob = BLOB {
+                cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+                pBlobData: std::ptr::addr_of_mut!(params).cast::<u8>(),
+            };
+
+            let done = CreateEventW(None, false, false, None).map_err(|e| win(e, "CreateEventW"))?;
+            let handler: IActivateAudioInterfaceCompletionHandler = ActivationDone(done).into();
+            let op = ActivateAudioInterfaceAsync(
+                VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+                &IAudioClient::IID,
+                Some(&raw const pv),
+                &handler,
+            )
+            .map_err(|e| win(e, "ActivateAudioInterfaceAsync"))?;
+            let _ = WaitForSingleObject(done, 2_000);
+            let _ = windows::Win32::Foundation::CloseHandle(done);
+
+            let mut hr = windows::core::HRESULT(0);
+            let mut unknown: Option<windows::core::IUnknown> = None;
+            op.GetActivateResult(&mut hr, &mut unknown).map_err(|e| win(e, "GetActivateResult"))?;
+            hr.ok().map_err(|e| win(e, "process loopback activation"))?;
+            let client: IAudioClient = unknown
+                .ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("activation returned no interface")))?
+                .cast()
+                .map_err(|e| win(e, "IAudioClient cast"))?;
+
+            // Process loopback has no "mix format": we name the one we want,
+            // which is exactly what the encoder wants, so no resampling.
+            let fmt = WAVEFORMATEX {
+                wFormatTag: WAVE_FORMAT_IEEE_FLOAT as u16,
+                nChannels: CHANNELS,
+                nSamplesPerSec: SAMPLE_RATE,
+                nAvgBytesPerSec: SAMPLE_RATE * u32::from(CHANNELS) * 4,
+                nBlockAlign: CHANNELS * 4,
+                wBitsPerSample: 32,
+                cbSize: 0,
+            };
+            Self::finish(client, &fmt, true, Tap::Process)
+        }
+    }
+
+    /// Classic loopback on the default render device.
+    pub fn endpoint_loopback() -> Result<Self> {
         // SAFETY: standard WASAPI setup sequence; every pointer comes from a
         // successful call just before it is used.
         unsafe {
@@ -78,8 +194,19 @@ impl WasapiLoopback {
                 let sub = ext.SubFormat;
                 is_float = sub == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
             }
-            let (src_rate, src_channels, bits) = (fmt.nSamplesPerSec, fmt.nChannels, fmt.wBitsPerSample);
+            let result = Self::finish(client, fmt_ptr.as_ref().expect("mix format"), is_float, Tap::Endpoint);
+            CoTaskMemFree(Some(fmt_ptr.cast()));
+            result
+        }
+    }
 
+    /// Shared tail: initialise the client in event-driven loopback mode and
+    /// start capturing.
+    unsafe fn finish(client: IAudioClient, fmt: &WAVEFORMATEX, is_float: bool, tap: Tap) -> Result<Self> {
+        // SAFETY: caller guarantees `fmt` is valid for the call; the rest are
+        // live COM objects from this function.
+        unsafe {
+            let (src_rate, src_channels, bits) = (fmt.nSamplesPerSec, fmt.nChannels, fmt.wBitsPerSample);
             // 20 ms buffer; event-driven so we wake exactly when data lands.
             let hns_20ms = 200_000;
             client
@@ -88,19 +215,19 @@ impl WasapiLoopback {
                     AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                     hns_20ms,
                     0,
-                    fmt_ptr,
+                    std::ptr::from_ref(fmt),
                     None,
                 )
                 .map_err(|e| win(e, "IAudioClient::Initialize(loopback)"))?;
-            CoTaskMemFree(Some(fmt_ptr.cast()));
 
             let event = CreateEventW(None, false, false, None).map_err(|e| win(e, "CreateEventW"))?;
             client.SetEventHandle(event).map_err(|e| win(e, "SetEventHandle"))?;
             let capture: IAudioCaptureClient = client.GetService().map_err(|e| win(e, "IAudioCaptureClient"))?;
             client.Start().map_err(|e| win(e, "IAudioClient::Start"))?;
-            tracing::info!(src_rate, src_channels, bits, is_float, "wasapi loopback capture ready");
+            tracing::info!(?tap, src_rate, src_channels, bits, is_float, "wasapi loopback capture ready");
 
             Ok(Self {
+                tap,
                 client,
                 capture,
                 event,
@@ -113,6 +240,10 @@ impl WasapiLoopback {
                 silent_frames: 0,
             })
         }
+    }
+
+    pub fn tap(&self) -> Tap {
+        self.tap
     }
 
     /// Pull everything WASAPI has and append it to `pending` as 48 kHz stereo i16.

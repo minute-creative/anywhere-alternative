@@ -80,6 +80,26 @@ impl AudioSink {
         }
     }
 
+    /// Current jitter-buffer depth in ms (0 without a player).
+    #[allow(clippy::unused_self)]
+    pub fn buffer_ms(&self) -> u32 {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(p) = &self.player {
+            return p.stats().0;
+        }
+        0
+    }
+
+    /// Times playback ran dry (0 without a player).
+    #[allow(clippy::unused_self)]
+    pub fn underruns(&self) -> u64 {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(p) = &self.player {
+            return p.stats().1;
+        }
+        0
+    }
+
     #[allow(clippy::unused_self)] // no-op on Linux, where there is no player
     fn play(&self) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]

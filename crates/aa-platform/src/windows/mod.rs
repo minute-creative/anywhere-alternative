@@ -93,7 +93,12 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
 
     let input = input::SendInputInjector::new(desktop_rect)?;
     let audio: Option<Box<dyn crate::audio::AudioCapture>> = match audio::WasapiLoopback::new() {
-        Ok(a) => Some(Box::new(a)),
+        Ok(a) => {
+            if a.tap() == audio::Tap::Endpoint {
+                tracing::warn!("audio tap is the speaker endpoint: muting the PC's speakers will also mute the stream");
+            }
+            Some(Box::new(a))
+        }
         Err(e) => {
             tracing::warn!("system audio capture unavailable ({e}); streaming without sound");
             None

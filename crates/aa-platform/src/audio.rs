@@ -4,8 +4,8 @@
 //! frames. [`Player`] (Mac/Windows) feeds decoded samples to the default
 //! output through `cpal` with a small jitter buffer: audio needs *some*
 //! buffering because a late sample is an audible click, unlike a late video
-//! frame which just gets skipped. We keep ~30 ms, enough for Wi-Fi jitter,
-//! still well under lip-sync tolerance.
+//! frame which just gets skipped. The buffer is adaptive: it starts at
+//! 60 ms and grows only when the link actually makes it run dry.
 
 use aa_core::audio::{CHANNELS, FRAME_SAMPLES, SAMPLE_RATE};
 
@@ -107,20 +107,99 @@ pub use player::Player;
 mod player {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
     use super::FRAME_LEN_I16;
     use crate::{PlatformError, Result};
 
-    /// Target queue depth: ~3 frames = 30 ms.
-    const TARGET_FRAMES: usize = 3;
-    /// Above this we drop the oldest audio to pull latency back down.
-    const MAX_FRAMES: usize = 8;
+    /// One 10 ms frame in interleaved samples.
+    const FRAME: usize = FRAME_LEN_I16;
+    /// Starting depth. 60 ms covers ordinary Wi-Fi jitter; a bad link will
+    /// push it up from here.
+    const START_FRAMES: usize = 6;
+    const MIN_FRAMES: usize = 4;
+    /// Never buffer more than this (300 ms): past it, sync with the picture
+    /// is clearly gone and we would rather resync.
+    const MAX_FRAMES: usize = 30;
+    /// Each underrun adds this much (20 ms).
+    const GROW_FRAMES: usize = 2;
+    /// Shrink by one frame after this long without an underrun.
+    const SHRINK_AFTER_SECS: u64 = 20;
+
+    /// Adaptive jitter buffer.
+    ///
+    /// Why adaptive: on a calm link 30 ms is plenty and anything more is
+    /// avoidable lag; on a link whose delay swings by 150 ms, 30 ms means a
+    /// click every few packets. Instead of guessing a number, we start low,
+    /// grow each time we run dry, and creep back down while things are calm.
+    /// The viewer always pays the smallest latency the link allows.
+    struct Jitter {
+        queue: VecDeque<i16>,
+        /// Depth we try to hold, in frames.
+        target: usize,
+        /// After an underrun we stay silent until the queue refills to
+        /// `target`; starting early just produces another click.
+        filling: bool,
+        last_underrun: Instant,
+        pub underruns: u64,
+    }
+
+    impl Jitter {
+        fn new() -> Self {
+            Self {
+                queue: VecDeque::with_capacity(FRAME * MAX_FRAMES),
+                target: START_FRAMES,
+                filling: true,
+                last_underrun: Instant::now(),
+                underruns: 0,
+            }
+        }
+
+        fn push(&mut self, pcm: &[i16]) {
+            // Burst arrived: drop the oldest down to target, not to zero, so
+            // the next gap still has cushion.
+            let cap = FRAME * (self.target + 10);
+            if self.queue.len() + pcm.len() > cap {
+                let keep = FRAME * self.target;
+                let excess = (self.queue.len() + pcm.len()).saturating_sub(keep);
+                let excess = excess.min(self.queue.len());
+                self.queue.drain(..excess);
+            }
+            self.queue.extend(pcm.iter().copied());
+            if self.filling && self.queue.len() >= FRAME * self.target {
+                self.filling = false;
+            }
+            // Calm for a while: try a little less latency.
+            if self.target > MIN_FRAMES && self.last_underrun.elapsed().as_secs() >= SHRINK_AFTER_SECS {
+                self.target -= 1;
+                self.last_underrun = Instant::now();
+            }
+        }
+
+        fn pull(&mut self, out: &mut [f32]) {
+            if self.filling || self.queue.len() < out.len() {
+                if !self.filling && !self.queue.is_empty() {
+                    // Ran dry mid-stream: the link stalled longer than our
+                    // cushion. Hold more next time.
+                    self.underruns += 1;
+                    self.target = (self.target + GROW_FRAMES).min(MAX_FRAMES);
+                    self.last_underrun = Instant::now();
+                    self.filling = true;
+                }
+                out.fill(0.0);
+                return;
+            }
+            for s in out.iter_mut() {
+                *s = self.queue.pop_front().map_or(0.0, |v| f32::from(v) / 32768.0);
+            }
+        }
+    }
 
     /// Plays decoded frames through the default output device.
     pub struct Player {
-        queue: Arc<Mutex<VecDeque<i16>>>,
+        jitter: Arc<Mutex<Jitter>>,
         _stream: cpal::Stream,
     }
 
@@ -139,40 +218,42 @@ mod player {
             let config = cpal::StreamConfig {
                 channels: 2,
                 sample_rate: aa_core::audio::SAMPLE_RATE,
-                buffer_size: cpal::BufferSize::Default,
+                // Small device buffer: the jitter buffer above is where the
+                // latency budget lives, not the OS queue.
+                buffer_size: cpal::BufferSize::Fixed(240),
             };
-            let queue: Arc<Mutex<VecDeque<i16>>> =
-                Arc::new(Mutex::new(VecDeque::with_capacity(FRAME_LEN_I16 * MAX_FRAMES)));
-            let q = Arc::clone(&queue);
-            let stream = device
-                .build_output_stream(
+            let jitter = Arc::new(Mutex::new(Jitter::new()));
+            let j = Arc::clone(&jitter);
+            let build = |config: cpal::StreamConfig| {
+                let j = Arc::clone(&j);
+                device.build_output_stream(
                     config,
-                    move |out: &mut [f32], _| {
-                        let mut q = q.lock().expect("audio queue");
-                        for s in out.iter_mut() {
-                            // Underrun → silence; better than repeating.
-                            *s = q.pop_front().map_or(0.0, |v| f32::from(v) / 32768.0);
-                        }
-                    },
+                    move |out: &mut [f32], _| j.lock().expect("jitter buffer").pull(out),
                     |e| tracing::warn!("audio output error: {e}"),
                     None,
                 )
-                .map_err(|e| PlatformError::Backend(anyhow::anyhow!("audio output stream: {e}")))?;
+            };
+            // Some devices refuse a fixed buffer size; fall back to default.
+            let stream = match build(config.clone()) {
+                Ok(s) => s,
+                Err(_) => build(cpal::StreamConfig { buffer_size: cpal::BufferSize::Default, ..config })
+                    .map_err(|e| PlatformError::Backend(anyhow::anyhow!("audio output stream: {e}")))?,
+            };
             stream.play().map_err(|e| PlatformError::Backend(anyhow::anyhow!("audio play: {e}")))?;
             let name = device.description().map(|d| d.name().to_owned()).unwrap_or_default();
             tracing::info!(device = name, "audio output ready");
-            Ok(Self { queue, _stream: stream })
+            Ok(Self { jitter, _stream: stream })
         }
 
-        /// Queue one decoded frame. Trims the queue if the network delivered
-        /// a burst, so latency never creeps up.
+        /// Queue one decoded frame.
         pub fn push(&self, pcm: &[i16]) {
-            let mut q = self.queue.lock().expect("audio queue");
-            if q.len() > FRAME_LEN_I16 * MAX_FRAMES {
-                let excess = q.len() - FRAME_LEN_I16 * TARGET_FRAMES;
-                q.drain(..excess);
-            }
-            q.extend(pcm.iter().copied());
+            self.jitter.lock().expect("jitter buffer").push(pcm);
+        }
+
+        /// (current target depth in ms, underruns so far) for the stats line.
+        pub fn stats(&self) -> (u32, u64) {
+            let j = self.jitter.lock().expect("jitter buffer");
+            ((j.target * 10) as u32, j.underruns)
         }
     }
 }

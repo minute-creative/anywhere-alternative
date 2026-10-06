@@ -218,6 +218,7 @@ pub async fn run(
                     assembly_ms = format_args!("{:.2}", stats.frame_assembly_ms.get().unwrap_or(0.0)),
                     loss = format_args!("{:.2}%", loss_1s * 100.0),
                     dropped = stats.frames_dropped,
+                    audio = format_args!("{}f/{}c buf={}ms under={}", audio.frames, audio.concealed, audio.buffer_ms(), audio.underruns()),
                     "stream"
                 );
                 // Receiver report: this interval's loss and abandoned frames, so
