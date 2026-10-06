@@ -116,65 +116,69 @@ impl WasapiLoopback {
     }
 
     /// Pull everything WASAPI has and append it to `pending` as 48 kHz stereo i16.
-    unsafe fn drain(&mut self) -> Result<bool> {
+    fn drain(&mut self) -> Result<bool> {
         let mut any_sound = false;
-        loop {
-            let frames = self.capture.GetNextPacketSize().map_err(|e| win(e, "GetNextPacketSize"))?;
-            if frames == 0 {
-                break;
-            }
-            let mut data: *mut u8 = std::ptr::null_mut();
-            let mut got = 0u32;
-            let mut flags = 0u32;
-            self.capture.GetBuffer(&mut data, &mut got, &mut flags, None, None).map_err(|e| win(e, "GetBuffer"))?;
-            let silent = flags as i32 & AUDCLNT_BUFFERFLAGS_SILENT.0 != 0;
-            let n = got as usize * self.src_channels as usize;
+        // SAFETY: `capture` is a live IAudioCaptureClient; the buffer pointer
+        // and frame count come from GetBuffer and are valid until ReleaseBuffer.
+        unsafe {
+            loop {
+                let frames = self.capture.GetNextPacketSize().map_err(|e| win(e, "GetNextPacketSize"))?;
+                if frames == 0 {
+                    break;
+                }
+                let mut data: *mut u8 = std::ptr::null_mut();
+                let mut got = 0u32;
+                let mut flags = 0u32;
+                self.capture.GetBuffer(&mut data, &mut got, &mut flags, None, None).map_err(|e| win(e, "GetBuffer"))?;
+                let silent = flags as i32 & AUDCLNT_BUFFERFLAGS_SILENT.0 != 0;
+                let n = got as usize * self.src_channels as usize;
 
-            // Convert to stereo f32 at the source rate first.
-            let mut stereo: Vec<(f32, f32)> = Vec::with_capacity(got as usize);
-            if silent || data.is_null() {
-                stereo.resize(got as usize, (0.0, 0.0));
-            } else {
-                any_sound = true;
-                let ch = self.src_channels as usize;
-                if self.is_float && self.bits == 32 {
-                    let s = std::slice::from_raw_parts(data as *const f32, n);
-                    for f in s.chunks_exact(ch) {
-                        stereo.push(downmix(f));
+                // Convert to stereo f32 at the source rate first.
+                let mut stereo: Vec<(f32, f32)> = Vec::with_capacity(got as usize);
+                if silent || data.is_null() {
+                    stereo.resize(got as usize, (0.0, 0.0));
+                } else {
+                    any_sound = true;
+                    let ch = self.src_channels as usize;
+                    if self.is_float && self.bits == 32 {
+                        let s = std::slice::from_raw_parts(data as *const f32, n);
+                        for f in s.chunks_exact(ch) {
+                            stereo.push(downmix(f));
+                        }
+                    } else if self.bits == 16 {
+                        let s = std::slice::from_raw_parts(data as *const i16, n);
+                        for f in s.chunks_exact(ch) {
+                            let v: Vec<f32> = f.iter().map(|&x| f32::from(x) / 32768.0).collect();
+                            stereo.push(downmix(&v));
+                        }
+                    } else {
+                        stereo.resize(got as usize, (0.0, 0.0));
                     }
-                } else if self.bits == 16 {
-                    let s = std::slice::from_raw_parts(data as *const i16, n);
-                    for f in s.chunks_exact(ch) {
-                        let v: Vec<f32> = f.iter().map(|&x| f32::from(x) / 32768.0).collect();
-                        stereo.push(downmix(&v));
+                }
+                self.capture.ReleaseBuffer(got).map_err(|e| win(e, "ReleaseBuffer"))?;
+
+                // Resample to 48 kHz if needed, then to i16.
+                if self.src_rate == SAMPLE_RATE {
+                    for (l, r) in stereo {
+                        self.pending.push_back(to_i16(l));
+                        self.pending.push_back(to_i16(r));
                     }
                 } else {
-                    stereo.resize(got as usize, (0.0, 0.0));
-                }
-            }
-            self.capture.ReleaseBuffer(got).map_err(|e| win(e, "ReleaseBuffer"))?;
-
-            // Resample to 48 kHz if needed, then to i16.
-            if self.src_rate == SAMPLE_RATE {
-                for (l, r) in stereo {
-                    self.pending.push_back(to_i16(l));
-                    self.pending.push_back(to_i16(r));
-                }
-            } else {
-                let step = f64::from(self.src_rate) / f64::from(SAMPLE_RATE);
-                let mut pos = self.resample_pos;
-                while (pos as usize) + 1 < stereo.len() {
-                    let i = pos as usize;
-                    let t = (pos - i as f64) as f32;
-                    let (l0, r0) = stereo[i];
-                    let (l1, r1) = stereo[i + 1];
-                    self.pending.push_back(to_i16(l0 + (l1 - l0) * t));
-                    self.pending.push_back(to_i16(r0 + (r1 - r0) * t));
-                    pos += step;
-                }
-                self.resample_pos = pos - (stereo.len().saturating_sub(1)) as f64;
-                if self.resample_pos < 0.0 {
-                    self.resample_pos = 0.0;
+                    let step = f64::from(self.src_rate) / f64::from(SAMPLE_RATE);
+                    let mut pos = self.resample_pos;
+                    while (pos as usize) + 1 < stereo.len() {
+                        let i = pos as usize;
+                        let t = (pos - i as f64) as f32;
+                        let (l0, r0) = stereo[i];
+                        let (l1, r1) = stereo[i + 1];
+                        self.pending.push_back(to_i16(l0 + (l1 - l0) * t));
+                        self.pending.push_back(to_i16(r0 + (r1 - r0) * t));
+                        pos += step;
+                    }
+                    self.resample_pos = pos - (stereo.len().saturating_sub(1)) as f64;
+                    if self.resample_pos < 0.0 {
+                        self.resample_pos = 0.0;
+                    }
                 }
             }
         }
