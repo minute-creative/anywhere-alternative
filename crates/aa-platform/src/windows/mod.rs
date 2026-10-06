@@ -86,8 +86,8 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
                             let hw = match codec {
                                 Codec::Hevc => encoder::HwCodec::Hevc,
                                 Codec::H264 => encoder::HwCodec::H264,
-                                other => {
-                                    return Err(crate::PlatformError::Unavailable(format!("no encoder for {other:?}")))
+                                Codec::Av1 => {
+                                    return Err(crate::PlatformError::Unavailable("no AV1 encoder yet".into()))
                                 }
                             };
                             let enc = encoder::MfEncoder::new(&dev, &ctx, hw, res, fps, kbps)?;
