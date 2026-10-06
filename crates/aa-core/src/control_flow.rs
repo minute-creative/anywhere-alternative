@@ -69,8 +69,9 @@ impl BitrateController {
     /// Multiplicative decrease factors.
     const HEAVY_CUT: f64 = 0.5;
     const LIGHT_CUT: f64 = 0.85;
-    /// Additive increase per clean second, as a fraction of current.
-    const GROW: f64 = 0.05;
+    /// Increase per clean second, as a fraction of current (~10%/s doubles
+    /// in about 7 s; loss cuts are much bigger, so this stays stable).
+    const GROW: f64 = 0.10;
     /// Clean seconds before growth starts; avoids oscillating right after a cut.
     const GROW_AFTER: u32 = 2;
 
@@ -155,8 +156,8 @@ mod tests {
         let mut c = BitrateController::new(10_000, 2_000, 60_000);
         assert_eq!(c.on_report(&report(0.0, 0)), None);
         assert_eq!(c.on_report(&report(0.0, 0)), None);
-        assert_eq!(c.on_report(&report(0.0, 0)), Some(10_500));
-        assert_eq!(c.on_report(&report(0.0, 0)), Some(11_025));
+        assert_eq!(c.on_report(&report(0.0, 0)), Some(11_000));
+        assert_eq!(c.on_report(&report(0.0, 0)), Some(12_100));
     }
 
     #[test]

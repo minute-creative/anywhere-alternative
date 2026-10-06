@@ -199,24 +199,25 @@ pub async fn run(
             }
 
             _ = report.tick() => {
+                let recv_d = stats.loss.received - last_received;
+                let lost_d = stats.loss.lost - last_lost;
+                let total = recv_d + lost_d;
+                let loss_1s = if total == 0 { 0.0 } else { lost_d as f64 / total as f64 };
                 tracing::info!(
                     fps = frames_this_second,
                     mbps = format_args!("{:.1}", bytes_this_second as f64 * 8.0 / 1e6),
                     rtt_ms = format_args!("{:.2}", stats.rtt_ms.get().unwrap_or(0.0)),
                     assembly_ms = format_args!("{:.2}", stats.frame_assembly_ms.get().unwrap_or(0.0)),
-                    loss = format_args!("{:.2}%", stats.loss.loss_ratio() * 100.0),
+                    loss = format_args!("{:.2}%", loss_1s * 100.0),
                     dropped = stats.frames_dropped,
                     "stream"
                 );
                 // Receiver report: this interval's loss and abandoned frames, so
                 // the host can adapt its bitrate.
-                let recv_d = stats.loss.received - last_received;
-                let lost_d = stats.loss.lost - last_lost;
                 let drop_d = stats.frames_dropped - last_dropped;
                 last_received = stats.loss.received;
                 last_lost = stats.loss.lost;
                 last_dropped = stats.frames_dropped;
-                let total = recv_d + lost_d;
                 let rep = ReceiverReport {
                     loss_per_10k: (lost_d * 10_000).checked_div(total).map_or(0, |v| v.min(10_000) as u16),
                     frames_abandoned: drop_d.min(u64::from(u16::MAX)) as u16,

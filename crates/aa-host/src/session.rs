@@ -254,13 +254,13 @@ async fn sender_task(
                 continue;
             }
         };
-        let count = slices.len();
-        let group = Pacer::group_size(count);
-        let t0 = Instant::now();
-        for (i, s) in slices.into_iter().enumerate() {
-            if i % group == 0 && i > 0 {
-                tokio::time::sleep_until((t0 + pacer.offset(i, count, fps)).into()).await;
-            }
+        // Burst send. Pacing a frame across the interval was tried and made
+        // Wi-Fi worse: consecutive frames overlapped on the air and collided.
+        // The real fix for bursts is a lower bitrate (the controller), and
+        // the real fix for the earlier freeze was moving sends off the
+        // receive loop, which this task is.
+        let _ = (&pacer, fps);
+        for s in slices {
             if let Err(e) = socket.send_to(&s, dest).await {
                 tracing::warn!("send failed: {e}");
                 break;
