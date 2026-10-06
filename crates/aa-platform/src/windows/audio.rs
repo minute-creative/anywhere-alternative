@@ -26,7 +26,7 @@ use windows::Win32::Media::Audio::{
 };
 use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
 use windows::Win32::Media::Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT};
-use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+use windows::Win32::System::Com::StructuredStorage::{PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, BLOB, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
@@ -130,11 +130,23 @@ impl WasapiLoopback {
                     },
                 },
             };
-            let mut pv = PROPVARIANT::default();
-            pv.Anonymous.Anonymous.vt = VT_BLOB;
-            pv.Anonymous.Anonymous.Anonymous.blob = BLOB {
-                cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
-                pBlobData: std::ptr::addr_of_mut!(params).cast::<u8>(),
+            // PROPVARIANT's inner struct sits behind ManuallyDrop in a
+            // union; build it whole rather than poking fields through it.
+            let pv = PROPVARIANT {
+                Anonymous: PROPVARIANT_0 {
+                    Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                        vt: VT_BLOB,
+                        wReserved1: 0,
+                        wReserved2: 0,
+                        wReserved3: 0,
+                        Anonymous: PROPVARIANT_0_0_0 {
+                            blob: BLOB {
+                                cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+                                pBlobData: std::ptr::addr_of_mut!(params).cast::<u8>(),
+                            },
+                        },
+                    }),
+                },
             };
 
             let done = CreateEventW(None, false, false, None).map_err(|e| win(e, "CreateEventW"))?;
