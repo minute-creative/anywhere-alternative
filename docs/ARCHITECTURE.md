@@ -164,6 +164,33 @@ Input events are hand-packed (a mouse move is 5 bytes). Keys are sent as
 USB HID usage IDs so Mac and PC keyboards agree on what a key means.
 Gamepad state is a 15-byte snapshot in DualSense layout.
 
+### Audio
+
+System audio rides the same socket as `Kind::Audio` datagrams. Why these
+choices (all in `aa-core/src/audio.rs` and `aa-platform/src/audio.rs`):
+
+- **Opus, 48 kHz stereo, 10 ms frames, 128 kbps.** Opus is what every
+  real-time system uses (WebRTC, Discord, game streaming): transparent at
+  this bitrate and encodes a frame in well under a millisecond. 10 ms frames
+  keep the chain (frame + network + playout buffer) near 30 ms, below the
+  point where picture and sound visibly part.
+- **Inband FEC on.** Each packet carries a low-rate copy of the previous one,
+  so a single Wi-Fi loss costs nothing audible.
+- **Packet-loss concealment, not silence.** The player tracks `frame_no`;
+  a gap of up to 5 frames is filled by asking Opus to synthesise from what
+  came before. Beyond that it was a real pause and we resync.
+- **Silence is not sent.** WASAPI flags silent buffers; the host skips them,
+  so an idle desktop costs zero audio bandwidth.
+- **Jitter buffer ~30 ms that trims itself.** Audio needs *some* buffer (a
+  late sample is a click, unlike a late video frame which is just skipped).
+  If a network burst delivers more than 80 ms we drop the oldest so latency
+  never creeps up over a long session.
+- **Capture:** Windows uses WASAPI loopback on the default output (no
+  virtual cable or driver). Mac host capture comes with ScreenCaptureKit in
+  the Mac-host stage.
+- **Playback:** `cpal` on the default output, Mac and Windows. Linux builds
+  decode and count but have no player (ALSA headers aren't in CI).
+
 ## 7. Connectivity (stage 3)
 
 - Each machine has a device key. Pairing = typing a short code once;
@@ -215,6 +242,7 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
 |------|---------|------|--------|
 | 2026-10-06 | Windows 11 25H2, Intel Core Ultra, Arc 130T, 2880×1800@60 | DXGI → software H.264 (OpenH264) | 1–10 fps; CPU bench 28 fps @1080p |
 | 2026-10-06 | same | DXGI → Quick Sync via Media Foundation, zero-copy | locked 60 fps, 0% loss, ~31 Mbps, <1 ms assembly; bench 110 fps @1080p, 73 @1440p |
+| 2026-10-07 | same → MacBook, Wi-Fi | + WASAPI loopback → Opus 128 kbps | compiles on all three CI targets; awaiting listening test |
 
 ## 11. Coding standards
 
