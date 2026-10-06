@@ -46,9 +46,10 @@ use windows::Win32::Media::MediaFoundation::{
     MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFSTARTUP_NOSOCKET, MFT_CATEGORY_VIDEO_ENCODER,
     MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_LOW_LATENCY,
-    MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MF_E_TRANSFORM_NEED_MORE_INPUT,
+    MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
+    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE,
+    MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
@@ -414,8 +415,34 @@ impl MfEncoder {
                 let mut status = 0u32;
                 match self.mft.ProcessOutput(0, &mut out, &mut status) {
                     Ok(()) => {}
-                    Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
-                    Err(e) => return Err(win(e, "ProcessOutput")),
+                    Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                        drop(std::mem::ManuallyDrop::take(&mut out[0].pSample));
+                        drop(std::mem::ManuallyDrop::take(&mut out[0].pEvents));
+                        return Ok(None);
+                    }
+                    Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                        // The encoder finalised its output format (it now knows
+                        // the SPS/PPS it will emit). Re-select the type it
+                        // proposes and try again; the frame is still queued.
+                        drop(std::mem::ManuallyDrop::take(&mut out[0].pSample));
+                        drop(std::mem::ManuallyDrop::take(&mut out[0].pEvents));
+                        let proposed = self
+                            .mft
+                            .GetOutputAvailableType(self.output_id, 0)
+                            .map_err(|e| win(e, "GetOutputAvailableType"))?;
+                        self.mft
+                            .SetOutputType(self.output_id, &proposed, 0)
+                            .map_err(|e| win(e, "SetOutputType(renegotiate)"))?;
+                        tracing::debug!("encoder output type renegotiated");
+                        // The HaveOutput event was consumed; the MFT re-queues
+                        // one after renegotiation, so loop back to GetEvent.
+                        continue;
+                    }
+                    Err(e) => {
+                        drop(std::mem::ManuallyDrop::take(&mut out[0].pSample));
+                        drop(std::mem::ManuallyDrop::take(&mut out[0].pEvents));
+                        return Err(win(e, "ProcessOutput"));
+                    }
                 }
                 let sample: Option<IMFSample> = std::mem::ManuallyDrop::take(&mut out[0].pSample);
                 drop(std::mem::ManuallyDrop::take(&mut out[0].pEvents));
