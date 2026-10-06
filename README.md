@@ -93,11 +93,15 @@ On the Windows PC:
 cargo run --release -p aa-host
 ```
 
-On the viewing machine (Windows or Mac; use the host's LAN IP):
+On the viewing machine (Windows or Mac). With no address the viewer finds
+the host on the local network by itself:
 
 ```powershell
-cargo run --release -p aa-viewer -- 192.168.x.x:7700
+cargo run --release -p aa-viewer -- --fullscreen
 ```
+
+If several hosts answer, pass part of the PC's name (`-- maitrik-pc`), or
+an address (`-- 192.168.x.x` or `192.168.x.x:7700`) to skip discovery.
 
 Viewing the host from *itself* works for a quick look (you'll see the
 infinite-mirror effect) but mouse moves inside the viewer window will move

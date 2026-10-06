@@ -200,6 +200,13 @@ async fn handle_packet(
                         tracing::info!("host mute requested but not supported on this host");
                     }
                 }
+                // Discovery answers come from any state, even mid-session:
+                // a second Mac asking "who's there" should still learn our
+                // name (it will be told we're busy when it says Hello).
+                ControlMessage::Discover => {
+                    let name = gethostname::gethostname().to_string_lossy().into_owned();
+                    send_control(socket, from, &ControlMessage::Here { name }, seq).await?;
+                }
                 ControlMessage::SetMaxBitrate { kbps } if is_current_viewer => {
                     bitrate.set_max_kbps(kbps);
                     ctl.target_kbps.store(bitrate.current_kbps(), Ordering::Relaxed);

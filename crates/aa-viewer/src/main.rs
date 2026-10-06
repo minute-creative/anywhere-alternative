@@ -12,6 +12,7 @@
 //! and quick network checks use that.
 
 mod audio;
+mod discover;
 mod keymap;
 mod link;
 mod overlay;
@@ -29,8 +30,10 @@ use tracing_subscriber::EnvFilter;
 #[allow(clippy::struct_excessive_bools)] // CLI flags are bools by nature
 #[command(name = "aa-viewer", about = "Anywhere Alternative viewer", version)]
 struct Args {
-    /// Host address, e.g. 192.168.1.20:7700
-    host: SocketAddr,
+    /// Who to connect to. Leave it out to find the host automatically on
+    /// the local network; or give a computer name (partial is fine), an IP,
+    /// or ip:port.
+    host: Option<String>,
 
     /// Local UDP address to bind.
     #[arg(long, default_value = "0.0.0.0:0")]
@@ -76,12 +79,12 @@ fn main() -> anyhow::Result<()> {
     };
 
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+    let host: SocketAddr = runtime.block_on(discover::resolve(args.host.as_deref()))?;
     let (cmd_tx, cmd_rx) = link::command_channel();
 
     if args.headless {
         // Keep the sender alive: a closed command channel means "window closed".
-        let result =
-            runtime.block_on(session::run(args.host, args.bind, backends, None, cmd_rx, args.test_input, None));
+        let result = runtime.block_on(session::run(host, args.bind, backends, None, cmd_rx, args.test_input, None));
         drop(cmd_tx);
         return result;
     }
@@ -97,7 +100,7 @@ fn main() -> anyhow::Result<()> {
     // Session on its own thread; if it ends (host gone, error), close the window.
     let session_frames = frames.clone();
     let session_proxy = event_loop.create_proxy();
-    let (host, bind) = (args.host, args.bind);
+    let bind = args.bind;
     std::thread::Builder::new().name("aa-session".into()).spawn(move || {
         let result =
             runtime.block_on(session::run(host, bind, backends, Some(session_frames), cmd_rx, false, Some(stats_tx)));
@@ -114,7 +117,7 @@ fn main() -> anyhow::Result<()> {
         let _ = session_proxy.send_event(window::Wake::SessionEnded(reason));
     })?;
 
-    let mut app = window::App::new(format!("Anywhere — {}", args.host), args.fullscreen, args.stretch, frames, cmd_tx);
+    let mut app = window::App::new(format!("Anywhere — {host}"), args.fullscreen, args.stretch, frames, cmd_tx);
     app.set_stats_receiver(stats_rx);
     event_loop.run_app(&mut app)?;
     Ok(())

@@ -21,6 +21,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "gethostname",
  "socket2",
  "tokio",
  "tracing",
