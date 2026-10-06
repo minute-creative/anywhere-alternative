@@ -30,6 +30,7 @@ use std::time::Instant;
 use aa_core::video::{Codec, EncodedFrameMeta, PixelFormat, Resolution};
 use bytes::Bytes;
 use windows::core::{Interface, GUID};
+use windows::Win32::Foundation::{VARIANT_FALSE, VARIANT_TRUE};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
     D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
@@ -73,8 +74,7 @@ fn variant_bool(b: bool) -> VARIANT {
     // SAFETY: as above. VARIANT_BOOL true is -1 (all bits set).
     unsafe {
         (*var.Anonymous.Anonymous).vt = VT_BOOL;
-        (*var.Anonymous.Anonymous).Anonymous.boolVal =
-            if b { windows::core::VARIANT_BOOL(-1) } else { windows::core::VARIANT_BOOL(0) };
+        (*var.Anonymous.Anonymous).Anonymous.boolVal = if b { VARIANT_TRUE } else { VARIANT_FALSE };
     }
     var
 }
@@ -370,59 +370,65 @@ impl MfEncoder {
 
     /// Block until the MFT asks for input (async MFTs require this).
     unsafe fn wait_need_input(&self) -> Result<()> {
-        loop {
-            let ev = self.events.GetEvent(Default::default()).map_err(|e| win(e, "GetEvent"))?;
-            let t = ev.GetType().map_err(|e| win(e, "GetType"))?;
-            if t == METransformNeedInput.0 as u32 {
-                return Ok(());
-            }
-            if t == METransformHaveOutput.0 as u32 {
-                // Output we didn't expect yet; the caller's drain picks it up
-                // because HaveOutput stays pending until ProcessOutput.
-                return Ok(());
+        // SAFETY: COM calls on live objects owned by self.
+        unsafe {
+            loop {
+                let ev = self.events.GetEvent(Default::default()).map_err(|e| win(e, "GetEvent"))?;
+                let t = ev.GetType().map_err(|e| win(e, "GetType"))?;
+                if t == METransformNeedInput.0 as u32 {
+                    return Ok(());
+                }
+                if t == METransformHaveOutput.0 as u32 {
+                    // Output we didn't expect yet; the caller's drain picks it up
+                    // because HaveOutput stays pending until ProcessOutput.
+                    return Ok(());
+                }
             }
         }
     }
 
     /// Pull one encoded sample. Blocks on the HaveOutput event.
     unsafe fn pull_output(&self) -> Result<Option<(Bytes, bool)>> {
-        loop {
-            let ev = self.events.GetEvent(Default::default()).map_err(|e| win(e, "GetEvent"))?;
-            let t = ev.GetType().map_err(|e| win(e, "GetType"))?;
-            if t == METransformNeedInput.0 as u32 {
-                continue; // it wants more before it gives output; fine, caller feeds next frame
+        // SAFETY: COM calls on live objects; ManuallyDrop::take on fields initialised above; Lock's pointer is valid until Unlock.
+        unsafe {
+            loop {
+                let ev = self.events.GetEvent(Default::default()).map_err(|e| win(e, "GetEvent"))?;
+                let t = ev.GetType().map_err(|e| win(e, "GetType"))?;
+                if t == METransformNeedInput.0 as u32 {
+                    continue; // it wants more before it gives output; fine, caller feeds next frame
+                }
+                if t != METransformHaveOutput.0 as u32 {
+                    continue;
+                }
+                let sample = if self.output_provides_samples {
+                    None
+                } else {
+                    Some(MFCreateSample().map_err(|e| win(e, "MFCreateSample"))?)
+                };
+                let mut out = [MFT_OUTPUT_DATA_BUFFER {
+                    dwStreamID: self.output_id,
+                    pSample: std::mem::ManuallyDrop::new(sample),
+                    dwStatus: 0,
+                    pEvents: std::mem::ManuallyDrop::new(None),
+                }];
+                let mut status = 0u32;
+                match self.mft.ProcessOutput(0, &mut out, &mut status) {
+                    Ok(()) => {}
+                    Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
+                    Err(e) => return Err(win(e, "ProcessOutput")),
+                }
+                let sample: Option<IMFSample> = std::mem::ManuallyDrop::take(&mut out[0].pSample);
+                drop(std::mem::ManuallyDrop::take(&mut out[0].pEvents));
+                let Some(sample) = sample else { return Ok(None) };
+                let keyframe = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
+                let buf = sample.ConvertToContiguousBuffer().map_err(|e| win(e, "ConvertToContiguousBuffer"))?;
+                let mut ptr: *mut u8 = std::ptr::null_mut();
+                let mut len = 0u32;
+                buf.Lock(&mut ptr, None, Some(&mut len)).map_err(|e| win(e, "Lock"))?;
+                let data = Bytes::copy_from_slice(std::slice::from_raw_parts(ptr, len as usize));
+                buf.Unlock().map_err(|e| win(e, "Unlock"))?;
+                return Ok(Some((data, keyframe)));
             }
-            if t != METransformHaveOutput.0 as u32 {
-                continue;
-            }
-            let sample = if self.output_provides_samples {
-                None
-            } else {
-                Some(MFCreateSample().map_err(|e| win(e, "MFCreateSample"))?)
-            };
-            let mut out = [MFT_OUTPUT_DATA_BUFFER {
-                dwStreamID: self.output_id,
-                pSample: std::mem::ManuallyDrop::new(sample),
-                dwStatus: 0,
-                pEvents: std::mem::ManuallyDrop::new(None),
-            }];
-            let mut status = 0u32;
-            match self.mft.ProcessOutput(0, &mut out, &mut status) {
-                Ok(()) => {}
-                Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
-                Err(e) => return Err(win(e, "ProcessOutput")),
-            }
-            let sample: Option<IMFSample> = std::mem::ManuallyDrop::take(&mut out[0].pSample);
-            drop(std::mem::ManuallyDrop::take(&mut out[0].pEvents));
-            let Some(sample) = sample else { return Ok(None) };
-            let keyframe = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
-            let buf = sample.ConvertToContiguousBuffer().map_err(|e| win(e, "ConvertToContiguousBuffer"))?;
-            let mut ptr: *mut u8 = std::ptr::null_mut();
-            let mut len = 0u32;
-            buf.Lock(&mut ptr, None, Some(&mut len)).map_err(|e| win(e, "Lock"))?;
-            let data = Bytes::copy_from_slice(std::slice::from_raw_parts(ptr, len as usize));
-            buf.Unlock().map_err(|e| win(e, "Unlock"))?;
-            return Ok(Some((data, keyframe)));
         }
     }
 }
@@ -440,7 +446,8 @@ impl VideoEncoder for MfEncoder {
         unsafe {
             match &frame.buffer {
                 FrameBuffer::Gpu { api: GpuApi::D3D11, handle } => {
-                    let src = ID3D11Texture2D::from_raw_borrowed(&(*handle as *mut std::ffi::c_void))
+                    let raw: *mut std::ffi::c_void = *handle as *mut std::ffi::c_void;
+                    let src = ID3D11Texture2D::from_raw_borrowed(&raw)
                         .ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("null texture handle")))?;
                     self.context.CopyResource(&self.input_tex, src);
                 }
