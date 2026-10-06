@@ -25,6 +25,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::keymap::hid_usage;
 use crate::link::{FrameSlot, ViewerCommand};
+use crate::overlay::{LiveStats, Overlay, Settings};
 
 /// Events the session thread sends to the window.
 #[derive(Debug, Clone)]
@@ -249,7 +250,12 @@ impl Gpu {
         );
     }
 
-    fn render(&mut self, rect: VideoRect, window: &Window) {
+    fn render(
+        &mut self,
+        rect: VideoRect,
+        window: &Window,
+        overlay: impl FnOnce(&wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView, [u32; 2]),
+    ) {
         use wgpu::CurrentSurfaceTexture as Cst;
         let output = match self.surface.get_current_texture() {
             Cst::Success(t) | Cst::Suboptimal(t) => t,
@@ -290,9 +296,14 @@ impl Gpu {
                 pass.draw(0..3, 0..1);
             }
         }
+        overlay(&self.device, &self.queue, &mut encoder, &view, [self.config.width, self.config.height]);
         self.queue.submit(Some(encoder.finish()));
         window.pre_present_notify();
         self.queue.present(output);
+    }
+
+    fn surface_format(&self) -> wgpu::TextureFormat {
+        self.config.format
     }
 }
 
@@ -314,6 +325,12 @@ pub struct App {
     /// Treat the Mac Command key as Control on the host, so Cmd+C / Cmd+V do
     /// what a Mac user expects on a Windows host.
     cmd_as_ctrl: bool,
+    overlay: Option<Overlay>,
+    settings: Settings,
+    applied: Settings,
+    stats: LiveStats,
+    stats_rx: Option<std::sync::mpsc::Receiver<LiveStats>>,
+    modifiers: winit::keyboard::ModifiersState,
 }
 
 impl std::fmt::Debug for App {
@@ -343,7 +360,39 @@ impl App {
             presented: 0,
             held_keys: Vec::new(),
             cmd_as_ctrl: cfg!(target_os = "macos"),
+            overlay: None,
+            settings: Settings::new(fullscreen, stretch),
+            applied: Settings::new(fullscreen, stretch),
+            stats: LiveStats::default(),
+            stats_rx: None,
+            modifiers: winit::keyboard::ModifiersState::empty(),
         }
+    }
+
+    /// Where the session delivers once-a-second stats for the overlay.
+    pub fn set_stats_receiver(&mut self, rx: std::sync::mpsc::Receiver<LiveStats>) {
+        self.stats_rx = Some(rx);
+    }
+
+    /// Push changed settings to the window and host.
+    fn apply_settings(&mut self) {
+        if self.settings == self.applied {
+            return;
+        }
+        if let Some(w) = &self.window {
+            if self.settings.fullscreen != self.applied.fullscreen {
+                w.set_fullscreen(self.settings.fullscreen.then_some(Fullscreen::Borderless(None)));
+            }
+        }
+        if self.settings.stretch != self.applied.stretch {
+            self.stretch = self.settings.stretch;
+            self.refit();
+        }
+        if (self.settings.max_mbps - self.applied.max_mbps).abs() > 0.01 {
+            let kbps = (self.settings.max_mbps * 1000.0) as u32;
+            let _ = self.commands.try_send(ViewerCommand::SetMaxBitrate(kbps));
+        }
+        self.applied = self.settings;
     }
 
     fn send(&self, ev: InputEvent) {
@@ -391,7 +440,10 @@ impl ApplicationHandler<Wake> for App {
             }
         };
         match Gpu::new(&window) {
-            Ok(g) => self.gpu = Some(g),
+            Ok(g) => {
+                self.overlay = Some(Overlay::new(&window, &g.device, g.surface_format()));
+                self.gpu = Some(g);
+            }
             Err(e) => {
                 tracing::error!("cannot initialise GPU: {e:#}");
                 el.exit();
@@ -415,7 +467,55 @@ impl ApplicationHandler<Wake> for App {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // one match arm per event kind
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if let WindowEvent::ModifiersChanged(m) = &event {
+            self.modifiers = m.state();
+        }
+        // Settings hotkey: Ctrl/Cmd + Shift + S.
+        if let WindowEvent::KeyboardInput { event: k, .. } = &event {
+            let primary =
+                if cfg!(target_os = "macos") { self.modifiers.super_key() } else { self.modifiers.control_key() };
+            if k.state == ElementState::Pressed
+                && !k.repeat
+                && primary
+                && self.modifiers.shift_key()
+                && k.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::KeyS)
+            {
+                if let Some(o) = &mut self.overlay {
+                    o.toggle();
+                    // The host must not be left thinking Ctrl/Shift are down.
+                    for hid in std::mem::take(&mut self.held_keys) {
+                        self.send(InputEvent::Key { hid_usage: hid, pressed: false });
+                    }
+                    self.send(InputEvent::ReleaseAll);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+                return;
+            }
+        }
+        // While the overlay is open it owns input; nothing goes to the host.
+        if let (Some(o), Some(w)) = (&mut self.overlay, &self.window) {
+            let consumed = o.on_event(w, &event);
+            if o.open {
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                if consumed
+                    || matches!(
+                        event,
+                        WindowEvent::KeyboardInput { .. }
+                            | WindowEvent::MouseInput { .. }
+                            | WindowEvent::CursorMoved { .. }
+                            | WindowEvent::MouseWheel { .. }
+                    )
+                {
+                    return;
+                }
+            }
+        }
         match event {
             WindowEvent::CloseRequested => {
                 let _ = self.commands.try_send(ViewerCommand::Quit);
@@ -429,7 +529,8 @@ impl ApplicationHandler<Wake> for App {
             }
             WindowEvent::RedrawRequested => {
                 let Some(gpu) = &mut self.gpu else { return };
-                let Some(window) = &self.window else { return };
+                let Some(window) = self.window.clone() else { return };
+                let window = window.as_ref();
                 if let Some(frame) = self.frames.take() {
                     if self.video_res != Some(frame.resolution) {
                         self.video_res = Some(frame.resolution);
@@ -442,7 +543,27 @@ impl ApplicationHandler<Wake> for App {
                     gpu.upload(&frame);
                     self.presented += 1;
                 }
-                gpu.render(self.rect, window);
+                if let Some(rx) = &self.stats_rx {
+                    while let Ok(s) = rx.try_recv() {
+                        self.stats = s;
+                    }
+                }
+                let rect = self.rect;
+                let title = self.title.clone();
+                let mut settings = self.settings;
+                let stats = self.stats;
+                let overlay = &mut self.overlay;
+                gpu.render(rect, window, |device, queue, encoder, view, size| {
+                    if let Some(o) = overlay {
+                        o.draw(window, device, queue, encoder, view, size, &mut settings, stats, &title);
+                    }
+                });
+                self.settings = settings;
+                self.apply_settings();
+                // Keep repainting while the overlay or hint is visible.
+                if self.overlay.as_ref().is_some_and(|o| o.open) {
+                    window.request_redraw();
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some((x, y)) = self.rect.normalise(position.x, position.y) {

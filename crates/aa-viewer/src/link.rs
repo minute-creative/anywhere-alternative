@@ -17,6 +17,8 @@ use tokio::sync::mpsc;
 #[derive(Debug)]
 pub enum ViewerCommand {
     Input(InputEvent),
+    /// User changed the bitrate cap in the overlay (kbps).
+    SetMaxBitrate(u32),
     /// The window closed; send `Bye` and exit.
     Quit,
 }

@@ -33,6 +33,7 @@ pub async fn run(
     frames: Option<FrameSlot>,
     mut commands: mpsc::Receiver<ViewerCommand>,
     test_input: bool,
+    stats_tx: Option<std::sync::mpsc::Sender<crate::overlay::LiveStats>>,
 ) -> anyhow::Result<()> {
     let socket = crate::udp::bind(bind)?;
     socket.connect(host).await?;
@@ -155,13 +156,31 @@ pub async fn run(
                     Some(ViewerCommand::Input(first)) => {
                         // Coalesce everything already queued into one datagram.
                         let mut batch = vec![first];
-                        while let Ok(ViewerCommand::Input(ev)) = commands.try_recv() {
+                        while let Ok(cmd) = commands.try_recv() {
+                            let ViewerCommand::Input(ev) = cmd else {
+                                // Not an input event; handle it after this batch.
+                                match cmd {
+                                    ViewerCommand::SetMaxBitrate(kbps) => {
+                                        send_control(&socket, &ControlMessage::SetMaxBitrate { kbps }, &mut seq).await?;
+                                    }
+                                    ViewerCommand::Quit => {
+                                        send_input(&socket, &batch, &mut seq).await?;
+                                        send_control(&socket, &ControlMessage::Bye, &mut seq).await?;
+                                        return Ok(());
+                                    }
+                                    ViewerCommand::Input(_) => unreachable!(),
+                                }
+                                continue;
+                            };
                             batch.push(ev);
                             if batch.len() * InputEvent::MAX_ENCODED >= wire::MAX_PAYLOAD {
                                 break;
                             }
                         }
                         send_input(&socket, &batch, &mut seq).await?;
+                    }
+                    Some(ViewerCommand::SetMaxBitrate(kbps)) => {
+                        send_control(&socket, &ControlMessage::SetMaxBitrate { kbps }, &mut seq).await?;
                     }
                     Some(ViewerCommand::Quit) | None => {
                         tracing::info!("window closed");
@@ -205,6 +224,14 @@ pub async fn run(
                     rtt_tenths_ms: (stats.rtt_ms.get().unwrap_or(0.0) * 10.0).clamp(0.0, 65535.0) as u16,
                 };
                 send_report(&socket, &rep, &mut seq).await?;
+                if let Some(tx) = &stats_tx {
+                    let _ = tx.send(crate::overlay::LiveStats {
+                        fps: frames_this_second,
+                        mbps: (bytes_this_second as f64 * 8.0 / 1e6) as f32,
+                        rtt_ms: stats.rtt_ms.get().unwrap_or(0.0) as f32,
+                        loss_pct: (rep.loss_ratio() * 100.0) as f32,
+                    });
+                }
                 frames_this_second = 0;
                 bytes_this_second = 0;
 

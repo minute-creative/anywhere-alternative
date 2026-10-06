@@ -60,9 +60,15 @@ cargo run -p aa-viewer -- 127.0.0.1:7700 --mock
 
 A window opens showing the host's moving colour test pattern; your mouse
 and keyboard inside it are sent to the host (the mock host just logs them;
-run it with `RUST_LOG=debug` to see). Add `--fullscreen` for borderless
-fullscreen. Add `--headless` instead to skip the window and print one stats
-line per second:
+run it with `RUST_LOG=debug` to see).
+
+**In the viewer window**, press **Ctrl+Shift+S** (Windows) or **⌘⇧S** (Mac)
+for the settings overlay: fullscreen, stretch-to-fill, bitrate cap, and
+live stats. While it is open, keyboard and mouse stay local. `--fullscreen`
+and `--stretch` set the initial state from the command line.
+
+Add `--headless` instead to skip the window and print one stats line per
+second:
 
 ```
 stream fps=60 mbps=444.5 rtt_ms=1.57 assembly_ms=3.41 loss=0.00% dropped=0

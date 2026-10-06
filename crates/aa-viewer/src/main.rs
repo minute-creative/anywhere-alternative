@@ -13,6 +13,7 @@
 
 mod keymap;
 mod link;
+mod overlay;
 mod session;
 mod udp;
 mod window;
@@ -78,7 +79,8 @@ fn main() -> anyhow::Result<()> {
 
     if args.headless {
         // Keep the sender alive: a closed command channel means "window closed".
-        let result = runtime.block_on(session::run(args.host, args.bind, backends, None, cmd_rx, args.test_input));
+        let result =
+            runtime.block_on(session::run(args.host, args.bind, backends, None, cmd_rx, args.test_input, None));
         drop(cmd_tx);
         return result;
     }
@@ -89,12 +91,15 @@ fn main() -> anyhow::Result<()> {
         let _ = proxy.send_event(window::Wake::Frame);
     });
 
+    let (stats_tx, stats_rx) = std::sync::mpsc::channel();
+
     // Session on its own thread; if it ends (host gone, error), close the window.
     let session_frames = frames.clone();
     let session_proxy = event_loop.create_proxy();
     let (host, bind) = (args.host, args.bind);
     std::thread::Builder::new().name("aa-session".into()).spawn(move || {
-        let result = runtime.block_on(session::run(host, bind, backends, Some(session_frames), cmd_rx, false));
+        let result =
+            runtime.block_on(session::run(host, bind, backends, Some(session_frames), cmd_rx, false, Some(stats_tx)));
         let reason = match result {
             Ok(()) => {
                 tracing::info!("session ended");
@@ -109,6 +114,7 @@ fn main() -> anyhow::Result<()> {
     })?;
 
     let mut app = window::App::new(format!("Anywhere — {}", args.host), args.fullscreen, args.stretch, frames, cmd_tx);
+    app.set_stats_receiver(stats_rx);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

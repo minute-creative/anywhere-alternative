@@ -29,7 +29,7 @@ struct Viewer {
 }
 
 pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<()> {
-    let socket = crate::udp::bind(listen)?;
+    let socket = Arc::new(crate::udp::bind(listen)?);
     tracing::info!("listening on {}", socket.local_addr()?);
 
     let HostBackends { capture, encoder, input, gamepad, capabilities } = backends;
@@ -39,8 +39,13 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     // longer than one frame interval, and dropping the frames behind it
     // would force yet another keyframe. Latency cost is bounded by the
     // viewer's latest-frame slot, which always shows the newest.
-    let (frame_tx, mut frame_rx) = mpsc::channel::<EncodedFrame>(6);
+    let (frame_tx, frame_rx) = mpsc::channel::<EncodedFrame>(6);
     let (input_tx, input_rx) = mpsc::channel::<InputEvent>(256);
+    // Who to send video to. Written by the receive loop, read by the sender
+    // task. Pacing a frame takes most of a frame interval, so sending must
+    // never run inside the receive loop or incoming packets starve (which
+    // is exactly how the first Wi-Fi session froze).
+    let video_dest: Arc<std::sync::Mutex<Option<SocketAddr>>> = Arc::new(std::sync::Mutex::new(None));
 
     let cap_ctl = Arc::clone(&ctl);
     std::thread::Builder::new()
@@ -57,6 +62,13 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     // Floor: still legible for desktop work. Ceiling: the user's cap.
     let mut bitrate = BitrateController::new(start_kbps, 2_000, StreamConfig::default().max_bitrate_kbps);
     let pacer = Pacer::new();
+
+    // --- sender task: owns pacing, shares the socket --------------------
+    {
+        let socket = Arc::clone(&socket);
+        let video_dest = Arc::clone(&video_dest);
+        tokio::spawn(sender_task(socket, frame_rx, video_dest, pacer, fps));
+    }
     let mut buf = vec![0u8; wire::MAX_DATAGRAM * 2];
     let mut housekeeping = tokio::time::interval(Duration::from_secs(1));
 
@@ -72,33 +84,14 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 if let Some(v) = viewer.as_mut().filter(|v| v.addr == from) {
                     v.last_heard = Instant::now();
                 }
-                handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &mut seq, &mut bitrate).await?;
-            }
-
-            Some(frame) = frame_rx.recv() => {
-                let Some(v) = viewer.as_ref() else { continue };
-                let slices = wire::slice_frame(&frame.data, frame.meta.frame_id, frame.meta.is_keyframe, &mut seq)?;
-                // Paced send: spread the frame's datagrams across the frame
-                // interval so the Wi-Fi adapter's queue never overflows.
-                let count = slices.len();
-                let group = Pacer::group_size(count);
-                let t0 = Instant::now();
-                for (i, s) in slices.into_iter().enumerate() {
-                    if i % group == 0 && i > 0 {
-                        let due = t0 + pacer.offset(i, count, fps);
-                        tokio::time::sleep_until(due.into()).await;
-                    }
-                    if let Err(e) = socket.send_to(&s, v.addr).await {
-                        tracing::warn!("send failed: {e}");
-                        break;
-                    }
-                }
+                handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &mut seq, &mut bitrate, &video_dest).await?;
             }
 
             _ = housekeeping.tick() => {
                 if let Some(v) = viewer.as_ref().filter(|v| v.last_heard.elapsed() > VIEWER_TIMEOUT) {
                     tracing::info!(addr = %v.addr, "viewer timed out");
                     viewer = None;
+                    *video_dest.lock().expect("dest") = None;
                     ctl.streaming.store(false, Ordering::Relaxed);
                     let _ = input_tx.try_send(InputEvent::ReleaseAll);
                 }
@@ -127,6 +120,7 @@ async fn handle_packet(
     input_tx: &mpsc::Sender<InputEvent>,
     seq: &mut SeqCounter,
     bitrate: &mut BitrateController,
+    video_dest: &std::sync::Mutex<Option<SocketAddr>>,
 ) -> anyhow::Result<()> {
     let is_current_viewer = viewer.as_ref().is_some_and(|v| v.addr == from);
 
@@ -161,6 +155,7 @@ async fn handle_packet(
                             )
                             .await?;
                             *viewer = Some(Viewer { addr: from, last_heard: Instant::now() });
+                            *video_dest.lock().expect("dest") = Some(from);
                             *bitrate = BitrateController::new(
                                 StreamConfig::suggested_bitrate_kbps(host_caps.max_resolution, host_caps.max_fps),
                                 2_000,
@@ -178,6 +173,7 @@ async fn handle_packet(
                 ControlMessage::Bye if is_current_viewer => {
                     tracing::info!(%from, "viewer left");
                     *viewer = None;
+                    *video_dest.lock().expect("dest") = None;
                     ctl.streaming.store(false, Ordering::Relaxed);
                     let _ = input_tx.try_send(InputEvent::ReleaseAll);
                 }
@@ -237,6 +233,41 @@ async fn handle_packet(
         kind => tracing::trace!(?kind, %from, "ignored packet"),
     }
     Ok(())
+}
+
+/// Pulls encoded frames and sends them to the current viewer, paced across
+/// the frame interval. Runs independently of the receive loop.
+async fn sender_task(
+    socket: Arc<UdpSocket>,
+    mut frame_rx: mpsc::Receiver<EncodedFrame>,
+    video_dest: Arc<std::sync::Mutex<Option<SocketAddr>>>,
+    pacer: Pacer,
+    fps: u16,
+) {
+    let mut seq = SeqCounter::default();
+    while let Some(frame) = frame_rx.recv().await {
+        let Some(dest) = *video_dest.lock().expect("dest") else { continue };
+        let slices = match wire::slice_frame(&frame.data, frame.meta.frame_id, frame.meta.is_keyframe, &mut seq) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("frame too large to slice: {e}");
+                continue;
+            }
+        };
+        let count = slices.len();
+        let group = Pacer::group_size(count);
+        let t0 = Instant::now();
+        for (i, s) in slices.into_iter().enumerate() {
+            if i % group == 0 && i > 0 {
+                tokio::time::sleep_until((t0 + pacer.offset(i, count, fps)).into()).await;
+            }
+            if let Err(e) = socket.send_to(&s, dest).await {
+                tracing::warn!("send failed: {e}");
+                break;
+            }
+        }
+    }
+    tracing::info!("sender task exiting");
 }
 
 async fn send_control(
