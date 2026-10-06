@@ -22,9 +22,9 @@ use windows::core::Interface;
 use windows::Win32::Foundation::{HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE,
+    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
@@ -32,11 +32,25 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
 };
 
-use crate::{CapturedFrame, FrameBuffer, PlatformError, Result, ScreenCapture};
+use crate::{CapturedFrame, FrameBuffer, GpuApi, PlatformError, Result, ScreenCapture};
+
+/// Where captured frames should end up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Output {
+    /// Read pixels back to the CPU (for the software encoder). Slow at 4K.
+    Cpu,
+    /// Copy into a GPU texture we own and hand out its pointer; the hardware
+    /// encoder copies from it. Zero CPU involvement.
+    Gpu,
+}
 
 pub struct DxgiCapture {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
+    output_mode: Output,
+    /// GPU-mode destination; alive as long as `self`, so the raw pointer we
+    /// hand out in `FrameBuffer::Gpu` stays valid until the next frame.
+    gpu_tex: Option<ID3D11Texture2D>,
     adapter: IDXGIAdapter1,
     output_index: u32,
     dup: Option<IDXGIOutputDuplication>,
@@ -66,7 +80,7 @@ fn win(e: windows::core::Error, what: &str) -> PlatformError {
 
 impl DxgiCapture {
     /// Capture output `output_index` of the first adapter (0 = primary display).
-    pub fn new(output_index: u32) -> Result<Self> {
+    pub fn new(output_index: u32, output_mode: Output) -> Result<Self> {
         // SAFETY: plain COM creation calls with valid out-pointers.
         unsafe {
             let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(|e| win(e, "CreateDXGIFactory1"))?;
@@ -107,10 +121,13 @@ impl DxgiCapture {
             let refresh_hz = rr.Numerator.checked_div(rr.Denominator).map_or(60, |hz| hz.clamp(1, 1000) as u16);
 
             let staging = Self::make_staging(&device, res)?;
-            tracing::info!(?res, refresh_hz, "desktop duplication ready");
+            let gpu_tex = if output_mode == Output::Gpu { Some(Self::make_gpu_tex(&device, res)?) } else { None };
+            tracing::info!(?res, refresh_hz, ?output_mode, "desktop duplication ready");
             Ok(Self {
                 device,
                 context,
+                output_mode,
+                gpu_tex,
                 adapter,
                 output_index,
                 dup: Some(dup),
@@ -127,6 +144,31 @@ impl DxgiCapture {
     /// needs it to turn stream coordinates into screen coordinates.
     pub fn desktop_rect(&self) -> RECT {
         self.desktop_rect
+    }
+
+    /// The D3D11 device the frames live on. A hardware encoder must be
+    /// created on this same device to read them without a copy.
+    pub fn device(&self) -> (&ID3D11Device, &ID3D11DeviceContext) {
+        (&self.device, &self.context)
+    }
+
+    fn make_gpu_tex(device: &ID3D11Device, res: Resolution) -> Result<ID3D11Texture2D> {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: res.width,
+            Height: res.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut tex = None;
+        // SAFETY: desc is fully initialised; out-pointer is valid.
+        unsafe { device.CreateTexture2D(&desc, None, Some(&mut tex)) }.map_err(|e| win(e, "CreateTexture2D(gpu)"))?;
+        tex.ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("CreateTexture2D returned nothing")))
     }
 
     fn make_staging(device: &ID3D11Device, res: Resolution) -> Result<ID3D11Texture2D> {
@@ -164,6 +206,9 @@ impl DxgiCapture {
                 tracing::info!(old = ?self.res, new = ?res, "display mode changed");
                 self.res = res;
                 self.staging = Self::make_staging(&self.device, res)?;
+                if self.gpu_tex.is_some() {
+                    self.gpu_tex = Some(Self::make_gpu_tex(&self.device, res)?);
+                }
             }
             self.dup = Some(dup);
         }
@@ -213,6 +258,25 @@ impl ScreenCapture for DxgiCapture {
         let capture_ts_us = self.started.elapsed().as_micros() as u64;
         let res = self.res;
 
+        if let Some(gpu_tex) = &self.gpu_tex {
+            // SAFETY: GPU→GPU copy into a texture we own, then release the
+            // duplication frame. The pointer handed out is valid until the
+            // next call, which is the contract the encoder relies on.
+            unsafe {
+                let tex: ID3D11Texture2D = resource.cast().map_err(|e| win(e, "ID3D11Texture2D"))?;
+                self.context.CopyResource(gpu_tex, &tex);
+                drop(tex);
+                drop(resource);
+                dup.ReleaseFrame().map_err(|e| win(e, "ReleaseFrame"))?;
+            }
+            return Ok(Some(CapturedFrame {
+                buffer: FrameBuffer::Gpu { api: GpuApi::D3D11, handle: gpu_tex.as_raw() as usize },
+                format: PixelFormat::Bgra8,
+                resolution: res,
+                capture_ts_us,
+            }));
+        }
+
         // SAFETY: the resource is a 2D texture by contract of Desktop
         // Duplication; copy on the GPU, release the frame, then map the
         // staging copy which we own.
@@ -248,6 +312,8 @@ impl ScreenCapture for DxgiCapture {
     fn resolution(&self) -> Resolution {
         self.res
     }
+
+    // `output_mode` is read at construction; kept for diagnostics.
 
     fn refresh_rate_hz(&self) -> u16 {
         self.refresh_hz

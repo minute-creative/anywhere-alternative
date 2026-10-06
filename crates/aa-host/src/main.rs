@@ -55,6 +55,11 @@ struct Args {
     /// Measure encoder throughput on this machine and exit.
     #[arg(long)]
     bench: bool,
+
+    /// Encoder to use for the real screen: auto (hardware, else software),
+    /// hardware, or software.
+    #[arg(long, default_value = "auto")]
+    encoder: String,
 }
 
 fn parse_resolution(s: &str) -> Result<Resolution, String> {
@@ -65,16 +70,44 @@ fn parse_resolution(s: &str) -> Result<Resolution, String> {
 /// Encoder throughput at common resolutions. Software only until hardware
 /// backends exist; then each backend reports its own line.
 fn bench() -> anyhow::Result<()> {
-    println!("encoder throughput (software H.264, synthetic moving picture):");
-    for (name, res) in [
+    let sizes = [
         ("1080p", Resolution::new(1920, 1080)),
         ("1440p", Resolution::new(2560, 1440)),
         ("4K", Resolution::new(3840, 2160)),
-    ] {
+    ];
+    println!("software H.264 (synthetic moving picture):");
+    for (name, res) in sizes {
         let fps = aa_platform::sw::bench_encoder(res, 60)?;
         println!("  {name:>6}: {fps:6.1} fps  ({:.2} ms/frame)", 1000.0 / fps);
     }
+    #[cfg(target_os = "windows")]
+    {
+        println!("hardware H.264 via Media Foundation:");
+        for (name, res) in sizes {
+            match aa_platform::windows::bench_hardware(res, 120) {
+                Ok((enc, fps)) => println!("  {name:>6}: {fps:6.1} fps  ({:.2} ms/frame)  [{enc}]", 1000.0 / fps),
+                Err(e) => println!("  {name:>6}: unavailable ({e})"),
+            }
+        }
+    }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn real_host_backends(encoder: &str) -> anyhow::Result<aa_platform::HostBackends> {
+    use aa_platform::windows::EncoderChoice;
+    let choice = match encoder {
+        "auto" => EncoderChoice::Auto,
+        "hardware" | "hw" => EncoderChoice::Hardware,
+        "software" | "sw" => EncoderChoice::Software,
+        other => anyhow::bail!("unknown --encoder {other}; use auto, hardware or software"),
+    };
+    Ok(aa_platform::windows::host_backends_with(choice)?)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn real_host_backends(_encoder: &str) -> anyhow::Result<aa_platform::HostBackends> {
+    Ok(aa_platform::host_backends()?)
 }
 
 #[tokio::main]
@@ -92,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("using MOCK backends: test pattern, no real screen");
         aa_platform::mock::host_backends(args.mock_res, args.mock_fps, args.mock_raw)?
     } else {
-        aa_platform::host_backends().context("real host backends unavailable; try --mock")?
+        real_host_backends(&args.encoder).context("real host backends unavailable; try --mock")?
     };
 
     session::run(args.listen, backends).await

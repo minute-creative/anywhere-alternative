@@ -1,0 +1,524 @@
+//! Hardware H.264/HEVC encoding through Media Foundation's encoder MFTs.
+//!
+//! Why this and not a vendor SDK first: Windows ships a hardware encoder
+//! transform for Intel (QuickSync), NVIDIA (NVENC) and AMD (AMF) behind one
+//! API, it needs no extra runtime installed, and it accepts a D3D11 texture
+//! as input. So the captured desktop texture goes GPU → encoder with no CPU
+//! copy at all, which removes both of the software path's bottlenecks (the
+//! 20 MB/frame readback and the CPU encode). Vendor SDKs can be added later
+//! for features MF doesn't expose (true intra-refresh, AV1 on some GPUs).
+//!
+//! Pipeline per frame:
+//!
+//! ```text
+//!  capture texture ──CopyResource──► NV12? no: BGRA texture (the MFT
+//!  converts internally on Intel/AMD/NVIDIA) ──► IMFSample ──► ProcessInput
+//!  ──► drain ProcessOutput ──► Annex-B bitstream
+//! ```
+//!
+//! Hardware MFTs are *asynchronous*: we must unlock them with
+//! `MF_TRANSFORM_ASYNC_UNLOCK` and drive them by events (`METransformNeedInput`
+//! / `METransformHaveOutput`). We handle that with a simple blocking loop:
+//! feed one frame, then pull events until the matching output arrives.
+
+// FFI code: `unsafe` is the point here, each block carries a SAFETY note;
+// the pedantic cast/pointer lints add noise, not safety.
+#![allow(unsafe_code, clippy::pedantic)]
+
+use std::time::Instant;
+
+use aa_core::video::{Codec, EncodedFrameMeta, PixelFormat, Resolution};
+use bytes::Bytes;
+use windows::core::{Interface, GUID};
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Media::MediaFoundation::{
+    eAVEncCommonRateControlMode_CBR, CODECAPI_AVEncCommonLowLatency, CODECAPI_AVEncCommonMeanBitRate,
+    CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncCommonRealTime, CODECAPI_AVEncMPVDefaultBPictureCount,
+    CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI, IMFActivate,
+    IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFSample, IMFTransform, METransformHaveOutput, METransformNeedInput,
+    MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample, MFMediaType_Video,
+    MFSampleExtension_CleanPoint, MFStartup, MFTEnumEx, MFVideoFormat_ARGB32, MFVideoFormat_H264, MFVideoFormat_HEVC,
+    MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFSTARTUP_NOSOCKET, MFT_CATEGORY_VIDEO_ENCODER,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_LOW_LATENCY,
+    MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
+    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+};
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
+
+use crate::{CapturedFrame, EncodedFrame, FrameBuffer, GpuApi, PlatformError, Result, VideoEncoder};
+
+fn win(e: windows::core::Error, what: &str) -> PlatformError {
+    PlatformError::Backend(anyhow::anyhow!("{what}: {e}"))
+}
+
+fn variant_u32(v: u32) -> VARIANT {
+    let mut var = VARIANT::default();
+    // SAFETY: writing the tag and matching union member of a zeroed VARIANT.
+    unsafe {
+        (*var.Anonymous.Anonymous).vt = VT_UI4;
+        (*var.Anonymous.Anonymous).Anonymous.ulVal = v;
+    }
+    var
+}
+
+fn variant_bool(b: bool) -> VARIANT {
+    let mut var = VARIANT::default();
+    // SAFETY: as above. VARIANT_BOOL true is -1 (all bits set).
+    unsafe {
+        (*var.Anonymous.Anonymous).vt = VT_BOOL;
+        (*var.Anonymous.Anonymous).Anonymous.boolVal =
+            if b { windows::core::VARIANT_BOOL(-1) } else { windows::core::VARIANT_BOOL(0) };
+    }
+    var
+}
+
+/// Which codec to ask the hardware for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HwCodec {
+    H264,
+    Hevc,
+}
+
+impl HwCodec {
+    fn subtype(self) -> GUID {
+        match self {
+            HwCodec::H264 => MFVideoFormat_H264,
+            HwCodec::Hevc => MFVideoFormat_HEVC,
+        }
+    }
+    fn as_codec(self) -> Codec {
+        match self {
+            HwCodec::H264 => Codec::H264,
+            HwCodec::Hevc => Codec::Hevc,
+        }
+    }
+}
+
+pub struct MfEncoder {
+    mft: IMFTransform,
+    events: IMFMediaEventGenerator,
+    codec_api: Option<ICodecAPI>,
+    _dxgi_manager: IMFDXGIDeviceManager,
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    /// A texture we own that the encoder reads from; capture copies into it
+    /// so the encoder never holds the desktop duplication frame hostage.
+    input_tex: ID3D11Texture2D,
+    input_id: u32,
+    output_id: u32,
+    output_provides_samples: bool,
+    res: Resolution,
+    fps: u16,
+    codec: HwCodec,
+    name: String,
+    next_id: u32,
+    started: Instant,
+    frame_duration_100ns: i64,
+}
+
+// SAFETY: all COM objects are used from the capture thread only; the D3D11
+// device has multithread protection enabled because the MFT touches it from
+// its own worker threads.
+unsafe impl Send for MfEncoder {}
+
+impl std::fmt::Debug for MfEncoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MfEncoder")
+            .field("name", &self.name)
+            .field("codec", &self.codec)
+            .field("res", &self.res)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Names of hardware encoders present, best first (for `bench`/diagnostics).
+pub fn list_hardware_encoders(codec: HwCodec) -> Vec<String> {
+    let mut names = Vec::new();
+    // SAFETY: standard MF enumeration; the returned array is CoTaskMem that we free.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let _ = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+        let out = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: codec.subtype() };
+        let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
+        let mut count = 0u32;
+        if MFTEnumEx(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+            None,
+            Some(&out),
+            &mut list,
+            &mut count,
+        )
+        .is_ok()
+        {
+            for i in 0..count as usize {
+                if let Some(act) = (*list.add(i)).take() {
+                    names.push(friendly_name(&act));
+                }
+            }
+            windows::Win32::System::Com::CoTaskMemFree(Some(list.cast()));
+        }
+    }
+    names
+}
+
+fn friendly_name(act: &IMFActivate) -> String {
+    use windows::Win32::Media::MediaFoundation::MFT_FRIENDLY_NAME_Attribute;
+    // SAFETY: GetAllocatedString allocates with CoTaskMem; we copy then free.
+    unsafe {
+        let mut p = windows::core::PWSTR::null();
+        let mut len = 0u32;
+        if act.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut p, &mut len).is_ok() && !p.is_null() {
+            let s = p.to_string().unwrap_or_default();
+            windows::Win32::System::Com::CoTaskMemFree(Some(p.as_ptr().cast()));
+            s
+        } else {
+            "unknown encoder".into()
+        }
+    }
+}
+
+impl MfEncoder {
+    /// Open the first hardware encoder for `codec` on `device`. The device
+    /// must be the one the capture textures live on.
+    pub fn new(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        codec: HwCodec,
+        res: Resolution,
+        fps: u16,
+        bitrate_kbps: u32,
+    ) -> Result<Self> {
+        // SAFETY: a long sequence of COM calls, each checked; pointers are
+        // either stack out-params or COM objects kept alive by `self`.
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET).map_err(|e| win(e, "MFStartup"))?;
+
+            // The MFT drives the device from its own threads.
+            if let Ok(mt) = device.cast::<ID3D11Multithread>() {
+                mt.SetMultithreadProtected(true);
+            }
+
+            // --- find a hardware encoder -----------------------------------
+            let out = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: codec.subtype() };
+            let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
+            let mut count = 0u32;
+            MFTEnumEx(
+                MFT_CATEGORY_VIDEO_ENCODER,
+                MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+                None,
+                Some(&out),
+                &mut list,
+                &mut count,
+            )
+            .map_err(|e| win(e, "MFTEnumEx"))?;
+            if count == 0 {
+                windows::Win32::System::Com::CoTaskMemFree(Some(list.cast()));
+                return Err(PlatformError::Unavailable(format!("no hardware {codec:?} encoder on this GPU")));
+            }
+            let act = (*list).take().ok_or_else(|| PlatformError::Unavailable("empty activate".into()))?;
+            for i in 1..count as usize {
+                drop((*list.add(i)).take());
+            }
+            windows::Win32::System::Com::CoTaskMemFree(Some(list.cast()));
+            let name = friendly_name(&act);
+            let mft: IMFTransform = act.ActivateObject().map_err(|e| win(e, "ActivateObject"))?;
+            tracing::info!(%name, ?codec, "hardware encoder");
+
+            // --- async unlock + D3D awareness -------------------------------
+            let attrs = mft.GetAttributes().map_err(|e| win(e, "GetAttributes"))?;
+            attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1).map_err(|e| win(e, "ASYNC_UNLOCK"))?;
+            let d3d_aware = attrs.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) != 0;
+            if !d3d_aware {
+                return Err(PlatformError::Unavailable(format!("{name} is not D3D11-aware")));
+            }
+            let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
+
+            let mut reset_token = 0u32;
+            let mut mgr: Option<IMFDXGIDeviceManager> = None;
+            MFCreateDXGIDeviceManager(&mut reset_token, &mut mgr).map_err(|e| win(e, "MFCreateDXGIDeviceManager"))?;
+            let mgr = mgr.ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("no DXGI manager")))?;
+            mgr.ResetDevice(device, reset_token).map_err(|e| win(e, "ResetDevice"))?;
+            let mgr_ptr: *mut std::ffi::c_void = mgr.as_raw();
+            mft.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, mgr_ptr as usize).map_err(|e| win(e, "SET_D3D_MANAGER"))?;
+
+            // --- stream ids ---------------------------------------------------
+            let (mut in_ids, mut out_ids) = ([0u32; 1], [0u32; 1]);
+            let (input_id, output_id) = match mft.GetStreamIDs(&mut in_ids, &mut out_ids) {
+                Ok(()) => (in_ids[0], out_ids[0]),
+                Err(_) => (0, 0), // E_NOTIMPL means "ids are 0..n"
+            };
+
+            // --- output type first (encoders require this order) -------------
+            let out_type = MFCreateMediaType().map_err(|e| win(e, "MFCreateMediaType"))?;
+            out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| win(e, "major"))?;
+            out_type.SetGUID(&MF_MT_SUBTYPE, &codec.subtype()).map_err(|e| win(e, "subtype"))?;
+            out_type.SetUINT32(&MF_MT_AVG_BITRATE, bitrate_kbps.saturating_mul(1000)).map_err(|e| win(e, "bitrate"))?;
+            out_type
+                .SetUINT64(&MF_MT_FRAME_SIZE, (u64::from(res.width) << 32) | u64::from(res.height))
+                .map_err(|e| win(e, "frame size"))?;
+            out_type.SetUINT64(&MF_MT_FRAME_RATE, (u64::from(fps) << 32) | 1).map_err(|e| win(e, "frame rate"))?;
+            out_type
+                .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+                .map_err(|e| win(e, "interlace"))?;
+            let _ = out_type.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 0);
+            mft.SetOutputType(output_id, &out_type, 0).map_err(|e| win(e, "SetOutputType"))?;
+
+            // --- input type: prefer BGRA so the GPU does the colour convert ---
+            let mut chosen_input = None;
+            for sub in [MFVideoFormat_ARGB32, MFVideoFormat_NV12] {
+                let in_type = MFCreateMediaType().map_err(|e| win(e, "MFCreateMediaType"))?;
+                in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| win(e, "major"))?;
+                in_type.SetGUID(&MF_MT_SUBTYPE, &sub).map_err(|e| win(e, "subtype"))?;
+                in_type
+                    .SetUINT64(&MF_MT_FRAME_SIZE, (u64::from(res.width) << 32) | u64::from(res.height))
+                    .map_err(|e| win(e, "frame size"))?;
+                in_type.SetUINT64(&MF_MT_FRAME_RATE, (u64::from(fps) << 32) | 1).map_err(|e| win(e, "frame rate"))?;
+                in_type
+                    .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+                    .map_err(|e| win(e, "interlace"))?;
+                if mft.SetInputType(input_id, &in_type, 0).is_ok() {
+                    chosen_input = Some(sub);
+                    break;
+                }
+            }
+            let input_fmt = chosen_input
+                .ok_or_else(|| PlatformError::Unavailable(format!("{name} accepts neither BGRA nor NV12")))?;
+            if input_fmt == MFVideoFormat_NV12 {
+                // Stage-5 follow-up: a tiny compute shader for BGRA→NV12. Until
+                // then this encoder can't take our BGRA capture.
+                return Err(PlatformError::Unavailable(format!(
+                    "{name} wants NV12 input; BGRA→NV12 conversion not written yet"
+                )));
+            }
+
+            // --- codec tuning (best effort; not every driver supports every knob)
+            let codec_api = mft.cast::<ICodecAPI>().ok();
+            if let Some(api) = &codec_api {
+                let set = |guid: &GUID, v: VARIANT| {
+                    if let Err(e) = api.SetValue(guid, &v) {
+                        tracing::debug!("codec api {guid:?}: {e}");
+                    }
+                };
+                set(&CODECAPI_AVLowLatencyMode, variant_bool(true));
+                set(&CODECAPI_AVEncCommonLowLatency, variant_bool(true));
+                set(&CODECAPI_AVEncCommonRealTime, variant_bool(true));
+                set(&CODECAPI_AVEncCommonRateControlMode, variant_u32(eAVEncCommonRateControlMode_CBR.0 as u32));
+                set(&CODECAPI_AVEncCommonMeanBitRate, variant_u32(bitrate_kbps.saturating_mul(1000)));
+                set(&CODECAPI_AVEncMPVDefaultBPictureCount, variant_u32(0)); // no B-frames: no reordering delay
+                set(&CODECAPI_AVEncMPVGOPSize, variant_u32(u32::from(fps) * 10));
+                // keyframe every 10 s; NACK forces sooner
+            }
+
+            let out_info = mft.GetOutputStreamInfo(output_id).map_err(|e| win(e, "GetOutputStreamInfo"))?;
+            let output_provides_samples = out_info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
+
+            // --- our input texture ------------------------------------------
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: res.width,
+                Height: res.height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut tex = None;
+            device.CreateTexture2D(&desc, None, Some(&mut tex)).map_err(|e| win(e, "CreateTexture2D(input)"))?;
+            let input_tex = tex.ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("no input texture")))?;
+
+            mft.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0).map_err(|e| win(e, "BEGIN_STREAMING"))?;
+            mft.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0).map_err(|e| win(e, "START_OF_STREAM"))?;
+            let events: IMFMediaEventGenerator = mft.cast().map_err(|e| win(e, "IMFMediaEventGenerator"))?;
+
+            Ok(Self {
+                mft,
+                events,
+                codec_api,
+                _dxgi_manager: mgr,
+                device: device.clone(),
+                context: context.clone(),
+                input_tex,
+                input_id,
+                output_id,
+                output_provides_samples,
+                res,
+                fps,
+                codec,
+                name,
+                next_id: 0,
+                started: Instant::now(),
+                frame_duration_100ns: 10_000_000 / i64::from(fps.max(1)),
+            })
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Block until the MFT asks for input (async MFTs require this).
+    unsafe fn wait_need_input(&self) -> Result<()> {
+        loop {
+            let ev = self.events.GetEvent(Default::default()).map_err(|e| win(e, "GetEvent"))?;
+            let t = ev.GetType().map_err(|e| win(e, "GetType"))?;
+            if t == METransformNeedInput.0 as u32 {
+                return Ok(());
+            }
+            if t == METransformHaveOutput.0 as u32 {
+                // Output we didn't expect yet; the caller's drain picks it up
+                // because HaveOutput stays pending until ProcessOutput.
+                return Ok(());
+            }
+        }
+    }
+
+    /// Pull one encoded sample. Blocks on the HaveOutput event.
+    unsafe fn pull_output(&self) -> Result<Option<(Bytes, bool)>> {
+        loop {
+            let ev = self.events.GetEvent(Default::default()).map_err(|e| win(e, "GetEvent"))?;
+            let t = ev.GetType().map_err(|e| win(e, "GetType"))?;
+            if t == METransformNeedInput.0 as u32 {
+                continue; // it wants more before it gives output; fine, caller feeds next frame
+            }
+            if t != METransformHaveOutput.0 as u32 {
+                continue;
+            }
+            let sample = if self.output_provides_samples {
+                None
+            } else {
+                Some(MFCreateSample().map_err(|e| win(e, "MFCreateSample"))?)
+            };
+            let mut out = [MFT_OUTPUT_DATA_BUFFER {
+                dwStreamID: self.output_id,
+                pSample: std::mem::ManuallyDrop::new(sample),
+                dwStatus: 0,
+                pEvents: std::mem::ManuallyDrop::new(None),
+            }];
+            let mut status = 0u32;
+            match self.mft.ProcessOutput(0, &mut out, &mut status) {
+                Ok(()) => {}
+                Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
+                Err(e) => return Err(win(e, "ProcessOutput")),
+            }
+            let sample: Option<IMFSample> = std::mem::ManuallyDrop::take(&mut out[0].pSample);
+            drop(std::mem::ManuallyDrop::take(&mut out[0].pEvents));
+            let Some(sample) = sample else { return Ok(None) };
+            let keyframe = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
+            let buf = sample.ConvertToContiguousBuffer().map_err(|e| win(e, "ConvertToContiguousBuffer"))?;
+            let mut ptr: *mut u8 = std::ptr::null_mut();
+            let mut len = 0u32;
+            buf.Lock(&mut ptr, None, Some(&mut len)).map_err(|e| win(e, "Lock"))?;
+            let data = Bytes::copy_from_slice(std::slice::from_raw_parts(ptr, len as usize));
+            buf.Unlock().map_err(|e| win(e, "Unlock"))?;
+            return Ok(Some((data, keyframe)));
+        }
+    }
+}
+
+impl VideoEncoder for MfEncoder {
+    fn encode(&mut self, frame: &CapturedFrame, force_keyframe: bool) -> Result<EncodedFrame> {
+        if frame.resolution != self.res {
+            return Err(PlatformError::Backend(anyhow::anyhow!("resolution changed; encoder must be reopened")));
+        }
+        if frame.format != PixelFormat::Bgra8 {
+            return Err(PlatformError::Backend(anyhow::anyhow!("MF encoder path expects BGRA capture")));
+        }
+        // SAFETY: COM calls on objects we own; the GPU handle is an
+        // ID3D11Texture2D on *our* device by contract of the Windows capture.
+        unsafe {
+            match &frame.buffer {
+                FrameBuffer::Gpu { api: GpuApi::D3D11, handle } => {
+                    let src = ID3D11Texture2D::from_raw_borrowed(&(*handle as *mut std::ffi::c_void))
+                        .ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("null texture handle")))?;
+                    self.context.CopyResource(&self.input_tex, src);
+                }
+                FrameBuffer::Cpu(_) => {
+                    return Err(PlatformError::Backend(anyhow::anyhow!(
+                        "MF encoder needs a GPU frame; use the software encoder for CPU frames"
+                    )));
+                }
+                FrameBuffer::Gpu { api, .. } => {
+                    return Err(PlatformError::Backend(anyhow::anyhow!("unsupported GPU api {api:?}")));
+                }
+            }
+
+            if force_keyframe {
+                if let Some(api) = &self.codec_api {
+                    let _ = api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &variant_u32(1));
+                }
+            }
+
+            let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &self.input_tex, 0, false)
+                .map_err(|e| win(e, "MFCreateDXGISurfaceBuffer"))?;
+            let sample = MFCreateSample().map_err(|e| win(e, "MFCreateSample"))?;
+            sample.AddBuffer(&buffer).map_err(|e| win(e, "AddBuffer"))?;
+            let ts = (self.started.elapsed().as_nanos() / 100) as i64;
+            sample.SetSampleTime(ts).map_err(|e| win(e, "SetSampleTime"))?;
+            sample.SetSampleDuration(self.frame_duration_100ns).map_err(|e| win(e, "SetSampleDuration"))?;
+
+            self.wait_need_input()?;
+            self.mft.ProcessInput(self.input_id, &sample, 0).map_err(|e| win(e, "ProcessInput"))?;
+
+            // Low-latency encoders return the frame right away; if this one
+            // holds a frame of lookahead we get the previous frame's data,
+            // which is still correct ordering for the wire.
+            let (data, keyframe) = match self.pull_output()? {
+                Some(x) => x,
+                None => (Bytes::new(), false),
+            };
+
+            let id = self.next_id;
+            self.next_id += 1;
+            Ok(EncodedFrame {
+                meta: EncodedFrameMeta {
+                    frame_id: id,
+                    capture_ts_us: frame.capture_ts_us,
+                    is_keyframe: keyframe,
+                    codec: self.codec.as_codec(),
+                },
+                data,
+            })
+        }
+    }
+
+    fn set_bitrate_kbps(&mut self, kbps: u32) -> Result<()> {
+        if let Some(api) = &self.codec_api {
+            // SAFETY: COM call with a valid VARIANT.
+            unsafe { api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variant_u32(kbps.saturating_mul(1000))) }
+                .map_err(|e| win(e, "set bitrate"))?;
+        }
+        Ok(())
+    }
+
+    fn request_intra_refresh(&mut self) -> Result<()> {
+        if let Some(api) = &self.codec_api {
+            // SAFETY: as above.
+            unsafe { api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &variant_u32(1)) }
+                .map_err(|e| win(e, "force keyframe"))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MfEncoder {
+    fn drop(&mut self) {
+        // SAFETY: flushing a live MFT; errors on teardown are not actionable.
+        unsafe {
+            let _ = self.mft.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+        }
+        let _ = &self.device;
+        let _ = self.fps;
+    }
+}
