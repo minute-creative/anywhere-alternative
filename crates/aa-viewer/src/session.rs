@@ -40,10 +40,10 @@ pub async fn run(
     tracing::info!("connecting to {host} from {}", socket.local_addr()?);
 
     let ViewerBackends { decoder, capabilities } = backends;
-    let mut seq = SeqCounter::default();
+    let seq = SeqCounter::default();
 
     // --- handshake ---------------------------------------------------------
-    send_control(&socket, &ControlMessage::hello(capabilities), &mut seq).await?;
+    send_control(&socket, &ControlMessage::hello(capabilities), &seq).await?;
     let mut buf = vec![0u8; wire::MAX_DATAGRAM * 2];
     let negotiated = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         loop {
@@ -130,7 +130,7 @@ pub async fn run(
                             let _ = lost;
                         }
                         if need_keyframe.load(Ordering::Relaxed) && !last_nack.is_some_and(|t| t.elapsed() <= NACK_INTERVAL) {
-                            send_nack(&socket, 0, &mut seq).await?;
+                            send_nack(&socket, 0, &seq).await?;
                             last_nack = Some(Instant::now());
                         }
                     }
@@ -161,11 +161,11 @@ pub async fn run(
                                 // Not an input event; handle it after this batch.
                                 match cmd {
                                     ViewerCommand::SetMaxBitrate(kbps) => {
-                                        send_control(&socket, &ControlMessage::SetMaxBitrate { kbps }, &mut seq).await?;
+                                        send_control(&socket, &ControlMessage::SetMaxBitrate { kbps }, &seq).await?;
                                     }
                                     ViewerCommand::Quit => {
-                                        send_input(&socket, &batch, &mut seq).await?;
-                                        send_control(&socket, &ControlMessage::Bye, &mut seq).await?;
+                                        send_input(&socket, &batch, &seq).await?;
+                                        send_control(&socket, &ControlMessage::Bye, &seq).await?;
                                         return Ok(());
                                     }
                                     ViewerCommand::Input(_) => unreachable!(),
@@ -177,14 +177,14 @@ pub async fn run(
                                 break;
                             }
                         }
-                        send_input(&socket, &batch, &mut seq).await?;
+                        send_input(&socket, &batch, &seq).await?;
                     }
                     Some(ViewerCommand::SetMaxBitrate(kbps)) => {
-                        send_control(&socket, &ControlMessage::SetMaxBitrate { kbps }, &mut seq).await?;
+                        send_control(&socket, &ControlMessage::SetMaxBitrate { kbps }, &seq).await?;
                     }
                     Some(ViewerCommand::Quit) | None => {
                         tracing::info!("window closed");
-                        send_control(&socket, &ControlMessage::Bye, &mut seq).await?;
+                        send_control(&socket, &ControlMessage::Bye, &seq).await?;
                         return Ok(());
                     }
                 }
@@ -224,7 +224,7 @@ pub async fn run(
                     frames_received: u16::try_from(frames_this_second).unwrap_or(u16::MAX),
                     rtt_tenths_ms: (stats.rtt_ms.get().unwrap_or(0.0) * 10.0).clamp(0.0, 65535.0) as u16,
                 };
-                send_report(&socket, &rep, &mut seq).await?;
+                send_report(&socket, &rep, &seq).await?;
                 if let Some(tx) = &stats_tx {
                     let _ = tx.send(crate::overlay::LiveStats {
                         fps: frames_this_second,
@@ -238,12 +238,12 @@ pub async fn run(
 
                 if test_input {
                     wiggle = wiggle.wrapping_add(1000);
-                    send_input(&socket, &[InputEvent::MouseMoveAbs { x: wiggle, y: wiggle }], &mut seq).await?;
+                    send_input(&socket, &[InputEvent::MouseMoveAbs { x: wiggle, y: wiggle }], &seq).await?;
                 }
             }
 
             _ = tokio::signal::ctrl_c() => {
-                send_control(&socket, &ControlMessage::Bye, &mut seq).await?;
+                send_control(&socket, &ControlMessage::Bye, &seq).await?;
                 return Ok(());
             }
         }
@@ -292,7 +292,7 @@ fn monotonic_us() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
-async fn send_control(socket: &UdpSocket, msg: &ControlMessage, seq: &mut SeqCounter) -> anyhow::Result<()> {
+async fn send_control(socket: &UdpSocket, msg: &ControlMessage, seq: &SeqCounter) -> anyhow::Result<()> {
     let payload = msg.encode();
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN + payload.len());
     Header { kind: Kind::Control, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }
@@ -302,7 +302,7 @@ async fn send_control(socket: &UdpSocket, msg: &ControlMessage, seq: &mut SeqCou
     Ok(())
 }
 
-async fn send_input(socket: &UdpSocket, events: &[InputEvent], seq: &mut SeqCounter) -> anyhow::Result<()> {
+async fn send_input(socket: &UdpSocket, events: &[InputEvent], seq: &SeqCounter) -> anyhow::Result<()> {
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN + events.len() * InputEvent::MAX_ENCODED);
     Header { kind: Kind::Input, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }
         .write(&mut out);
@@ -313,7 +313,7 @@ async fn send_input(socket: &UdpSocket, events: &[InputEvent], seq: &mut SeqCoun
     Ok(())
 }
 
-async fn send_report(socket: &UdpSocket, rep: &ReceiverReport, seq: &mut SeqCounter) -> anyhow::Result<()> {
+async fn send_report(socket: &UdpSocket, rep: &ReceiverReport, seq: &SeqCounter) -> anyhow::Result<()> {
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN + ReceiverReport::ENCODED_LEN);
     Header { kind: Kind::Ack, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }.write(&mut out);
     rep.encode(&mut out);
@@ -321,7 +321,7 @@ async fn send_report(socket: &UdpSocket, rep: &ReceiverReport, seq: &mut SeqCoun
     Ok(())
 }
 
-async fn send_nack(socket: &UdpSocket, frame_id: u32, seq: &mut SeqCounter) -> anyhow::Result<()> {
+async fn send_nack(socket: &UdpSocket, frame_id: u32, seq: &SeqCounter) -> anyhow::Result<()> {
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN);
     Header { kind: Kind::Nack, flags: 0, seq: seq.take(), frame_id, slice_index: 0, slice_count: 1 }.write(&mut out);
     socket.send(&out).await?;

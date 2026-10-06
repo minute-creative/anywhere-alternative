@@ -56,7 +56,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
         .spawn(move || pipeline::input_thread(input, gamepad, input_rx))?;
 
     let mut viewer: Option<Viewer> = None;
-    let mut seq = SeqCounter::default();
+    let seq = Arc::new(SeqCounter::default());
     let fps = capabilities.max_fps;
     let start_kbps = StreamConfig::suggested_bitrate_kbps(capabilities.max_resolution, fps);
     // Floor: still legible for desktop work. Ceiling: the user's cap.
@@ -67,7 +67,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     {
         let socket = Arc::clone(&socket);
         let video_dest = Arc::clone(&video_dest);
-        tokio::spawn(sender_task(socket, frame_rx, video_dest, pacer, fps));
+        tokio::spawn(sender_task(socket, frame_rx, video_dest, pacer, fps, Arc::clone(&seq)));
     }
     let mut buf = vec![0u8; wire::MAX_DATAGRAM * 2];
     let mut housekeeping = tokio::time::interval(Duration::from_secs(1));
@@ -84,7 +84,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 if let Some(v) = viewer.as_mut().filter(|v| v.addr == from) {
                     v.last_heard = Instant::now();
                 }
-                handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &mut seq, &mut bitrate, &video_dest).await?;
+                handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &seq, &mut bitrate, &video_dest).await?;
             }
 
             _ = housekeeping.tick() => {
@@ -100,7 +100,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutting down");
                 if let Some(v) = viewer.as_ref() {
-                    send_control(&socket, v.addr, &ControlMessage::Bye, &mut seq).await?;
+                    send_control(&socket, v.addr, &ControlMessage::Bye, &seq).await?;
                 }
                 ctl.shutdown.store(true, Ordering::Relaxed);
                 return Ok(());
@@ -118,7 +118,7 @@ async fn handle_packet(
     ctl: &PipelineControl,
     host_caps: &aa_core::capability::Capabilities,
     input_tx: &mpsc::Sender<InputEvent>,
-    seq: &mut SeqCounter,
+    seq: &SeqCounter,
     bitrate: &mut BitrateController,
     video_dest: &std::sync::Mutex<Option<SocketAddr>>,
 ) -> anyhow::Result<()> {
@@ -243,11 +243,11 @@ async fn sender_task(
     video_dest: Arc<std::sync::Mutex<Option<SocketAddr>>>,
     pacer: Pacer,
     fps: u16,
+    seq: Arc<SeqCounter>,
 ) {
-    let mut seq = SeqCounter::default();
     while let Some(frame) = frame_rx.recv().await {
         let Some(dest) = *video_dest.lock().expect("dest") else { continue };
-        let slices = match wire::slice_frame(&frame.data, frame.meta.frame_id, frame.meta.is_keyframe, &mut seq) {
+        let slices = match wire::slice_frame(&frame.data, frame.meta.frame_id, frame.meta.is_keyframe, &seq) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("frame too large to slice: {e}");
@@ -274,7 +274,7 @@ async fn send_control(
     socket: &UdpSocket,
     to: SocketAddr,
     msg: &ControlMessage,
-    seq: &mut SeqCounter,
+    seq: &SeqCounter,
 ) -> anyhow::Result<()> {
     let payload = msg.encode();
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN + payload.len());

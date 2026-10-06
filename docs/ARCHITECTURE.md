@@ -188,14 +188,35 @@ Gamepad state is a 15-byte snapshot in DualSense layout.
 | 5 | Windows host: DXGI + NVENC/AMF/QSV/MF, SendInput, ViGEm | stage-1 test passes Win→Mac |
 | 6 | HDR, 4K60 locked, 1080p240, batched UDP sends, auto-start daemon/service, installers | 4K60 with zero dropped/doubled frames over 10 min; 1080p240 on 240 Hz hardware both ends; friends can install it unassisted |
 
-## 9. Measured so far
+## 9. Lessons from real-network testing
+
+Recorded because each one cost a debugging round and is easy to reintroduce.
+
+- **Never send from inside the receive loop.** Anything that takes time
+  (pacing, large bursts) starves packet intake; keepalives get lost and the
+  session times out. Sending has its own task.
+- **One sequence counter per socket.** The viewer's loss tracker assumes a
+  single monotonic sequence. Two tasks with independent counters read as
+  ~99% loss, and the bitrate controller then pins the stream to the floor.
+- **Don't pace frames across the interval on Wi-Fi.** Consecutive frames
+  overlap on the air and collide. Bursts were never the problem; bitrate is
+  the lever.
+- **Gate decoding on keyframes.** After any gap, feeding P-frames to the
+  decoder yields an error per frame until the next keyframe anyway.
+- **Release held input on focus loss and disconnect.** macOS swallows
+  key-up for Cmd during Cmd+Tab; a stuck Ctrl on the host turns every click
+  into Ctrl+click.
+- **Declare DPI awareness before touching the screen.** Otherwise Windows
+  reports virtualised sizes and injected positions land in the wrong place.
+
+## 10. Measured so far
 
 | Date | Machine | Path | Result |
 |------|---------|------|--------|
 | 2026-10-06 | Windows 11 25H2, Intel Core Ultra, Arc 130T, 2880×1800@60 | DXGI → software H.264 (OpenH264) | 1–10 fps; CPU bench 28 fps @1080p |
 | 2026-10-06 | same | DXGI → Quick Sync via Media Foundation, zero-copy | locked 60 fps, 0% loss, ~31 Mbps, <1 ms assembly; bench 110 fps @1080p, 73 @1440p |
 
-## 10. Coding standards
+## 11. Coding standards
 
 - `cargo fmt`, `cargo clippy --all-targets` with pedantic lints: zero warnings.
 - `cargo test` green on Linux CI for every commit.

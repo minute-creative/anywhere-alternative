@@ -150,13 +150,15 @@ impl Packet {
 
 /// Hands out monotonically increasing datagram sequence numbers.
 #[derive(Debug, Default)]
-pub struct SeqCounter(u16);
+pub struct SeqCounter(std::sync::atomic::AtomicU16);
 
 impl SeqCounter {
-    pub fn take(&mut self) -> u16 {
-        let s = self.0;
-        self.0 = self.0.wrapping_add(1);
-        s
+    /// Next sequence number. Atomic so one counter can be shared by every
+    /// task that sends on a socket: the receiver's loss tracker assumes a
+    /// single monotonic sequence per sender, and two independent counters
+    /// interleaved on the wire read as near-total loss.
+    pub fn take(&self) -> u16 {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -165,12 +167,7 @@ impl SeqCounter {
 /// `frame` is the raw codec bitstream (Annex-B NAL units for H.264/HEVC, OBUs
 /// for AV1). Slices are cut at byte boundaries; the decoder only sees the
 /// reassembled whole, so it never needs to know.
-pub fn slice_frame(
-    frame: &Bytes,
-    frame_id: u32,
-    keyframe: bool,
-    seq: &mut SeqCounter,
-) -> Result<Vec<Bytes>, WireError> {
+pub fn slice_frame(frame: &Bytes, frame_id: u32, keyframe: bool, seq: &SeqCounter) -> Result<Vec<Bytes>, WireError> {
     let slice_count = frame.len().div_ceil(MAX_PAYLOAD).max(1);
     let slice_count_u16 = u16::try_from(slice_count).map_err(|_| WireError::PayloadTooLarge(frame.len()))?;
     let flags = if keyframe { flags::KEYFRAME } else { 0 };
@@ -342,8 +339,8 @@ mod tests {
     #[test]
     fn slices_never_exceed_mtu_and_reassemble_exactly() {
         let frame = frame_of(MAX_PAYLOAD * 3 + 17);
-        let mut seq = SeqCounter::default();
-        let slices = slice_frame(&frame, 7, true, &mut seq).unwrap();
+        let seq = SeqCounter::default();
+        let slices = slice_frame(&frame, 7, true, &seq).unwrap();
         assert_eq!(slices.len(), 4);
         assert!(slices.iter().all(|s| s.len() <= MAX_DATAGRAM));
 
@@ -365,8 +362,8 @@ mod tests {
     #[test]
     fn out_of_order_slices_still_complete() {
         let frame = frame_of(MAX_PAYLOAD * 2 + 1);
-        let mut seq = SeqCounter::default();
-        let mut slices = slice_frame(&frame, 1, false, &mut seq).unwrap();
+        let seq = SeqCounter::default();
+        let mut slices = slice_frame(&frame, 1, false, &seq).unwrap();
         slices.reverse();
         let mut r = Reassembler::default();
         let last = slices.into_iter().map(|s| r.push(Packet::parse(s).unwrap())).last().unwrap();
@@ -378,9 +375,9 @@ mod tests {
 
     #[test]
     fn newer_complete_frame_abandons_older_incomplete_one() {
-        let mut seq = SeqCounter::default();
-        let old = slice_frame(&frame_of(MAX_PAYLOAD * 2), 10, false, &mut seq).unwrap();
-        let new = slice_frame(&frame_of(10), 11, false, &mut seq).unwrap();
+        let seq = SeqCounter::default();
+        let old = slice_frame(&frame_of(MAX_PAYLOAD * 2), 10, false, &seq).unwrap();
+        let new = slice_frame(&frame_of(10), 11, false, &seq).unwrap();
 
         let mut r = Reassembler::default();
         assert_eq!(r.push(Packet::parse(old[0].clone()).unwrap()), Reassembly::Pending);
@@ -393,8 +390,8 @@ mod tests {
     #[test]
     fn duplicate_slices_are_harmless() {
         let frame = frame_of(MAX_PAYLOAD + 5);
-        let mut seq = SeqCounter::default();
-        let slices = slice_frame(&frame, 3, false, &mut seq).unwrap();
+        let seq = SeqCounter::default();
+        let slices = slice_frame(&frame, 3, false, &seq).unwrap();
         let mut r = Reassembler::default();
         assert_eq!(r.push(Packet::parse(slices[0].clone()).unwrap()), Reassembly::Pending);
         assert_eq!(r.push(Packet::parse(slices[0].clone()).unwrap()), Reassembly::Pending);
@@ -403,15 +400,15 @@ mod tests {
 
     #[test]
     fn empty_frame_still_produces_one_datagram() {
-        let mut seq = SeqCounter::default();
-        let s = slice_frame(&Bytes::new(), 0, false, &mut seq).unwrap();
+        let seq = SeqCounter::default();
+        let s = slice_frame(&Bytes::new(), 0, false, &seq).unwrap();
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].len(), HEADER_LEN);
     }
 
     #[test]
     fn seq_counter_wraps() {
-        let mut c = SeqCounter(u16::MAX);
+        let c = SeqCounter(std::sync::atomic::AtomicU16::new(u16::MAX));
         assert_eq!(c.take(), u16::MAX);
         assert_eq!(c.take(), 0);
     }
