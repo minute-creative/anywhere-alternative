@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aa_core::control::ControlMessage;
+use aa_core::control_flow::ReceiverReport;
 use aa_core::input::InputEvent;
 use aa_core::stats::StreamStats;
 use aa_core::wire::{self, CompleteFrame, Header, Kind, Packet, Reassembler, Reassembly, SeqCounter};
@@ -79,6 +80,10 @@ pub async fn run(
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     let mut report = tokio::time::interval(Duration::from_secs(1));
     let mut frames_this_second = 0u32;
+    // Interval deltas for the receiver report.
+    let mut last_received = 0u64;
+    let mut last_lost = 0u64;
+    let mut last_dropped = 0u64;
     let mut last_nack: Option<Instant> = None;
     let mut bytes_this_second = 0usize;
     let mut wiggle = 0u16;
@@ -184,6 +189,22 @@ pub async fn run(
                     dropped = stats.frames_dropped,
                     "stream"
                 );
+                // Receiver report: this interval's loss and abandoned frames, so
+                // the host can adapt its bitrate.
+                let recv_d = stats.loss.received - last_received;
+                let lost_d = stats.loss.lost - last_lost;
+                let drop_d = stats.frames_dropped - last_dropped;
+                last_received = stats.loss.received;
+                last_lost = stats.loss.lost;
+                last_dropped = stats.frames_dropped;
+                let total = recv_d + lost_d;
+                let rep = ReceiverReport {
+                    loss_per_10k: (lost_d * 10_000).checked_div(total).map_or(0, |v| v.min(10_000) as u16),
+                    frames_abandoned: drop_d.min(u64::from(u16::MAX)) as u16,
+                    frames_received: u16::try_from(frames_this_second).unwrap_or(u16::MAX),
+                    rtt_tenths_ms: (stats.rtt_ms.get().unwrap_or(0.0) * 10.0).clamp(0.0, 65535.0) as u16,
+                };
+                send_report(&socket, &rep, &mut seq).await?;
                 frames_this_second = 0;
                 bytes_this_second = 0;
 
@@ -260,6 +281,14 @@ async fn send_input(socket: &UdpSocket, events: &[InputEvent], seq: &mut SeqCoun
     for ev in events {
         ev.encode(&mut out);
     }
+    socket.send(&out).await?;
+    Ok(())
+}
+
+async fn send_report(socket: &UdpSocket, rep: &ReceiverReport, seq: &mut SeqCounter) -> anyhow::Result<()> {
+    let mut out = BytesMut::with_capacity(wire::HEADER_LEN + ReceiverReport::ENCODED_LEN);
+    Header { kind: Kind::Ack, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }.write(&mut out);
+    rep.encode(&mut out);
     socket.send(&out).await?;
     Ok(())
 }

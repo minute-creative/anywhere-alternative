@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aa_core::capability::negotiate;
+use aa_core::config::StreamConfig;
 use aa_core::control::ControlMessage;
+use aa_core::control_flow::{BitrateController, Pacer, ReceiverReport};
 use aa_core::input::InputEvent;
 use aa_core::wire::{self, Header, Kind, Packet, SeqCounter};
 use aa_core::PROTOCOL_VERSION;
@@ -50,6 +52,11 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
 
     let mut viewer: Option<Viewer> = None;
     let mut seq = SeqCounter::default();
+    let fps = capabilities.max_fps;
+    let start_kbps = StreamConfig::suggested_bitrate_kbps(capabilities.max_resolution, fps);
+    // Floor: still legible for desktop work. Ceiling: the user's cap.
+    let mut bitrate = BitrateController::new(start_kbps, 2_000, StreamConfig::default().max_bitrate_kbps);
+    let pacer = Pacer::new();
     let mut buf = vec![0u8; wire::MAX_DATAGRAM * 2];
     let mut housekeeping = tokio::time::interval(Duration::from_secs(1));
 
@@ -65,14 +72,22 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 if let Some(v) = viewer.as_mut().filter(|v| v.addr == from) {
                     v.last_heard = Instant::now();
                 }
-                handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &mut seq).await?;
+                handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &mut seq, &mut bitrate).await?;
             }
 
             Some(frame) = frame_rx.recv() => {
                 let Some(v) = viewer.as_ref() else { continue };
                 let slices = wire::slice_frame(&frame.data, frame.meta.frame_id, frame.meta.is_keyframe, &mut seq)?;
-                for s in slices {
-                    // One send per slice; batching with sendmmsg is a stage-6 optimisation.
+                // Paced send: spread the frame's datagrams across the frame
+                // interval so the Wi-Fi adapter's queue never overflows.
+                let count = slices.len();
+                let group = Pacer::group_size(count);
+                let t0 = Instant::now();
+                for (i, s) in slices.into_iter().enumerate() {
+                    if i % group == 0 && i > 0 {
+                        let due = t0 + pacer.offset(i, count, fps);
+                        tokio::time::sleep_until(due.into()).await;
+                    }
                     if let Err(e) = socket.send_to(&s, v.addr).await {
                         tracing::warn!("send failed: {e}");
                         break;
@@ -100,7 +115,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one dispatch per packet kind
 async fn handle_packet(
     socket: &UdpSocket,
     packet: &Packet,
@@ -110,6 +125,7 @@ async fn handle_packet(
     host_caps: &aa_core::capability::Capabilities,
     input_tx: &mpsc::Sender<InputEvent>,
     seq: &mut SeqCounter,
+    bitrate: &mut BitrateController,
 ) -> anyhow::Result<()> {
     let is_current_viewer = viewer.as_ref().is_some_and(|v| v.addr == from);
 
@@ -144,6 +160,12 @@ async fn handle_packet(
                             )
                             .await?;
                             *viewer = Some(Viewer { addr: from, last_heard: Instant::now() });
+                            *bitrate = BitrateController::new(
+                                StreamConfig::suggested_bitrate_kbps(host_caps.max_resolution, host_caps.max_fps),
+                                2_000,
+                                StreamConfig::default().max_bitrate_kbps,
+                            );
+                            ctl.target_kbps.store(bitrate.current_kbps(), Ordering::Relaxed);
                             ctl.force_keyframe.store(true, Ordering::Relaxed);
                             ctl.streaming.store(true, Ordering::Relaxed);
                         }
@@ -158,8 +180,9 @@ async fn handle_packet(
                     ctl.streaming.store(false, Ordering::Relaxed);
                 }
                 ControlMessage::SetMaxBitrate { kbps } if is_current_viewer => {
-                    // Stage 2: plumb to encoder.set_bitrate_kbps via a control channel.
-                    tracing::info!(kbps, "bitrate cap requested (not yet applied)");
+                    bitrate.set_max_kbps(kbps);
+                    ctl.target_kbps.store(bitrate.current_kbps(), Ordering::Relaxed);
+                    tracing::info!(kbps, "bitrate cap set");
                 }
                 other => tracing::debug!(?other, "ignored control message"),
             }
@@ -184,6 +207,22 @@ async fn handle_packet(
 
         Kind::Nack if is_current_viewer => {
             ctl.intra_refresh.store(true, Ordering::Relaxed);
+        }
+
+        Kind::Ack if is_current_viewer => {
+            let mut payload = packet.payload.clone();
+            if let Some(rep) = ReceiverReport::decode(&mut payload) {
+                if let Some(kbps) = bitrate.on_report(&rep) {
+                    ctl.target_kbps.store(kbps, Ordering::Relaxed);
+                    tracing::info!(
+                        kbps,
+                        loss = format_args!("{:.1}%", rep.loss_ratio() * 100.0),
+                        abandoned = rep.frames_abandoned,
+                        rtt_ms = format_args!("{:.1}", f64::from(rep.rtt_tenths_ms) / 10.0),
+                        "bitrate adapted"
+                    );
+                }
+            }
         }
 
         Kind::Ping if is_current_viewer => {

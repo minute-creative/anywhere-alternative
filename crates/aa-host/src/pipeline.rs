@@ -1,6 +1,6 @@
 //! The capture → encode thread and the input-injection thread.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use aa_core::input::InputEvent;
@@ -17,6 +17,8 @@ pub struct PipelineControl {
     pub intra_refresh: AtomicBool,
     /// Next frame must be a keyframe (new viewer just connected).
     pub force_keyframe: AtomicBool,
+    /// Target bitrate from the adaptive controller; 0 = unchanged.
+    pub target_kbps: AtomicU32,
     pub shutdown: AtomicBool,
 }
 
@@ -31,6 +33,7 @@ pub fn capture_thread(
 ) {
     let idle_poll = Duration::from_millis(50);
     let frame_timeout = Duration::from_millis(100);
+    let mut encode_failures = 0u32;
 
     while !ctl.shutdown.load(Ordering::Relaxed) {
         if !ctl.streaming.load(Ordering::Relaxed) {
@@ -54,6 +57,13 @@ pub fn capture_thread(
             }
         }
         let force_key = ctl.force_keyframe.swap(false, Ordering::Relaxed);
+        let kbps = ctl.target_kbps.swap(0, Ordering::Relaxed);
+        if kbps != 0 {
+            match encoder.set_bitrate_kbps(kbps) {
+                Ok(()) => tracing::info!(kbps, "encoder bitrate updated"),
+                Err(e) => tracing::warn!("set bitrate failed: {e}"),
+            }
+        }
 
         match encoder.encode(&frame, force_key) {
             Ok(packet) => {
@@ -61,8 +71,19 @@ pub fn capture_thread(
                     tracing::debug!("network busy, dropped a frame");
                 }
             }
-            Err(e) => tracing::error!("encode failed: {e}"),
+            Err(e) => {
+                encode_failures += 1;
+                if encode_failures == 1 || encode_failures % 60 == 0 {
+                    tracing::error!(encode_failures, "encode failed: {e}");
+                }
+                // Give the driver a moment; a wedged encoder usually clears on
+                // its next event cycle. Force a keyframe so the viewer resyncs.
+                ctl.force_keyframe.store(true, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
         }
+        encode_failures = 0;
     }
     tracing::info!("capture thread exiting");
 }

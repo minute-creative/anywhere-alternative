@@ -25,7 +25,10 @@
 // the pedantic cast/pointer lints add noise, not safety.
 #![allow(unsafe_code, clippy::pedantic)]
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Longest we wait for the hardware encoder to react before declaring it stuck.
+const EVENT_TIMEOUT: Duration = Duration::from_millis(250);
 
 use aa_core::video::{Codec, EncodedFrameMeta, PixelFormat, Resolution};
 use bytes::Bytes;
@@ -46,10 +49,10 @@ use windows::Win32::Media::MediaFoundation::{
     MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFSTARTUP_NOSOCKET, MFT_CATEGORY_VIDEO_ENCODER,
     MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MF_E_TRANSFORM_NEED_MORE_INPUT,
-    MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE,
-    MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT, MF_E_NO_EVENTS_AVAILABLE,
+    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT,
+    MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+    MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
@@ -369,13 +372,36 @@ impl MfEncoder {
         &self.name
     }
 
+    /// `GetEvent` with a deadline. Hardware MFTs occasionally stop emitting
+    /// events (driver resets, a keyframe request racing a frame in flight);
+    /// blocking forever there would freeze the whole host, so we poll with
+    /// short sleeps and give up after `timeout`.
+    unsafe fn next_event_type(&self, timeout: Duration) -> Result<u32> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            // SAFETY: COM call on a live object.
+            let r = unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) };
+            match r {
+                Ok(ev) => return unsafe { ev.GetType() }.map_err(|e| win(e, "GetType")),
+                Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => {
+                    if Instant::now() >= deadline {
+                        return Err(PlatformError::Backend(anyhow::anyhow!(
+                            "encoder produced no event within {timeout:?}"
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+                Err(e) => return Err(win(e, "GetEvent")),
+            }
+        }
+    }
+
     /// Block until the MFT asks for input (async MFTs require this).
     unsafe fn wait_need_input(&self) -> Result<()> {
         // SAFETY: COM calls on live objects owned by self.
         unsafe {
             loop {
-                let ev = self.events.GetEvent(Default::default()).map_err(|e| win(e, "GetEvent"))?;
-                let t = ev.GetType().map_err(|e| win(e, "GetType"))?;
+                let t = self.next_event_type(EVENT_TIMEOUT)?;
                 if t == METransformNeedInput.0 as u32 {
                     return Ok(());
                 }
@@ -393,8 +419,7 @@ impl MfEncoder {
         // SAFETY: COM calls on live objects; ManuallyDrop::take on fields initialised above; Lock's pointer is valid until Unlock.
         unsafe {
             loop {
-                let ev = self.events.GetEvent(Default::default()).map_err(|e| win(e, "GetEvent"))?;
-                let t = ev.GetType().map_err(|e| win(e, "GetType"))?;
+                let t = self.next_event_type(EVENT_TIMEOUT)?;
                 if t == METransformNeedInput.0 as u32 {
                     continue; // it wants more before it gives output; fine, caller feeds next frame
                 }

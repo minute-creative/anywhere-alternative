@@ -19,6 +19,7 @@
 pub mod capability;
 pub mod config;
 pub mod control;
+pub mod control_flow;
 pub mod input;
 pub mod stats;
 pub mod video;
