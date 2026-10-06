@@ -47,7 +47,6 @@ pub enum Output {
 pub struct DxgiCapture {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
-    output_mode: Output,
     /// GPU-mode destination; alive as long as `self`, so the raw pointer we
     /// hand out in `FrameBuffer::Gpu` stays valid until the next frame.
     gpu_tex: Option<ID3D11Texture2D>,
@@ -126,7 +125,6 @@ impl DxgiCapture {
             Ok(Self {
                 device,
                 context,
-                output_mode,
                 gpu_tex,
                 adapter,
                 output_index,
@@ -312,8 +310,6 @@ impl ScreenCapture for DxgiCapture {
     fn resolution(&self) -> Resolution {
         self.res
     }
-
-    // `output_mode` is read at construction; kept for diagnostics.
 
     fn refresh_rate_hz(&self) -> u16 {
         self.refresh_hz

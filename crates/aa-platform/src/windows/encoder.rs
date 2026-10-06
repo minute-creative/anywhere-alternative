@@ -204,7 +204,7 @@ impl MfEncoder {
 
             // The MFT drives the device from its own threads.
             if let Ok(mt) = device.cast::<ID3D11Multithread>() {
-                mt.SetMultithreadProtected(true);
+                let _ = mt.SetMultithreadProtected(true);
             }
 
             // --- find a hardware encoder -----------------------------------

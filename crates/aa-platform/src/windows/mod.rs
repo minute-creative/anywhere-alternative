@@ -4,7 +4,7 @@
 //! * [`capture`] — DXGI Desktop Duplication. Hands out the desktop as a
 //!   D3D11 texture (GPU mode, for hardware encoders) or as CPU pixels
 //!   (for the software fallback).
-//! * [`encoder`] — Media Foundation hardware encoder (Intel QuickSync,
+//! * [`encoder`] — Media Foundation hardware encoder (Intel `QuickSync`,
 //!   NVIDIA NVENC, AMD AMF behind one API), fed the capture texture with no
 //!   CPU copy. Falls back to the software H.264 encoder if no hardware
 //!   encoder opens.
