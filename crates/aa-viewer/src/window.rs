@@ -433,7 +433,11 @@ impl ApplicationHandler<Wake> for App {
                 if let Some(frame) = self.frames.take() {
                     if self.video_res != Some(frame.resolution) {
                         self.video_res = Some(frame.resolution);
-                        self.rect = self.layout(frame.resolution, window.inner_size());
+                        self.rect = if self.stretch {
+                            VideoRect::stretch(window.inner_size())
+                        } else {
+                            VideoRect::fit(frame.resolution, window.inner_size())
+                        };
                     }
                     gpu.upload(&frame);
                     self.presented += 1;
