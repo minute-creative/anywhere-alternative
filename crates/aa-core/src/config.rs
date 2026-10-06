@@ -35,11 +35,12 @@ impl Default for StreamConfig {
 }
 
 impl StreamConfig {
-    /// A sensible starting bitrate for a resolution/fps before the network
-    /// has told us anything. Based on ~0.1 bits per pixel per frame for
-    /// HEVC at 60 fps; callers scale by codec efficiency.
+    /// A conservative starting bitrate for a resolution/fps before the
+    /// network has told us anything: ~0.05 bits per pixel per frame, about
+    /// 15 Mbps at 2880x1800@60. Wi-Fi handles that without loss; the
+    /// adaptive controller raises it when the link proves it can take more.
     pub fn suggested_bitrate_kbps(res: Resolution, fps: u16) -> u32 {
-        let bits_per_second = res.pixels() as f64 * f64::from(fps) * 0.1;
+        let bits_per_second = res.pixels() as f64 * f64::from(fps) * 0.05;
         (bits_per_second / 1000.0).clamp(2_000.0, 150_000.0) as u32
     }
 }
@@ -53,7 +54,7 @@ mod tests {
         let p1080 = StreamConfig::suggested_bitrate_kbps(Resolution::new(1920, 1080), 60);
         let p1440 = StreamConfig::suggested_bitrate_kbps(Resolution::new(2560, 1440), 60);
         let p4k120 = StreamConfig::suggested_bitrate_kbps(Resolution::new(3840, 2160), 120);
-        assert!(p1080 > 10_000 && p1080 < 15_000, "{p1080}");
+        assert!(p1080 > 5_000 && p1080 < 8_000, "{p1080}");
         assert!(p1440 > p1080);
         assert!(p4k120 > p1440);
         assert!(p4k120 <= 150_000);

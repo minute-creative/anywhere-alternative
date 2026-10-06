@@ -39,6 +39,14 @@ pub fn host_backends() -> Result<HostBackends> {
 }
 
 pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
+    // Real pixels everywhere, before DXGI or any UI call sees a scaled value.
+    // SAFETY: plain Win32 call with a constant argument.
+    #[allow(unsafe_code)]
+    unsafe {
+        let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
+    }
     // Probe the display first so we know the resolution the encoder must handle.
     let probe = capture::DxgiCapture::new(0, capture::Output::Cpu)?;
     let res = probe.resolution();

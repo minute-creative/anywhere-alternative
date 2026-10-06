@@ -33,8 +33,11 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     let HostBackends { capture, encoder, input, gamepad, capabilities } = backends;
 
     let ctl = Arc::new(PipelineControl::default());
-    // Capacity 2: at most one frame waiting while another is being sent.
-    let (frame_tx, mut frame_rx) = mpsc::channel::<EncodedFrame>(2);
+    // A few frames of slack: sending a 250-packet keyframe over Wi-Fi takes
+    // longer than one frame interval, and dropping the frames behind it
+    // would force yet another keyframe. Latency cost is bounded by the
+    // viewer's latest-frame slot, which always shows the newest.
+    let (frame_tx, mut frame_rx) = mpsc::channel::<EncodedFrame>(6);
     let (input_tx, input_rx) = mpsc::channel::<InputEvent>(256);
 
     let cap_ctl = Arc::clone(&ctl);

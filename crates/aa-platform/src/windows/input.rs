@@ -13,6 +13,7 @@
 
 use aa_core::input::{InputEvent, MouseButton};
 use windows::Win32::Foundation::RECT;
+use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY,
     KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
@@ -21,7 +22,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_PAUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    GetSystemMetrics, SetCursorPos, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 use crate::hid_scancode::hid_to_scancode;
@@ -36,10 +37,20 @@ pub struct SendInputInjector {
     virt_y: i32,
     virt_w: i32,
     virt_h: i32,
+    /// Last absolute position we moved to, in screen pixels.
+    last_pos: Option<(i32, i32)>,
 }
 
 impl SendInputInjector {
     pub fn new(output: RECT) -> Result<Self> {
+        // Without this, Windows lies to us about screen sizes on scaled
+        // displays (a 2880x1800 panel at 200% reports as 1440x900) and every
+        // injected position lands in the wrong place. Must run before any
+        // window or DPI-dependent call; a failure means it was already set.
+        // SAFETY: plain Win32 call with a constant argument.
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
         // SAFETY: GetSystemMetrics has no preconditions.
         let (virt_x, virt_y, virt_w, virt_h) = unsafe {
             (
@@ -52,18 +63,25 @@ impl SendInputInjector {
         if virt_w <= 0 || virt_h <= 0 {
             return Err(PlatformError::Backend(anyhow::anyhow!("virtual desktop has no size")));
         }
-        Ok(Self { output, virt_x, virt_y, virt_w, virt_h })
+        tracing::info!(?output, virt_x, virt_y, virt_w, virt_h, "input injector ready");
+        Ok(Self { output, virt_x, virt_y, virt_w, virt_h, last_pos: None })
     }
 
-    /// Stream-normalised (0..=65535 over the output) → virtual-desktop
-    /// normalised (0..=65535 over all monitors), as `SendInput` wants.
-    fn to_virtual(&self, x: u16, y: u16) -> (i32, i32) {
+    /// Stream-normalised (0..=65535 over the captured output) → screen pixels.
+    fn to_pixels(&self, x: u16, y: u16) -> (i32, i32) {
         let ow = f64::from(self.output.right - self.output.left);
         let oh = f64::from(self.output.bottom - self.output.top);
         let px = f64::from(self.output.left) + f64::from(x) / 65535.0 * ow;
         let py = f64::from(self.output.top) + f64::from(y) / 65535.0 * oh;
-        let nx = (px - f64::from(self.virt_x)) / f64::from(self.virt_w) * 65535.0;
-        let ny = (py - f64::from(self.virt_y)) / f64::from(self.virt_h) * 65535.0;
+        (px.round() as i32, py.round() as i32)
+    }
+
+    /// Screen pixels → `SendInput` absolute coordinates (0..=65535 over the
+    /// virtual desktop). Used so a click carries its own position and lands
+    /// right even if the preceding move was lost.
+    fn to_absolute(&self, px: i32, py: i32) -> (i32, i32) {
+        let nx = f64::from(px - self.virt_x) / f64::from(self.virt_w) * 65535.0;
+        let ny = f64::from(py - self.virt_y) / f64::from(self.virt_h) * 65535.0;
         (nx.round().clamp(0.0, 65535.0) as i32, ny.round().clamp(0.0, 65535.0) as i32)
     }
 
@@ -89,12 +107,18 @@ impl InputInjector for SendInputInjector {
     fn inject(&mut self, event: InputEvent) -> Result<()> {
         let input = match event {
             InputEvent::MouseMoveAbs { x, y } => {
-                let (vx, vy) = self.to_virtual(x, y);
-                Self::mouse(vx, vy, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
+                // SetCursorPos takes real pixels and is immune to the
+                // normalisation quirks of SendInput on scaled displays.
+                let (px, py) = self.to_pixels(x, y);
+                self.last_pos = Some((px, py));
+                // SAFETY: plain Win32 call.
+                unsafe { SetCursorPos(px, py) }
+                    .map_err(|e| PlatformError::Backend(anyhow::anyhow!("SetCursorPos: {e}")))?;
+                return Ok(());
             }
             InputEvent::MouseMoveRel { dx, dy } => Self::mouse(i32::from(dx), i32::from(dy), 0, MOUSEEVENTF_MOVE),
             InputEvent::MouseButton { button, pressed } => {
-                let (flags, data) = match (button, pressed) {
+                let (mut flags, data) = match (button, pressed) {
                     (MouseButton::Left, true) => (MOUSEEVENTF_LEFTDOWN, 0),
                     (MouseButton::Left, false) => (MOUSEEVENTF_LEFTUP, 0),
                     (MouseButton::Right, true) => (MOUSEEVENTF_RIGHTDOWN, 0),
@@ -106,7 +130,16 @@ impl InputInjector for SendInputInjector {
                     (MouseButton::Forward, true) => (MOUSEEVENTF_XDOWN, 2),
                     (MouseButton::Forward, false) => (MOUSEEVENTF_XUP, 2),
                 };
-                Self::mouse(0, 0, data, flags)
+                // Carry the position with the click so it lands where the
+                // viewer's cursor is, even if a move packet went missing.
+                let (ax, ay) = match self.last_pos {
+                    Some((px, py)) => {
+                        flags |= MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+                        self.to_absolute(px, py)
+                    }
+                    None => (0, 0),
+                };
+                Self::mouse(ax, ay, data, flags)
             }
             InputEvent::MouseScroll { dx, dy } => {
                 let mut batch = Vec::with_capacity(2);
