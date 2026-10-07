@@ -30,7 +30,7 @@ pub enum Profile {
 
 impl Default for StreamConfig {
     fn default() -> Self {
-        Self { max_bitrate_kbps: 40_000, target_fps: 60, profile: Profile::Balanced }
+        Self { max_bitrate_kbps: 80_000, target_fps: 60, profile: Profile::Balanced }
     }
 }
 

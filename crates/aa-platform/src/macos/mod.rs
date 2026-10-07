@@ -49,7 +49,9 @@ pub fn probe_capabilities() -> Capabilities {
     Capabilities {
         codecs: vec![Codec::Hevc, Codec::H264],
         max_resolution: Resolution::new(3840, 2160),
-        max_fps: 120,
+        // Up to the fastest Mac displays (ProMotion 120 Hz, external 240 Hz);
+        // the host caps this at its own screen's refresh rate.
+        max_fps: 240,
         color_ranges: vec![ColorRange::Sdr],
         has_gamepad: false,
         can_emulate_gamepad: false,

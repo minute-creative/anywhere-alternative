@@ -84,6 +84,7 @@ pub async fn run(
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     let mut report = tokio::time::interval(Duration::from_secs(1));
     let mut frames_this_second = 0u32;
+    let mut pacing = crate::pacing::FramePacing::default();
     // Interval deltas for the receiver report.
     let mut last_received = 0u64;
     let mut last_lost = 0u64;
@@ -117,6 +118,7 @@ pub async fn run(
                                     stats.frame_assembly_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
                                 }
                                 frames_this_second += 1;
+                                pacing.frame();
                                 let fid = frame.frame_id;
                                 if frame_tx.try_send(frame).is_err() {
                                     // Decoder is behind; whatever it misses breaks the
@@ -214,6 +216,7 @@ pub async fn run(
                 let lost_d = stats.loss.lost - last_lost;
                 let total = recv_d + lost_d;
                 let loss_1s = if total == 0 { 0.0 } else { lost_d as f64 / total as f64 };
+                let pace = pacing.take(negotiated.fps);
                 tracing::info!(
                     fps = frames_this_second,
                     mbps = format_args!("{:.1}", bytes_this_second as f64 * 8.0 / 1e6),
@@ -221,6 +224,8 @@ pub async fn run(
                     assembly_ms = format_args!("{:.2}", stats.frame_assembly_ms.get().unwrap_or(0.0)),
                     loss = format_args!("{:.2}%", loss_1s * 100.0),
                     dropped = stats.frames_dropped,
+                    gap_ms = format_args!("{:.1}/{:.1}/{:.1}", pace.p50_ms, pace.p99_ms, pace.max_ms),
+                    stutters = format_args!("{}/{}", pace.stutters, pacing.total_stutters),
                     audio = format_args!("{}f/{}c buf={}ms under={}", audio.frames, audio.concealed, audio.buffer_ms(), audio.underruns()),
                     "stream"
                 );

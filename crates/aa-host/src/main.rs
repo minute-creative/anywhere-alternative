@@ -82,11 +82,32 @@ fn bench() -> anyhow::Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
-        println!("hardware H.264 via Media Foundation:");
-        for (name, res) in sizes {
-            match aa_platform::windows::bench_hardware(res, 120) {
-                Ok((enc, fps)) => println!("  {name:>6}: {fps:6.1} fps  ({:.2} ms/frame)  [{enc}]", 1000.0 / fps),
-                Err(e) => println!("  {name:>6}: unavailable ({e})"),
+        use aa_core::video::Codec;
+        // The PC's own screen first: that is the size that actually streams.
+        let native = aa_platform::windows::screen_resolution().ok();
+        let mut hw_sizes: Vec<(String, Resolution)> = Vec::new();
+        if let Some(r) = native {
+            hw_sizes.push((format!("{}x{}", r.width, r.height), r));
+        }
+        hw_sizes.extend(sizes.iter().map(|(n, r)| ((*n).to_string(), *r)));
+        for codec in [Codec::Hevc, Codec::H264] {
+            println!("hardware {codec:?} via Media Foundation (every frame changes: worst case):");
+            for (name, res) in &hw_sizes {
+                match aa_platform::windows::bench_hardware(codec, *res, 240) {
+                    Ok((enc, fps)) => {
+                        let verdict = if fps >= 300.0 {
+                            "300+ ok"
+                        } else if fps >= 120.0 {
+                            "120 ok"
+                        } else if fps >= 60.0 {
+                            "60 ok"
+                        } else {
+                            "below 60"
+                        };
+                        println!("  {name:>9}: {fps:6.1} fps  ({:.2} ms/frame)  {verdict}  [{enc}]", 1000.0 / fps);
+                    }
+                    Err(e) => println!("  {name:>9}: unavailable ({e})"),
+                }
             }
         }
     }

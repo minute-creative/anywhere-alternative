@@ -30,7 +30,8 @@ use aa_core::video::{Codec, PixelFormat, Resolution};
 use bytes::Bytes;
 use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString};
 use objc2_core_media::{
-    kCMBlockBufferAssureMemoryNowFlag, CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime,
+    kCMBlockBufferAssureMemoryNowFlag, kCMFormatDescriptionExtension_FullRangeVideo,
+    kCMFormatDescriptionExtension_YCbCrMatrix, CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime,
     CMVideoFormatDescriptionCreateFromH264ParameterSets, CMVideoFormatDescriptionCreateFromHEVCParameterSets,
 };
 use objc2_core_video::{
@@ -271,6 +272,22 @@ impl VtDecoder {
             // SAFETY: tearing down a session we own.
             unsafe { old.invalidate() };
         }
+        // How VideoToolbox will turn YUV into RGB, straight from the stream
+        // header. "Full range" when the pixels are really video range is
+        // exactly what makes blacks grey, so this line is the first check
+        // when colours look off.
+        // SAFETY: `format` is live for both calls; the keys are CoreMedia statics.
+        let (full_range, matrix) = unsafe {
+            (
+                format.extension(kCMFormatDescriptionExtension_FullRangeVideo).map(|v| format!("{v:?}")),
+                format.extension(kCMFormatDescriptionExtension_YCbCrMatrix).map(|v| format!("{v:?}")),
+            )
+        };
+        tracing::info!(
+            full_range = full_range.as_deref().unwrap_or("not set (video range)"),
+            matrix = matrix.as_deref().unwrap_or("not set"),
+            "stream colour"
+        );
         self.session = Some(session);
         self.format = Some(format);
         self.param_sets = sets;

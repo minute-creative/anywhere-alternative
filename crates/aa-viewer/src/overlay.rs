@@ -28,7 +28,7 @@ pub struct Settings {
 
 impl Settings {
     pub const fn new(fullscreen: bool, stretch: bool) -> Self {
-        Self { fullscreen, stretch, max_mbps: 40.0, show_stats: true, mute_host: false, volume_boost_db: 6.0 }
+        Self { fullscreen, stretch, max_mbps: 80.0, show_stats: true, mute_host: false, volume_boost_db: 6.0 }
     }
 }
 
@@ -162,7 +162,7 @@ impl Overlay {
                     ui.checkbox(&mut settings.stretch, "Stretch to fill (ignores aspect ratio)");
                     ui.add_space(8.0);
                     ui.heading("Stream");
-                    ui.add(egui::Slider::new(&mut settings.max_mbps, 2.0..=100.0).text("Max Mbps").logarithmic(true));
+                    ui.add(egui::Slider::new(&mut settings.max_mbps, 2.0..=150.0).text("Max Mbps").logarithmic(true));
                     ui.checkbox(&mut settings.show_stats, "Show stats");
                     ui.add_space(8.0);
                     ui.heading("Audio");

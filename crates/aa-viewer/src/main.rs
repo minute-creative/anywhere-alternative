@@ -16,6 +16,7 @@ mod discover;
 mod keymap;
 mod link;
 mod overlay;
+mod pacing;
 mod session;
 mod udp;
 mod window;

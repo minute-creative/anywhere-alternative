@@ -191,17 +191,33 @@ pub fn viewer_backends() -> Result<ViewerBackends> {
 
 /// Hardware encoder throughput at `res`: frames per second sustained on a
 /// synthetic moving picture. Returns the encoder's name with the number.
-pub fn bench_hardware(res: Resolution, frames: u32) -> Result<(String, f64)> {
+/// Resolution of the main screen, for the bench.
+pub fn screen_resolution() -> Result<Resolution> {
+    Ok(capture::DxgiCapture::new(0, capture::Output::Cpu)?.resolution())
+}
+
+pub fn bench_hardware(codec: Codec, res: Resolution, frames: u32) -> Result<(String, f64)> {
     use std::time::Instant;
+    let hw = match codec {
+        Codec::Hevc => encoder::HwCodec::Hevc,
+        Codec::H264 => encoder::HwCodec::H264,
+        Codec::Av1 => return Err(crate::PlatformError::Unavailable("no AV1 encoder yet".into())),
+    };
     // Any D3D11 device will do for a bench; reuse the capture's.
     let cap = capture::DxgiCapture::new(0, capture::Output::Gpu)?;
     let (device, context) = cap.device();
-    let mut enc = encoder::MfEncoder::new(device, context, encoder::HwCodec::H264, res, 60, 20_000)?;
+    let mut enc = encoder::MfEncoder::new(device, context, hw, res, 120, 40_000)?;
     let name = enc.name().to_string();
-    let frame = bench_frame(device, context, res)?;
+    // Two different pictures, alternated: every frame changes completely,
+    // which is the worst case (fast camera pan), not a still desktop.
+    let a = bench_frame(device, context, res, 0)?;
+    let b = bench_frame(device, context, res, 97)?;
+    for i in 0..10 {
+        enc.encode(if i % 2 == 0 { &a } else { &b }, i == 0)?; // warm-up
+    }
     let start = Instant::now();
     for i in 0..frames {
-        enc.encode(&frame, i == 0)?;
+        enc.encode(if i % 2 == 0 { &a } else { &b }, false)?;
     }
     Ok((name, f64::from(frames) / start.elapsed().as_secs_f64()))
 }
@@ -211,6 +227,7 @@ fn bench_frame(
     device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
     _context: &windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
     res: Resolution,
+    shift: usize,
 ) -> Result<crate::CapturedFrame> {
     use windows::core::Interface;
     use windows::Win32::Graphics::Direct3D11::{
@@ -224,6 +241,7 @@ fn bench_frame(
     for y in 0..h {
         for x in 0..w {
             let i = (y * w + x) * 4;
+            let (x, y) = (x + shift, y + shift * 3);
             px[i] = x as u8;
             px[i + 1] = y as u8;
             px[i + 2] = (x ^ y) as u8;
