@@ -142,7 +142,9 @@ pub type DecoderFactory = Box<dyn FnMut(Codec) -> Result<Box<dyn VideoDecoder>> 
 
 pub struct HostBackends {
     pub capture: Box<dyn ScreenCapture>,
-    /// Encoder for `capabilities.codecs[0]`, ready to go.
+    /// Encoder for `capabilities.codecs[0]`, ready to go. Must really be that
+    /// codec: the session treats `codecs[0]` as "what is loaded" and only
+    /// rebuilds when a viewer negotiates something else.
     pub encoder: Box<dyn VideoEncoder>,
     /// Builds an encoder for any other codec in `capabilities.codecs`.
     pub encoder_factory: Option<EncoderFactory>,

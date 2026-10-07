@@ -265,6 +265,13 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
 - **windows-rs `PROPVARIANT` frees its payload on drop.** A `VT_BLOB`
   pointing at stack memory → `STATUS_HEAP_CORRUPTION` at exit of scope.
   Wrap in `ManuallyDrop` when the blob is borrowed, not owned.
+- **The loaded encoder must be `codecs[0]`.** Windows offered HEVC first
+  but had opened H.264; the session took `codecs[0]` as "what is loaded",
+  saw HEVC == HEVC, never switched, and sent H.264 labelled HEVC. The Mac
+  failed every frame (black screen, `keyframe arrived; resuming` spam).
+  Now the host opens HEVC at startup and only offers it if that works; the
+  capture thread logs the codec on every connect and sends nothing rather
+  than mislabelled video if a switch fails.
 
 ## 10. Measured so far
 

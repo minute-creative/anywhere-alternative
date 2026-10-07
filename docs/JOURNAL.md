@@ -177,7 +177,15 @@ relay later.
   when an MF HEVC encoder exists (Main 4:2:0 8-bit profile set); the Mac
   offers HEVC when VideoToolbox opens. Negotiation already preferred HEVC,
   so Win→Mac should now run at roughly half the bitrate.
-- Pending owner confirmation — Intel's MF HEVC encoder is untested.
+- ❌ 2026-10-07 first real run: black screen on the Mac, fps 2–12,
+  `keyframe arrived; resuming skipped=1` after nearly every frame, 0% loss.
+  PC log showed only the Quick Sync **H.264** encoder and no switch line.
+  Cause: Windows put HEVC at `codecs[0]` but loaded H.264; the capture
+  thread treats `codecs[0]` as the loaded codec, so it never switched.
+- ✅ Fix: Windows opens the HEVC encoder at startup and only offers HEVC if
+  it opens (else H.264 only). Capture thread logs the codec on every
+  connect and withholds video instead of sending a mislabelled stream.
+- Pending owner re-test.
 
 ### Docs
 - ✅ `HANDOFF.md`, `CLAUDE.md`, this journal; ARCHITECTURE §9 lessons and

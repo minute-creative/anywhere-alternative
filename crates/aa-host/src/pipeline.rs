@@ -58,6 +58,10 @@ pub fn capture_thread(
     let frame_timeout = Duration::from_millis(100);
     let mut encode_failures = 0u32;
     let mut current_codec = initial_codec;
+    // Set when the viewer asked for a codec we could not load. While set we
+    // send nothing: frames in the wrong codec decode to garbage or black,
+    // which is worse than an honest "no video" plus an error in this log.
+    let mut wrong_codec: Option<Codec> = None;
 
     while !ctl.shutdown.load(Ordering::Relaxed) {
         if !ctl.streaming.load(Ordering::Relaxed) {
@@ -69,16 +73,31 @@ pub fn capture_thread(
         // first frame goes out. Done here, on the encode thread, because the
         // encoder is not shared with anyone else.
         let wanted = ctl.codec.swap(NO_CODEC, Ordering::Relaxed);
-        if let Some(codec) = Codec::from_u8(wanted).filter(|c| *c != current_codec) {
-            match factory.as_mut().map(|f| f(codec)) {
-                Some(Ok(enc)) => {
-                    encoder = enc;
-                    current_codec = codec;
-                    tracing::info!(?codec, "encoder switched");
+        if let Some(codec) = Codec::from_u8(wanted) {
+            wrong_codec = None;
+            if codec == current_codec {
+                tracing::info!(?codec, "encoder already matches the negotiated codec");
+            } else {
+                match factory.as_mut().map(|f| f(codec)) {
+                    Some(Ok(enc)) => {
+                        encoder = enc;
+                        current_codec = codec;
+                        tracing::info!(?codec, "encoder switched");
+                    }
+                    Some(Err(e)) => {
+                        tracing::error!(?codec, "could not build encoder ({e}); sending no video this session");
+                        wrong_codec = Some(codec);
+                    }
+                    None => {
+                        tracing::error!(?codec, "no encoder factory; sending no video this session");
+                        wrong_codec = Some(codec);
+                    }
                 }
-                Some(Err(e)) => tracing::error!(?codec, "could not build encoder ({e}); keeping {current_codec:?}"),
-                None => tracing::error!(?codec, "no encoder factory; keeping {current_codec:?}"),
             }
+        }
+        if wrong_codec.is_some() {
+            std::thread::sleep(idle_poll);
+            continue;
         }
 
         let frame = match capture.next_frame(frame_timeout) {

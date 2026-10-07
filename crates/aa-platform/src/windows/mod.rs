@@ -65,36 +65,53 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
         EncoderChoice::Hardware | EncoderChoice::Auto => {
             let cap = capture::DxgiCapture::new(0, capture::Output::Gpu)?;
             let (device, context) = cap.device();
-            // H.264 first: every viewer decodes it. HEVC becomes preferred once
-            // viewers advertise it (hardware decoders, stage 5).
-            match encoder::MfEncoder::new(device, context, encoder::HwCodec::H264, res, fps, kbps) {
-                Ok(enc) => {
+            // HEVC first: same picture at roughly half the bits, which matters
+            // most on Wi-Fi. We open it *now* rather than at negotiation, so a
+            // GPU whose HEVC encoder is listed but broken is found before we
+            // offer HEVC to anyone. The loaded encoder must always match
+            // `codecs[0]`: the session takes that as "what is running", and a
+            // mismatch means sending H.264 labelled as HEVC (a black screen).
+            let hevc = if encoder::list_hardware_encoders(encoder::HwCodec::Hevc).is_empty() {
+                None
+            } else {
+                match encoder::MfEncoder::new(device, context, encoder::HwCodec::Hevc, res, fps, kbps) {
+                    Ok(enc) => Some(enc),
+                    Err(e) => {
+                        tracing::warn!("HEVC encoder is listed but would not open ({e}); offering H.264 only");
+                        None
+                    }
+                }
+            };
+            let first = match hevc {
+                Some(enc) => Ok((Codec::Hevc, enc)),
+                None => encoder::MfEncoder::new(device, context, encoder::HwCodec::H264, res, fps, kbps)
+                    .map(|enc| (Codec::H264, enc)),
+            };
+            match first {
+                Ok((codec, enc)) => {
+                    codecs = if codec == Codec::Hevc { vec![Codec::Hevc, Codec::H264] } else { vec![Codec::H264] };
                     tracing::info!(
                         ?res,
                         fps,
                         kbps,
+                        ?codec,
+                        offered = ?codecs,
                         encoder = enc.name(),
-                        "windows host: DXGI capture -> hardware H.264 (zero-copy)"
+                        "windows host: DXGI capture -> hardware encoder (zero-copy)"
                     );
-                    // HEVC: same pixels, roughly half the bits. Offer it when
-                    // the GPU has an encoder; the viewer decides by what it
-                    // can decode, and the session builds it on demand.
-                    if !encoder::list_hardware_encoders(encoder::HwCodec::Hevc).is_empty() {
-                        codecs.insert(0, Codec::Hevc);
-                        let (dev, ctx) = (device.clone(), context.clone());
-                        encoder_factory = Some(Box::new(move |codec| {
-                            let hw = match codec {
-                                Codec::Hevc => encoder::HwCodec::Hevc,
-                                Codec::H264 => encoder::HwCodec::H264,
-                                Codec::Av1 => {
-                                    return Err(crate::PlatformError::Unavailable("no AV1 encoder yet".into()))
-                                }
-                            };
-                            let enc = encoder::MfEncoder::new(&dev, &ctx, hw, res, fps, kbps)?;
-                            tracing::info!(encoder = enc.name(), ?codec, "switched hardware encoder");
-                            Ok(Box::new(enc) as Box<dyn VideoEncoder>)
-                        }));
-                    }
+                    // Builds the other codec on demand, e.g. H.264 for a
+                    // viewer that cannot decode HEVC.
+                    let (dev, ctx) = (device.clone(), context.clone());
+                    encoder_factory = Some(Box::new(move |codec| {
+                        let hw = match codec {
+                            Codec::Hevc => encoder::HwCodec::Hevc,
+                            Codec::H264 => encoder::HwCodec::H264,
+                            Codec::Av1 => return Err(crate::PlatformError::Unavailable("no AV1 encoder yet".into())),
+                        };
+                        let enc = encoder::MfEncoder::new(&dev, &ctx, hw, res, fps, kbps)?;
+                        tracing::info!(encoder = enc.name(), ?codec, "switched hardware encoder");
+                        Ok(Box::new(enc) as Box<dyn VideoEncoder>)
+                    }));
                     (cap, Box::new(enc))
                 }
                 Err(e) if choice == EncoderChoice::Auto => {

@@ -53,8 +53,11 @@ In order of commit:
 4. **VideoToolbox hardware decode** on the Mac. Compiles on CI; look for
    `viewer decoder: VideoToolbox` and `VideoToolbox decoder configured`.
 5. **HEVC end to end**: negotiation picks HEVC when both sides have
-   hardware. Look for `codec: Hevc` on the Mac's `connected` line and
-   `switched hardware encoder codec=Hevc` on the PC. Intel's MF HEVC
+   hardware. Look for `codec: Hevc` on the Mac's `connected` line, and on
+   the PC `codec=Hevc` in the `windows host:` startup line plus
+   `encoder already matches the negotiated codec codec=Hevc` on connect.
+   First attempt was a black screen (host sent H.264 labelled HEVC; see
+   ARCHITECTURE §9); fixed, awaiting re-test. Intel's MF HEVC
    encoder is the untested piece; if the picture is wrong, the quick
    escape is to drop `Codec::Hevc` from the host's `codecs` list in
    `crates/aa-platform/src/windows/mod.rs`.
