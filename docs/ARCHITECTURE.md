@@ -262,6 +262,9 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   and removes a whole class of "no answer from host".
 - **Pick the codec after negotiation, not at startup.** Both ends build
   their encoder/decoder from a factory once Hello/Welcome has decided.
+- **windows-rs `PROPVARIANT` frees its payload on drop.** A `VT_BLOB`
+  pointing at stack memory → `STATUS_HEAP_CORRUPTION` at exit of scope.
+  Wrap in `ManuallyDrop` when the blob is borrowed, not owned.
 
 ## 10. Measured so far
 

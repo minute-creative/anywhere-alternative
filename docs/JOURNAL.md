@@ -150,6 +150,10 @@ relay later.
   🔁 **adaptive jitter buffer** (start 60 ms, +20 ms per underrun, cap
   300 ms, refill before resuming, shrink after 20 s calm). Stats line
   shows depth and underruns.
+- ❌ Host crashed with `STATUS_HEAP_CORRUPTION` right after
+  `tap=Process` (2026-10-07): the bindings' `PROPVARIANT` runs
+  `PropVariantClear` on drop and freed our stack-allocated activation
+  params → `ManuallyDrop`. The tap itself had activated fine.
 - Pending owner confirmation: mute now leaves the Mac playing; crackle gone.
 
 ### Discovery
