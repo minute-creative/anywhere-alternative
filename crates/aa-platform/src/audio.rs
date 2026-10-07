@@ -347,7 +347,7 @@ mod player {
         }
     }
 
-    /// A DualSense's own sound card (only there while it is plugged in by
+    /// A `DualSense`'s own sound card (only there while it is plugged in by
     /// USB): channels 1-2 are its speaker / headphone jack, 3-4 its haptic
     /// actuators. Each pair has its own jitter buffer, fed separately.
     pub struct PadSpeaker {
@@ -365,7 +365,7 @@ mod player {
     }
 
     impl PadSpeaker {
-        /// Opens the first 4-channel output named like a DualSense.
+        /// Opens the first 4-channel output named like a `DualSense`.
         pub fn open() -> Result<Self> {
             let host = cpal::default_host();
             let device = host

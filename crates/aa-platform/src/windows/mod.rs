@@ -359,9 +359,9 @@ fn bench_frame(
 /// Where the usbip-win2 installer puts its command-line tool.
 const USBIP_EXE: &str = r"C:\Program Files\USBip\usbip.exe";
 
-/// Plug the virtual DualSense into this PC through usbip-win2 (a free,
+/// Plug the virtual `DualSense` into this PC through usbip-win2 (a free,
 /// signed USB/IP driver): `usbip attach` connects to our own server on
-/// localhost and Windows sees a real USB DualSense appear.
+/// localhost and Windows sees a real USB `DualSense` appear.
 fn usbip_attach(server: std::net::SocketAddr, busid: &str) -> anyhow::Result<()> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
