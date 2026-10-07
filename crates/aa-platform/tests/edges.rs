@@ -157,7 +157,7 @@ fn png_decoder_refuses_lies_and_garbage() {
 
 /// The virtual-USB server faces whatever connects to localhost: garbage,
 /// truncated commands, lies about sizes, sudden disconnects. It must keep
-/// serving, and a proper client must still get a working DualSense after.
+/// serving, and a proper client must still get a working `DualSense` after.
 #[test]
 fn usbip_server_survives_garbage_and_still_serves() {
     use aa_platform::ds5dev::VirtualDualSense;
