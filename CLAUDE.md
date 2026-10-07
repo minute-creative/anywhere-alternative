@@ -1,7 +1,8 @@
 # Anywhere Alternative — notes for Claude sessions
 
 Start with `docs/HANDOFF.md` (current state, owner context, next steps),
-then `docs/ARCHITECTURE.md`. Short rules that are easy to forget:
+then `docs/ARCHITECTURE.md`; `docs/JOURNAL.md` is the chronological record
+of attempts, failures and fixes — check it before re-trying an approach. Short rules that are easy to forget:
 
 - The owner has no coding background: write all code, explain the why.
 - Repo is private; stay private. Push to `main`; CI (ubuntu/macos/windows)

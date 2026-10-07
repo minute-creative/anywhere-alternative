@@ -1,0 +1,190 @@
+# Build journal
+
+A chronological record of what we did, what broke, and what we learned.
+`docs/HANDOFF.md` says where things stand; this says how they got there,
+so nobody re-tries a dead end. Newest at the bottom.
+
+Legend: ✅ worked · ❌ failed/abandoned · 🔁 replaced · 📏 measured
+
+---
+
+## Day 0 — decisions (2026-10-03)
+
+**Goal set by the owner:** a Parsec-class remote desktop + game streaming
+tool between a Mac and a Windows PC, both directions, built from scratch
+(Parsec is paid; Moonlight/Sunshine was rejected as a fork), for personal
+use and friends. Targets: as close to 0 ms as physics allows; 4K60 locked
+and native 1080p240; stream rate locks to the viewer's refresh (host's if
+slower); every GPU family; Steam/CrossOver games from a Mac host; After
+Effects and browser work; DualSense controllers; audio, clipboard, file
+transfer, multi-monitor, WoL; internet with pairing codes and a small
+relay later.
+
+**Choices made and why**
+- ✅ **Rust.** Memory-safe systems language with first-class bindings to
+  every OS media API we need; one codebase for both platforms.
+- ✅ **UDP with our own framing**, not WebRTC or TCP. TCP retransmits stall
+  the picture; WebRTC adds a stack we would have to fight for low latency.
+  12-byte header, ≤1200-byte datagrams (fits any path MTU), zero-wait
+  reassembly, NACK for keyframes.
+- ✅ **Workspace of four crates**: `aa-core` (protocol, no OS code,
+  `forbid(unsafe)`), `aa-platform` (traits + per-OS backends), `aa-host`,
+  `aa-viewer`. Backends sit behind traits so the pipeline never knows which
+  OS it is on; a hardware-free *mock* backend lets CI and the Linux dev
+  container exercise the whole path.
+- ✅ **Hardware codecs by default, software as fallback.** Codec order of
+  preference AV1 > HEVC > H.264; H.264 via OpenH264 is the universal
+  fallback.
+- ✅ **Windows first for the real host** even though the plan said Mac
+  first — the owner's PC was the machine in front of them, and the Windows
+  media APIs (DXGI + Media Foundation) are well documented.
+
+**Setup detours (all resolved)**
+- ❌ `git` not recognised on the PC → install Git for Windows.
+- ❌ "not a git repository" / "origin does not appear to be a git repo" /
+  push rejected → clone fresh, `git push --force` once to align histories.
+- ❌ `cargo` "could not find Cargo.toml in system32" — several times.
+  Lesson: **always give commands that `cd` into the repo first.**
+- ❌ Mac: no Homebrew, no `gh`; GitHub auth failed → personal access token
+  with `repo` scope; owner chose a **private** repo.
+- ❌ Mac clone: "destination path already exists" → use the existing folder.
+
+**Tooling that paid off immediately**
+- ✅ **CI on three OSes** (ubuntu/macos/windows). The dev container is
+  Linux and cannot compile Windows or macOS code, so CI is the only
+  compiler for the platform crates.
+- ✅ **CI posts compiler errors as a commit comment on failure** — the
+  Actions log blob was not reachable from the container; the comment is.
+  Every platform file since has gone through 1–3 rounds of "push, read
+  comment, fix API drift".
+
+## Day 1 — first pixels (2026-10-03)
+
+- ✅ Mock pipeline end to end at 60 fps on localhost ("I can see gradient").
+- ✅ Viewer window: winit + wgpu, vsync (Fifo) locked, keyboard and mouse
+  forwarded as USB HID usages so Mac and PC keyboards agree.
+- ❌ wgpu 30 API drift (InstanceDescriptor, surface texture, present) →
+  read the crate source in the registry rather than guess.
+- ✅ Software H.264 (OpenH264) as the mock stream's codec and the fallback
+  everywhere.
+- ✅ Windows host: DXGI Desktop Duplication capture + `SendInput`.
+- 📏 Real screen 2880×1800@60 through **software** H.264: **1–10 fps**.
+  CPU bench 28 fps at 1080p. Not viable; hardware encode is mandatory.
+
+## Day 2 — hardware encode and the first real sessions (2026-10-06)
+
+- ✅ **Media Foundation hardware encoder** (Quick Sync on the owner's Arc
+  130T), zero-copy: the DXGI texture goes straight into the encoder via a
+  DXGI device manager, BGRA in, no CPU touch. Async MFT unlock, CBR, no
+  B-frames, event polling with a deadline.
+- ❌ First output returned `MF_E_TRANSFORM_STREAM_CHANGE` → accept the
+  encoder's proposed output type and continue (standard MF dance).
+- 📏 **Locked 60 fps, 0 % loss, ~31 Mbps, <1 ms assembly** Win→Win on LAN.
+  Bench: 110 fps @1080p, 73 @1440p.
+- ❌ Mac viewer showed a **black window** then nothing → the session had
+  died silently; now the window closes with the reason
+  (`Wake::SessionEnded`).
+- ❌ "no answer from host" — many times. Causes found over the day:
+  host not running yet; wrong folder; `7700~` typo in the address;
+  **Windows firewall** (fixed with an explicit UDP 7700 inbound rule);
+  port already in use (10048) from a stale host; and later the PC's
+  **address changing** between sessions.
+- ❌ Mirroring worked but **clicks didn't register** → input channel was
+  fine; the issue was DPI: Windows reported virtualised coordinates on a
+  150 %-scaled display. Fix: declare per-monitor DPI awareness first,
+  move with `SetCursorPos`, send clicks with absolute position.
+- ❌ Decoder errors (`Native:18/2`) after any packet loss → **gate decoding
+  on keyframes** and throttle NACKs to one per 150 ms.
+- ❌ Enter opened new tabs, Esc did nothing, clicking the video opened
+  tabs → a **stuck modifier** on the host (macOS swallows Cmd key-up on
+  Cmd+Tab). Fix: track held keys, release all on focus loss and on
+  disconnect, map Cmd→Ctrl on the Mac.
+- ❌ Washed-out colours → full-range BT.709 metadata on the encoder and
+  sRGB textures/surface in the viewer.
+- ❌ Picture not edge-to-edge → `--stretch`, later a checkbox.
+- ✅ Owner asked for settings "visually, not flags" → **egui overlay**
+  (Ctrl/Cmd+Shift+S): fullscreen, stretch, max Mbps, stats.
+
+### Wi-Fi: the hard part
+
+- 📏 Loss 12–27 % on the owner's Wi-Fi at 31 Mbps.
+- 🔁 **Paced sends** (spread each frame across the frame interval) +
+  AIMD adaptive bitrate + encoder watchdog. Bitrate control stayed; pacing
+  did not:
+  - ❌ Pacing inside the receive loop **froze the session** (RTT stuck,
+    fps 0): sending starved packet intake → moved sending to a dedicated
+    task.
+  - ❌ Pacing then raised assembly time to 10–14 ms and made loss *worse*
+    on Wi-Fi (consecutive frames overlapping on air) → **pacing removed**,
+    burst sends restored. Bitrate is the lever, not spacing.
+- ❌ **Phantom 98–99 % loss with `dropped=0`** → two independent sequence
+  counters (video task and control task) looked like gaps to the viewer,
+  and the bitrate controller pinned the stream to the floor → one atomic
+  `SeqCounter` shared by every sender.
+- 📏 Ping between the two machines: **36–187 ms** (Mac→PC ping shows 100 %
+  loss only because Windows blocks ICMP by default; PC→Mac is the real
+  number). This is the ceiling on everything; Ethernet on the PC is the
+  standing advice.
+- Owner moved on before confirming steady 60 fps after the seq fix.
+
+## Day 3 — audio, discovery, hardware decode, HEVC (2026-10-06 → 07)
+
+### Audio
+- ✅ **WASAPI loopback → Opus (48 kHz stereo, 10 ms, 128 kbps, inband FEC)
+  → viewer playback via cpal** with packet-loss concealment. Silence is not
+  sent.
+- ❌ `opus` crate needs **CMake** to build libopus → owner installed CMake
+  on both machines (README updated).
+- ❌ cpal 0.18 and windows-rs API drift (`SampleRate` is a `u32`,
+  `StreamConfig` by value, `description()` not `name()`, enum flag casts,
+  packed-struct field access) → fixed from CI comments.
+- ✅ Owner: **"audio is working."**
+- ✅ Owner asked for **mute PC speakers while streaming** → overlay toggle
+  → `SetHostMute` → `IAudioEndpointVolume`, restored on every disconnect
+  path.
+- ❌ On the owner's device muting the PC **also silenced the stream**:
+  endpoint loopback taps after the software volume → 🔁 **per-process
+  loopback** (`ActivateAudioInterfaceAsync`, exclude our own process tree)
+  taps before volume/mute; endpoint loopback kept as fallback.
+- ❌ Audio **crackled** → fixed 30 ms buffer vs. 50–180 ms delay swings →
+  🔁 **adaptive jitter buffer** (start 60 ms, +20 ms per underrun, cap
+  300 ms, refill before resuming, shrink after 20 s calm). Stats line
+  shows depth and underruns.
+- Pending owner confirmation: mute now leaves the Mac playing; crackle gone.
+
+### Discovery
+- ❌ "no answer from host" once more — the PC's address had changed
+  (.3 → .5) → ✅ **LAN auto-discovery**: viewer broadcasts `Discover` on
+  UDP 7700, host answers `Here { name }`. Same port, so the existing
+  firewall rule covers it. Viewer takes no address, a name, an IP, or
+  ip:port.
+
+### Hardware decode on the Mac
+- 🔁 First attempt with hand-written C bindings was cut off and discarded;
+  rebuilt on the `objc2-*` framework crates (generated from Apple's SDK).
+- ✅ **VideoToolbox decoder**: Annex-B → format description from SPS/PPS,
+  length-prefixed slices, synchronous decode to BGRA. Compiled on macOS CI
+  first try. Falls back to OpenH264 if the session cannot open.
+- Pending owner confirmation on the M4 Pro.
+
+### HEVC
+- ✅ **Codec chosen at negotiation**: encoder and decoder factories build
+  the engine after Hello/Welcome instead of at startup. Windows offers HEVC
+  when an MF HEVC encoder exists (Main 4:2:0 8-bit profile set); the Mac
+  offers HEVC when VideoToolbox opens. Negotiation already preferred HEVC,
+  so Win→Mac should now run at roughly half the bitrate.
+- Pending owner confirmation — Intel's MF HEVC encoder is untested.
+
+### Docs
+- ✅ `HANDOFF.md`, `CLAUDE.md`, this journal; ARCHITECTURE §9 lessons and
+  §10 measurements kept current; mirrored to the claude.ai Project.
+
+---
+
+## Things we deliberately did not do (yet)
+
+- No WebRTC, no TCP, no QUIC: latency budget.
+- No pacing: see above.
+- No audio/video sync logic yet: `ts_ms` is on every audio packet, unused.
+- No Mac host, no controllers, no clipboard, no internet path: in order in
+  `HANDOFF.md`.

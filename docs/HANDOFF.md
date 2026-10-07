@@ -1,6 +1,7 @@
 # Handoff: picking this project up in a fresh session
 
-Read this first, then `docs/ARCHITECTURE.md` for the design and `README.md`
+Read this first, then `docs/ARCHITECTURE.md` for the design, `docs/JOURNAL.md`
+for the full history of what was tried, what failed and why, and `README.md`
 for setup. Everything below is true as of the last commit on `main`.
 
 ## Who you are working with
