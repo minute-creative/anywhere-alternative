@@ -39,7 +39,10 @@ pub async fn run(
     socket.connect(host).await?;
     tracing::info!("connecting to {host} from {}", socket.local_addr()?);
 
-    let ViewerBackends { decoder: mut decoder_factory, capabilities } = backends;
+    let ViewerBackends { decoder: mut decoder_factory, clipboard, capabilities } = backends;
+    let clip_link = clipboard.and_then(|c| aa_platform::clipboard::spawn_worker(c).ok());
+    let mut clip = aa_core::clipboard::ClipSync::default();
+    let mut clip_tick = tokio::time::interval(Duration::from_millis(100));
     let seq = SeqCounter::default();
 
     // --- handshake ---------------------------------------------------------
@@ -141,6 +144,15 @@ pub async fn run(
                         }
                     }
                     Kind::Audio => audio.handle(packet.payload),
+                    Kind::Clipboard | Kind::ClipboardAck => {
+                        let (item, ack) = clip.received(&packet, &seq);
+                        if let (Some(item), Some(link)) = (item, clip_link.as_ref()) {
+                            let _ = link.paste_here.send(item);
+                        }
+                        if let Some(ack) = ack {
+                            socket.send(&ack).await?;
+                        }
+                    }
                     Kind::Pong => {
                         if packet.payload.len() >= 8 {
                             let sent = u64::from_be_bytes(packet.payload[..8].try_into().expect("8 bytes"));
@@ -200,6 +212,19 @@ pub async fn run(
                         send_control(&socket, &ControlMessage::Bye, &seq).await?;
                         return Ok(());
                     }
+                }
+            }
+
+            _ = clip_tick.tick() => {
+                if let Some(link) = clip_link.as_ref() {
+                    while let Ok(item) = link.copied_here.try_recv() {
+                        for d in clip.copied(&item, &seq) {
+                            socket.send(&d).await?;
+                        }
+                    }
+                }
+                for d in clip.tick(&seq) {
+                    socket.send(&d).await?;
                 }
             }
 

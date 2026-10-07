@@ -220,6 +220,17 @@ construction instead of depending on what the driver does with BGRA. If
 the GPU has no video processor the encoder takes BGRA as before (logged as
 `encoder colour path`).
 
+### Clipboard
+
+Both ways, text and images (PNG). A worker thread polls the OS change
+counter (`GetClipboardSequenceNumber`, `NSPasteboard.changeCount`) 4×/s and
+reads only when it moves; after pasting a remote item it records the new
+counter so the item does not bounce back. Items travel as `Kind::Clipboard`
+pieces (transfer id in `frame_id`); the receiver answers `ClipboardAck`
+once whole, and the sender repeats the transfer at 0.3/0.6/1/2 s until
+acked. Only copies made *after* connecting are shared. Limit 32 MB.
+Unencrypted on the LAN until stage 3 adds encryption.
+
 ### Codec choice
 
 `Codec::ALL` is preference order (AV1, HEVC, H.264); `negotiate` takes the
@@ -300,6 +311,9 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   sits above the session's quietest RTT (a queue is filling); 5%+ loss
   always cuts. Sessions also start at 0.05 bpp and probe +50%/s until the
   first real loss, so a clean LAN is sharp in ~4 s instead of ~30.
+- **macOS drops key-up while Cmd is held.** Cmd+C reached the PC as Ctrl
+  down + C down, and C never came up (stuck/repeating). While Cmd is held
+  the viewer now sends every other key as an immediate press+release.
 - **A late packet is not two lost packets.** The loss tracker used to
   move its "expected next" back to a late packet's number, so everything
   after it counted as lost again. On a reordering link (5% of packets

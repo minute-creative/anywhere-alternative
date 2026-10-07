@@ -81,5 +81,5 @@ pub fn viewer_backends() -> Result<ViewerBackends> {
         }
         Ok(Box::new(crate::sw::SwDecoder::new()?))
     });
-    Ok(ViewerBackends { decoder, capabilities })
+    Ok(ViewerBackends { decoder, clipboard: crate::clipboard::system(), capabilities })
 }

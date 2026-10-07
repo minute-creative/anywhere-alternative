@@ -25,6 +25,7 @@ use aa_core::video::{Codec, EncodedFrameMeta, PixelFormat, Resolution};
 use bytes::Bytes;
 
 pub mod audio;
+pub mod clipboard;
 pub mod hid_scancode;
 pub mod mock;
 pub mod sw;
@@ -154,6 +155,8 @@ pub struct HostBackends {
     pub audio: Option<Box<dyn audio::AudioCapture>>,
     /// Host speaker mute; `None` where not implemented.
     pub speaker: Option<Box<dyn audio::SpeakerControl>>,
+    /// Shared copy/paste; `None` where there is no clipboard.
+    pub clipboard: Option<Box<dyn clipboard::SystemClipboard>>,
     pub capabilities: Capabilities,
 }
 
@@ -168,6 +171,8 @@ pub struct ViewerBackends {
     /// Builds the decoder once the codec is negotiated; must succeed for
     /// every codec in `capabilities.codecs`.
     pub decoder: DecoderFactory,
+    /// Shared copy/paste; `None` where there is no clipboard.
+    pub clipboard: Option<Box<dyn clipboard::SystemClipboard>>,
     pub capabilities: Capabilities,
 }
 

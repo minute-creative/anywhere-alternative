@@ -64,6 +64,10 @@ struct Args {
     /// Headless only: send a synthetic mouse wiggle every second.
     #[arg(long)]
     test_input: bool,
+
+    /// With --mock: copy a test text every 2 s to exercise clipboard sharing.
+    #[arg(long)]
+    test_clipboard: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -74,6 +78,9 @@ fn main() -> anyhow::Result<()> {
 
     let backends = if args.mock {
         tracing::warn!("using MOCK decoder");
+        if args.test_clipboard {
+            start_test_clipboard("viewer");
+        }
         aa_platform::mock::viewer_backends(args.mock_raw)?
     } else {
         aa_platform::viewer_backends().context("real viewer backends unavailable; try --mock")?
@@ -122,4 +129,16 @@ fn main() -> anyhow::Result<()> {
     app.set_stats_receiver(stats_rx);
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// `--test-clipboard`: pretend the user copies a new line of text every
+/// 2 s, so a mock session exercises clipboard sharing end to end.
+fn start_test_clipboard(side: &'static str) {
+    std::thread::spawn(move || {
+        for n in 1u32.. {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            aa_platform::mock::test_clipboard()
+                .copy(aa_platform::clipboard::ClipItem::Text(format!("{side} clip {n}")));
+        }
+    });
 }

@@ -113,6 +113,7 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
         input: Box::new(input),
         gamepad: None,
         audio,
+        clipboard: crate::clipboard::system(),
         speaker,
         capabilities: Capabilities {
             codecs,
@@ -179,6 +180,7 @@ fn open_hardware_encoder(
 pub fn viewer_backends() -> Result<ViewerBackends> {
     Ok(ViewerBackends {
         decoder: Box::new(|_codec| Ok(Box::new(crate::sw::SwDecoder::new()?) as Box<dyn crate::VideoDecoder>)),
+        clipboard: crate::clipboard::system(),
         capabilities: Capabilities {
             codecs: vec![Codec::H264],
             max_resolution: Resolution::new(3840, 2160),

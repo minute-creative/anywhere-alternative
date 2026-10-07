@@ -54,6 +54,11 @@ pub enum Kind {
     /// [`slice_frame_with_fec`]. `slice_index` is the stripe, `slice_count`
     /// the number of parity packets for this frame.
     VideoFec = 9,
+    /// One piece of a clipboard item, either direction; see `clipboard`.
+    /// `frame_id` is the transfer id.
+    Clipboard = 10,
+    /// "Got every piece of clipboard transfer `frame_id`."
+    ClipboardAck = 11,
 }
 
 impl Kind {
@@ -68,6 +73,8 @@ impl Kind {
             7 => Self::Ping,
             8 => Self::Pong,
             9 => Self::VideoFec,
+            10 => Self::Clipboard,
+            11 => Self::ClipboardAck,
             _ => return None,
         })
     }

@@ -195,6 +195,13 @@ fn mock_capabilities(res: Resolution, fps: u16) -> Capabilities {
     }
 }
 
+/// The mock clipboard of this process. `--test-clipboard` copies into it on
+/// a timer, and the clipboard worker logs what arrives from the other side.
+pub fn test_clipboard() -> &'static crate::clipboard::MemoryClipboard {
+    static CB: std::sync::OnceLock<crate::clipboard::MemoryClipboard> = std::sync::OnceLock::new();
+    CB.get_or_init(Default::default)
+}
+
 /// Mock host. `raw = true` uses the passthrough codec (huge, lossless, for
 /// pipeline debugging); otherwise the software H.264 encoder, which is what
 /// you want for anything resembling a real test.
@@ -213,6 +220,7 @@ pub fn host_backends(res: Resolution, fps: u16, raw: bool) -> crate::Result<Host
         encoder_factory: None,
         audio: None,
         speaker: None,
+        clipboard: Some(Box::new(test_clipboard().clone())),
         capabilities: mock_capabilities(res, fps),
     })
 }
@@ -225,7 +233,11 @@ pub fn viewer_backends(raw: bool) -> crate::Result<ViewerBackends> {
             Ok(Box::new(crate::sw::SwDecoder::new()?))
         }
     });
-    Ok(ViewerBackends { decoder, capabilities: mock_capabilities(Resolution::new(7680, 4320), 240) })
+    Ok(ViewerBackends {
+        decoder,
+        clipboard: Some(Box::new(test_clipboard().clone())),
+        capabilities: mock_capabilities(Resolution::new(7680, 4320), 240),
+    })
 }
 
 #[cfg(test)]

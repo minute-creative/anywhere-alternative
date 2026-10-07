@@ -32,7 +32,13 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     let socket = Arc::new(crate::udp::bind(listen)?);
     tracing::info!("listening on {}", socket.local_addr()?);
 
-    let HostBackends { capture, encoder, encoder_factory, input, gamepad, audio, mut speaker, capabilities } = backends;
+    let HostBackends { capture, encoder, encoder_factory, input, gamepad, audio, mut speaker, clipboard, capabilities } =
+        backends;
+    // Shared copy/paste: a thread watches this PC's clipboard; `clip` turns
+    // copies into datagrams and datagrams back into pastes.
+    let clip_link = clipboard.and_then(|c| aa_platform::clipboard::spawn_worker(c).ok());
+    let mut clip = aa_core::clipboard::ClipSync::default();
+    let mut clip_tick = tokio::time::interval(Duration::from_millis(100));
 
     let ctl = Arc::new(PipelineControl::default());
     // A few frames of slack: sending a 250-packet keyframe over Wi-Fi takes
@@ -95,7 +101,23 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 if let Some(v) = viewer.as_mut().filter(|v| v.addr == from) {
                     v.last_heard = Instant::now();
                 }
+                if matches!(packet.header.kind, Kind::Clipboard | Kind::ClipboardAck) {
+                    if viewer.as_ref().is_some_and(|v| v.addr == from) {
+                        let (item, ack) = clip.received(&packet, &seq);
+                        if let (Some(item), Some(link)) = (item, clip_link.as_ref()) {
+                            let _ = link.paste_here.send(item);
+                        }
+                        if let Some(ack) = ack {
+                            socket.send_to(&ack, from).await?;
+                        }
+                    }
+                    continue;
+                }
                 handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &seq, &mut bitrate, &video_dest, &mut speaker).await?;
+            }
+
+            _ = clip_tick.tick() => {
+                clip_pump(&socket, clip_link.as_ref(), &mut clip, viewer.as_ref().map(|v| v.addr), &seq).await?;
             }
 
             _ = housekeeping.tick() => {
@@ -120,6 +142,31 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
             }
         }
     }
+}
+
+/// Send what was copied on this PC (if a viewer is connected; otherwise the
+/// copy just stays here) and repeat any unacknowledged transfer.
+async fn clip_pump(
+    socket: &UdpSocket,
+    link: Option<&aa_platform::clipboard::ClipboardLink>,
+    clip: &mut aa_core::clipboard::ClipSync,
+    dest: Option<SocketAddr>,
+    seq: &SeqCounter,
+) -> anyhow::Result<()> {
+    let Some(link) = link else { return Ok(()) };
+    while let Ok(item) = link.copied_here.try_recv() {
+        if let Some(dest) = dest {
+            for d in clip.copied(&item, seq) {
+                socket.send_to(&d, dest).await?;
+            }
+        }
+    }
+    if let Some(dest) = dest {
+        for d in clip.tick(seq) {
+            socket.send_to(&d, dest).await?;
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one dispatch per packet kind

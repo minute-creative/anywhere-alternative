@@ -307,6 +307,7 @@ impl Gpu {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)] // window state flags
 pub struct App {
     title: String,
     fullscreen: bool,
@@ -325,6 +326,8 @@ pub struct App {
     /// Treat the Mac Command key as Control on the host, so Cmd+C / Cmd+V do
     /// what a Mac user expects on a Windows host.
     cmd_as_ctrl: bool,
+    /// Cmd is down on the Mac keyboard (see the key handler for why it matters).
+    cmd_held: bool,
     overlay: Option<Overlay>,
     settings: Settings,
     applied: Settings,
@@ -360,6 +363,7 @@ impl App {
             presented: 0,
             held_keys: Vec::new(),
             cmd_as_ctrl: cfg!(target_os = "macos"),
+            cmd_held: false,
             overlay: None,
             settings: Settings::new(fullscreen, stretch),
             applied: Settings::new(fullscreen, stretch),
@@ -611,6 +615,20 @@ impl ApplicationHandler<Wake> for App {
                             };
                         }
                         let pressed = event.state == ElementState::Pressed;
+                        let is_modifier = (0xE0..=0xE7).contains(&hid);
+                        if pressed && !is_modifier && self.cmd_as_ctrl && self.cmd_held {
+                            // macOS never reports the key-up of a key pressed
+                            // while Cmd is down. Sent as a plain press, Cmd+C
+                            // would leave C held on the PC (and repeating).
+                            // So send the whole tap now: shortcuts only need
+                            // the press anyway.
+                            self.send(InputEvent::Key { hid_usage: hid, pressed: true });
+                            self.send(InputEvent::Key { hid_usage: hid, pressed: false });
+                            return;
+                        }
+                        if matches!(code, winit::keyboard::KeyCode::SuperLeft | winit::keyboard::KeyCode::SuperRight) {
+                            self.cmd_held = pressed;
+                        }
                         if pressed {
                             if !self.held_keys.contains(&hid) {
                                 self.held_keys.push(hid);
@@ -623,6 +641,7 @@ impl ApplicationHandler<Wake> for App {
                 }
             }
             WindowEvent::Focused(false) => {
+                self.cmd_held = false;
                 // macOS does not deliver key-up for keys released while another
                 // app has focus (Cmd during Cmd+Tab is the classic). Release
                 // everything we think is down so nothing sticks on the host.

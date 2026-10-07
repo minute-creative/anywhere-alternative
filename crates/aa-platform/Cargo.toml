@@ -17,6 +17,8 @@ tracing.workspace = true
 openh264.workspace = true
 # Opus (bundled C source via cmake) for audio on every platform.
 opus.workspace = true
+# Clipboard images travel as PNG (pure Rust, so it builds everywhere).
+png = "0.18"
 
 # Real backends are added per stage. Each one is its own module behind
 # `#[cfg(target_os)]` and, where it needs a vendor SDK, its own feature flag.
@@ -36,11 +38,16 @@ objc2-core-video = { version = "0.3", default-features = false, features = [
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "std", "CFBase", "CFDictionary", "CFNumber", "CFString",
 ] }
+# NSPasteboard.changeCount: tells us the clipboard changed without reading
+# it (reading a large image every poll would be wasteful).
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
 
 # Audio playback. cpal needs ALSA headers on Linux, which CI/dev containers
 # may lack, and we never ship a Linux viewer, so it is Mac/Windows only.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 cpal.workspace = true
+# The system clipboard (text and images) behind one API on Mac and Windows.
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [
@@ -61,6 +68,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Ole",
     "Win32_System_Variant",
+    "Win32_System_DataExchange",
 ] }
 # The `#[implement]` macro expands to `windows_core::` paths, so the crate
 # must be a direct dependency even though we only use it through `windows`.
