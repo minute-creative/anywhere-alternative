@@ -279,6 +279,14 @@ pub fn slice_frame_with_fec(
     Ok(out)
 }
 
+/// Is frame `a` newer than frame `b`? Frame ids wrap after 2^32 (166 days
+/// at 300 fps); comparing by distance, like TCP sequence numbers, keeps
+/// "newer" meaningful across the wrap. A plain `a > b` would make every
+/// frame after the wrap look ancient and be thrown away.
+pub fn is_newer(a: u32, b: u32) -> bool {
+    a != b && a.wrapping_sub(b) < u32::MAX / 2
+}
+
 /// A frame that has been fully received.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompleteFrame {
@@ -375,7 +383,7 @@ impl Reassembler {
         let h = packet.header;
         debug_assert!(matches!(h.kind, Kind::Video | Kind::VideoFec));
 
-        if self.last_delivered.is_some_and(|last| h.frame_id <= last) {
+        if self.last_delivered.is_some_and(|last| !is_newer(h.frame_id, last)) {
             return Reassembly::Stale;
         }
 
@@ -419,7 +427,7 @@ impl Reassembler {
                 data.extend_from_slice(&s);
             }
             // Everything older than this frame is now abandoned.
-            let older: Vec<u32> = self.partial.range(..h.frame_id).map(|(id, _)| *id).collect();
+            let older: Vec<u32> = self.partial.keys().copied().filter(|&id| is_newer(h.frame_id, id)).collect();
             for id in older {
                 self.partial.remove(&id);
                 self.abandoned.push(id);
@@ -434,10 +442,10 @@ impl Reassembler {
 
         // Bound memory: too many in flight means the oldest is never coming.
         while self.partial.len() > Self::MAX_PARTIAL {
-            if let Some((&id, _)) = self.partial.iter().next() {
+            if let Some(id) = self.partial.keys().copied().reduce(|a, b| if is_newer(b, a) { a } else { b }) {
                 self.partial.remove(&id);
                 self.abandoned.push(id);
-                self.last_delivered = Some(self.last_delivered.map_or(id, |l| l.max(id)));
+                self.last_delivered = Some(self.last_delivered.map_or(id, |l| if is_newer(id, l) { id } else { l }));
             }
         }
         Reassembly::Pending
@@ -451,6 +459,22 @@ impl Reassembler {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn frames_keep_flowing_across_the_frame_id_wrap() {
+        let seq = SeqCounter::default();
+        let mut ra = Reassembler::default();
+        let mut got = Vec::new();
+        for id in (u32::MAX - 3..=u32::MAX).chain(0..4) {
+            for d in slice_frame_with_fec(&Bytes::from(vec![1u8; 3000]), id, false, &seq).unwrap() {
+                if let Reassembly::Complete(f) = ra.push(Packet::parse(d).unwrap()) {
+                    got.push(f.frame_id);
+                }
+            }
+        }
+        assert_eq!(got.len(), 8, "{got:?}");
+        assert!(is_newer(0, u32::MAX) && !is_newer(u32::MAX, 0));
+    }
 
     fn fec_packets(len: usize, id: u32) -> (Bytes, Vec<Packet>) {
         let frame: Bytes = (0..len).map(|i| (i * 7 + 3) as u8).collect::<Vec<u8>>().into();

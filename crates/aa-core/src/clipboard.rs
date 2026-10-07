@@ -90,6 +90,16 @@ fn restamp(d: &Bytes, seq: &SeqCounter) -> Bytes {
     b.freeze()
 }
 
+/// Good-enough randomness for transfer ids (no dependency needed).
+fn random_u32() -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+    #[allow(clippy::cast_possible_truncation)]
+    let v = h.finish() as u32;
+    v
+}
+
 /// Pieces sent per `tick` (every ~100 ms): ~350 × 1.2 KB ≈ 33 Mbps.
 const PACE: usize = 350;
 
@@ -126,7 +136,13 @@ impl ClipSender {
         if encoded.len() > MAX_ITEM_BYTES {
             return false;
         }
-        self.next_id = self.next_id.wrapping_add(1);
+        if self.next_id == 0 {
+            // Start somewhere random: ids restart whenever an app restarts or
+            // reconnects, and a new transfer reusing an id the other side
+            // just finished would be thrown away as a "repeat".
+            self.next_id = random_u32();
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
         let id = self.next_id;
         let Some(datagrams) = datagrams(&encoded, id) else { return false };
         let queue = (0..u16::try_from(datagrams.len()).unwrap_or(u16::MAX)).collect();
@@ -183,10 +199,18 @@ impl ClipSender {
 #[derive(Debug, Default)]
 pub struct ClipReceiver {
     partial: BTreeMap<u32, Partial>,
-    /// Last transfer applied, so a repeat (our ack got lost) is acked again
-    /// but not pasted twice.
-    last_done: Option<u32>,
+    /// Last transfer applied and when, so a repeat (our ack got lost) is
+    /// acked again but not pasted twice. Forgotten after a while: repeats
+    /// stop within seconds, and an old id must not swallow a new transfer.
+    last_done: Option<(u32, Instant)>,
 }
+
+/// Unfinished incoming transfers kept at once. Only the latest copy
+/// matters; the fuzz test showed that without a cap, transfers that never
+/// complete pile up without limit (13,678 in one run).
+const MAX_PARTIALS: usize = 2;
+/// How long a finished transfer's id is remembered (see `last_done`).
+const DONE_MEMORY: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 struct Partial {
@@ -223,7 +247,7 @@ impl ClipReceiver {
     pub fn push(&mut self, packet: &Packet, seq: &SeqCounter) -> ClipEvent {
         let h = packet.header;
         let id = h.frame_id;
-        if self.last_done == Some(id) {
+        if self.last_done.is_some_and(|(d, at)| d == id && at.elapsed() < DONE_MEMORY) {
             // Only answer once per full repeat (on its last piece).
             return if h.slice_index + 1 == h.slice_count {
                 ClipEvent::AckOnly(ack_datagram(id, &[], seq))
@@ -231,8 +255,15 @@ impl ClipReceiver {
                 ClipEvent::Pending
             };
         }
-        // A new transfer supersedes any older partial ones.
-        self.partial.retain(|&k, _| k >= id);
+        // A new transfer: make room by dropping the stalest unfinished one.
+        if !self.partial.contains_key(&id) {
+            while self.partial.len() >= MAX_PARTIALS {
+                let Some(oldest) = self.partial.iter().min_by_key(|(_, p)| p.last_piece).map(|(&k, _)| k) else {
+                    break;
+                };
+                self.partial.remove(&oldest);
+            }
+        }
         let p = self.partial.entry(id).or_insert_with(|| Partial {
             slots: vec![None; usize::from(h.slice_count)],
             last_piece: Instant::now(),
@@ -251,7 +282,7 @@ impl ClipReceiver {
         for s in p.slots.into_iter().flatten() {
             data.extend_from_slice(&s);
         }
-        self.last_done = Some(id);
+        self.last_done = Some((id, Instant::now()));
         let ack = ack_datagram(id, &[], seq);
         match ClipItem::decode(&data.freeze()) {
             Some(item) => ClipEvent::Item(item, ack),
@@ -303,6 +334,11 @@ pub struct ClipSync {
 }
 
 impl ClipSync {
+    /// Incomplete incoming transfers being held (for tests and stats).
+    pub fn partial_transfers(&self) -> usize {
+        self.rx.partial.len()
+    }
+
     /// The user copied `item` here. Pieces go out on the next ticks.
     /// Returns false if it is too large to share.
     pub fn copied(&mut self, item: &ClipItem) -> bool {

@@ -49,6 +49,10 @@ fn boost() -> f32 {
     10f32.powf(BOOST_CENTI_DB.load(Ordering::Relaxed) as f32 / 2000.0)
 }
 
+/// Sample rates any real audio device uses; anything else is a driver bug.
+const MIN_RATE: u32 = 8_000;
+const MAX_RATE: u32 = 384_000;
+
 /// Loudest a sample may get after the boost; a hair under full scale.
 const CEILING: f32 = 0.97;
 /// Fade-in length after (re)starting playback, in output samples.
@@ -161,7 +165,14 @@ impl Jitter {
     pub fn pull(&mut self, out: &mut [f32], channels: usize, rate: u32) {
         let channels = channels.max(1);
         let frames_out = out.len() / channels;
-        let step = f64::from(SAMPLE_RATE) / f64::from(rate.max(1));
+        // A buffer that isn't a whole number of frames: its last few samples
+        // would otherwise keep whatever was in memory and play as noise.
+        out[frames_out * channels..].fill(0.0);
+        if !(MIN_RATE..=MAX_RATE).contains(&rate) {
+            out.fill(0.0);
+            return;
+        }
+        let step = f64::from(SAMPLE_RATE) / f64::from(rate);
         // Input frames this block consumes, plus one for interpolation.
         let need = (self.pos + frames_out as f64 * step).ceil() as usize + 1;
         if self.filling || self.queue.len() / 2 < need {
@@ -225,11 +236,16 @@ impl InputFramer {
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn push(&mut self, input: &[f32], channels: usize, rate: u32, mut emit: impl FnMut(&[i16])) {
         let channels = channels.max(1);
+        // A driver reporting a nonsense rate would make us generate
+        // thousands of frames per input sample and stall the thread.
+        if !(MIN_RATE..=MAX_RATE).contains(&rate) {
+            return;
+        }
         // A microphone is one voice: average the channels.
         for frame in input.chunks_exact(channels) {
             self.pending.push_back(frame.iter().sum::<f32>() / channels as f32);
         }
-        let step = f64::from(rate.max(1)) / f64::from(SAMPLE_RATE);
+        let step = f64::from(rate) / f64::from(SAMPLE_RATE);
         while self.pos.floor() as usize + 1 < self.pending.len() {
             let i = self.pos.floor() as usize;
             let t = (self.pos - self.pos.floor()) as f32;
