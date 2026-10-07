@@ -249,10 +249,9 @@ async fn clip_pump(
 ) -> anyhow::Result<()> {
     let Some(link) = link else { return Ok(()) };
     while let Ok(item) = link.copied_here.try_recv() {
-        if let Some(dest) = dest {
-            for d in clip.copied(&item, seq) {
-                socket.send_to(&d, dest).await?;
-            }
+        // Nobody connected: the copy just stays on this PC.
+        if dest.is_some() && !clip.copied(&item) {
+            tracing::warn!(item = item.describe(), "too large to share");
         }
     }
     if let Some(dest) = dest {
@@ -295,9 +294,18 @@ async fn handle_packet(
                         send_control(socket, from, &ControlMessage::Reject { reason }, seq).await?;
                         return Ok(());
                     }
-                    if viewer.is_some() && !is_current_viewer {
-                        send_control(socket, from, &ControlMessage::Reject { reason: "host busy".into() }, seq).await?;
-                        return Ok(());
+                    // Another machine while one is connected: busy. The *same*
+                    // machine on a new port is that viewer reconnecting (it
+                    // lost us for a moment): let it take over at once rather
+                    // than waiting out the old session's timeout.
+                    if let Some(v) = viewer.as_ref().filter(|v| v.addr != from) {
+                        if v.addr.ip() == from.ip() {
+                            tracing::info!(old = %v.addr, new = %from, "viewer reconnected");
+                        } else {
+                            send_control(socket, from, &ControlMessage::Reject { reason: "host busy".into() }, seq)
+                                .await?;
+                            return Ok(());
+                        }
                     }
                     match negotiate(host_caps, &capabilities) {
                         Ok(negotiated) => {

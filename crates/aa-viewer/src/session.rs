@@ -32,20 +32,47 @@ const KEEPALIVE: Duration = Duration::from_millis(500);
 /// Don't spam the host with keyframe requests; one in flight at a time.
 const NACK_INTERVAL: Duration = Duration::from_millis(150);
 
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // one select! loop; splitting it would hide the flow
-/// Runs the whole session. `frames` receives decoded pictures (`None` in
-/// headless mode: decode and discard, print stats), `commands` carries
-/// input from the window.
+/// The host went quiet mid-session (PC asleep, crashed, Wi-Fi dropped).
+/// The caller reconnects on this error; others (refused, bad version) are final.
+#[derive(Debug)]
+pub struct HostLost;
+
+impl std::fmt::Display for HostLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the host stopped answering")
+    }
+}
+
+impl std::error::Error for HostLost {}
+
+/// No packet from the host for this long means it is gone. Video alone
+/// arrives many times a second and pongs twice a second, so 4 s of
+/// silence is never just a slow moment.
+const HOST_SILENT: Duration = Duration::from_secs(4);
+
+/// Everything a session needs besides the platform backends.
+pub struct Options {
+    pub host: SocketAddr,
+    pub bind: SocketAddr,
+    /// Where decoded pictures go (`None` in headless mode: decode, print stats).
+    pub frames: Option<FrameSlot>,
+    pub test_input: bool,
+    pub stats_tx: Option<std::sync::mpsc::Sender<crate::overlay::LiveStats>>,
+    pub mic: MicStart,
+    /// Called once the host has accepted us (used to re-apply settings
+    /// after a reconnect).
+    pub on_connected: Option<Box<dyn Fn() + Send>>,
+}
+
+/// Runs the whole session. `commands` carries input and settings from the
+/// window; it is borrowed so a reconnect can keep using it.
+#[allow(clippy::too_many_lines)] // one select! loop; splitting it would hide the flow
 pub async fn run(
-    host: SocketAddr,
-    bind: SocketAddr,
+    opts: Options,
     backends: ViewerBackends,
-    frames: Option<FrameSlot>,
-    mut commands: mpsc::Receiver<ViewerCommand>,
-    test_input: bool,
-    stats_tx: Option<std::sync::mpsc::Sender<crate::overlay::LiveStats>>,
-    start_mic: MicStart,
+    commands: &mut mpsc::Receiver<ViewerCommand>,
 ) -> anyhow::Result<()> {
+    let Options { host, bind, frames, test_input, stats_tx, mic: start_mic, on_connected } = opts;
     let socket = crate::udp::bind(bind)?;
     socket.connect(host).await?;
     tracing::info!("connecting to {host} from {}", socket.local_addr()?);
@@ -77,6 +104,10 @@ pub async fn run(
     .context_timeout()??;
     tracing::info!(?negotiated, "connected");
     crate::discover::remember(host);
+    if let Some(cb) = &on_connected {
+        cb();
+    }
+    let mut last_from_host = Instant::now();
     if !negotiated.gamepad {
         tracing::info!("controllers won't reach the host: it has no virtual controller driver (ViGEmBus on Windows)");
     }
@@ -126,6 +157,7 @@ pub async fn run(
             recv = socket.recv(&mut buf) => {
                 let n = recv?;
                 bytes_this_second += n;
+                last_from_host = Instant::now();
                 let packet = match Packet::parse(Bytes::copy_from_slice(&buf[..n])) {
                     Ok(p) => p,
                     Err(e) => { tracing::debug!("bad datagram: {e}"); continue; }
@@ -257,8 +289,8 @@ pub async fn run(
             _ = clip_tick.tick() => {
                 if let Some(link) = clip_link.as_ref() {
                     while let Ok(item) = link.copied_here.try_recv() {
-                        for d in clip.copied(&item, &seq) {
-                            socket.send(&d).await?;
+                        if !clip.copied(&item) {
+                            tracing::warn!(item = item.describe(), "too large to share");
                         }
                     }
                 }
@@ -268,6 +300,10 @@ pub async fn run(
             }
 
             _ = keepalive.tick() => {
+                if last_from_host.elapsed() > HOST_SILENT {
+                    tracing::warn!("nothing from the host for {HOST_SILENT:?}");
+                    return Err(HostLost.into());
+                }
                 // Ping doubles as keepalive so the host knows we're alive.
                 let mut out = BytesMut::with_capacity(wire::HEADER_LEN + 8);
                 Header { kind: Kind::Ping, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }.write(&mut out);
@@ -277,7 +313,10 @@ pub async fn run(
 
             _ = report.tick() => {
                 let recv_d = stats.loss.received - last_received;
-                let lost_d = stats.loss.lost - last_lost;
+                // Saturating: a late packet *returns* a loss, so the total can dip
+                // below last second's. Plain subtraction wrapped to ~2^64 and the host
+                // read it as 100% loss.
+                let lost_d = stats.loss.lost.saturating_sub(last_lost);
                 let total = recv_d + lost_d;
                 let loss_1s = if total == 0 { 0.0 } else { lost_d as f64 / total as f64 };
                 let pace = pacing.take(negotiated.fps);

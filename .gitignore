@@ -2,3 +2,5 @@
 **/*.rs.bk
 *.log
 .DS_Store
+tools/sim/*.log
+tools/sim/report.md

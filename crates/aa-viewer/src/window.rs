@@ -34,6 +34,10 @@ pub enum Wake {
     Frame,
     /// The session ended (host gone, error); close the window.
     SessionEnded(String),
+    /// The host went quiet; we are trying to get it back.
+    Reconnecting,
+    /// The host accepted us (first time or after a reconnect).
+    Connected,
 }
 
 pub fn build_event_loop() -> anyhow::Result<EventLoop<Wake>> {
@@ -328,6 +332,8 @@ pub struct App {
     cmd_as_ctrl: bool,
     /// Cmd is down on the Mac keyboard (see the key handler for why it matters).
     cmd_held: bool,
+    /// Between a lost host and the next successful connection.
+    reconnecting: bool,
     overlay: Option<Overlay>,
     settings: Settings,
     applied: Settings,
@@ -370,6 +376,7 @@ impl App {
             held_keys: Vec::new(),
             cmd_as_ctrl: cfg!(target_os = "macos"),
             cmd_held: false,
+            reconnecting: false,
             overlay: None,
             settings: Settings::new(fullscreen, stretch),
             applied: Settings::new(fullscreen, stretch),
@@ -483,6 +490,25 @@ impl ApplicationHandler<Wake> for App {
             Wake::SessionEnded(reason) => {
                 tracing::info!("closing window: {reason}");
                 el.exit();
+            }
+            Wake::Reconnecting => {
+                self.reconnecting = true;
+                if let Some(w) = &self.window {
+                    w.set_title(&format!("{} — reconnecting…", self.title));
+                }
+            }
+            Wake::Connected => {
+                if let Some(w) = &self.window {
+                    w.set_title(&self.title);
+                }
+                if std::mem::take(&mut self.reconnecting) {
+                    // A new session starts with defaults: send the user's
+                    // choices again.
+                    let s = self.settings;
+                    let _ = self.commands.try_send(ViewerCommand::SetMaxBitrate((s.max_mbps * 1000.0) as u32));
+                    let _ = self.commands.try_send(ViewerCommand::SetHostMute(s.mute_host));
+                    let _ = self.commands.try_send(ViewerCommand::SetMic(s.send_mic));
+                }
             }
         }
     }

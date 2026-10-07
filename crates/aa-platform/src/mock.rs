@@ -157,13 +157,19 @@ impl VideoDecoder for MockDecoder {
 
 #[derive(Debug, Default)]
 pub struct MockInput {
-    pub events: Vec<InputEvent>,
+    /// Most recent event (keeping all of them would grow without bound in
+    /// long test runs).
+    pub last: Option<InputEvent>,
+    pub count: u64,
 }
 
 impl InputInjector for MockInput {
     fn inject(&mut self, event: InputEvent) -> Result<()> {
-        tracing::debug!(?event, "mock input");
-        self.events.push(event);
+        self.count += 1;
+        if self.count % 50 == 1 {
+            tracing::info!(count = self.count, ?event, "mock input");
+        }
+        self.last = Some(event);
         Ok(())
     }
 }

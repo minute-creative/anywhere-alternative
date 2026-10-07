@@ -240,9 +240,11 @@ Both ways, text and images (PNG). A worker thread polls the OS change
 counter (`GetClipboardSequenceNumber`, `NSPasteboard.changeCount`) 4×/s and
 reads only when it moves; after pasting a remote item it records the new
 counter so the item does not bounce back. Items travel as `Kind::Clipboard`
-pieces (transfer id in `frame_id`); the receiver answers `ClipboardAck`
-once whole, and the sender repeats the transfer at 0.3/0.6/1/2 s until
-acked. Only copies made *after* connecting are shared. Limit 32 MB.
+pieces (transfer id in `frame_id`), paced at 350 pieces per 100 ms
+(~33 Mbps). The receiver answers `ClipboardAck`: empty when whole, or a
+list of missing pieces once the flow has paused 150 ms, and only those are
+resent. If the receiver is silent the whole transfer repeats (0.6/1/2/4 s).
+4 MB: ~1 s direct; arrives whole at 1% loss. Only copies made *after* connecting are shared. Limit 32 MB.
 Unencrypted on the LAN until stage 3 adds encryption.
 
 ### Controllers
@@ -357,6 +359,17 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
 - **macOS drops key-up while Cmd is held.** Cmd+C reached the PC as Ctrl
   down + C down, and C never came up (stuck/repeating). While Cmd is held
   the viewer now sends every other key as an immediate press+release.
+- **Big transfers need selective repeat.** Repeating a whole 4 MB
+  clipboard image until one copy is flawless never finishes at 1% loss
+  (~3,400 pieces). Ask for the missing pieces instead.
+- **A count that can go down must be subtracted with care.** After late
+  packets started returning a loss, the per-second delta underflowed to
+  ~2^64; the report claimed 100% loss. Saturating subtraction.
+- **The viewer must notice a vanished host.** It used to freeze on the
+  last picture forever. Now 4 s of silence, or "connection refused/reset",
+  means lost: it rediscovers and reconnects for up to 2 min, re-sending the
+  user's settings; the host lets the same machine (same IP, new port) take
+  over at once instead of answering "busy".
 - **A late packet is not two lost packets.** The loss tracker used to
   move its "expected next" back to a late packet's number, so everything
   after it counted as lost again. On a reordering link (5% of packets
@@ -402,6 +415,48 @@ backs off to ~2–3 Mbps and holds.
 
 Ceilings found: capture fps = host display refresh (DXGI duplication);
 viewer shows at most its display refresh (Fifo vsync).
+
+### Full use-case test pass (mock pipeline)
+
+Run: 2026-10-07T19:10Z
+
+## Video under network conditions (1280×720, software codec, 2-core box)
+
+```
+m_clean_60             fps avg   60.0 min   59 | gap p50  16.6 p99  23.1 worst   44.9 ms | stutters/s  0.5 | loss 0.00% | rtt   0.5 | mbps   3.8
+m_clean_120            fps avg  121.5 min  119 | gap p50   8.1 p99  14.1 worst   29.4 ms | stutters/s  0.5 | loss 0.00% | rtt   0.3 | mbps   7.6
+m_clean_240            fps avg  145.8 min  124 | gap p50   6.6 p99  13.1 worst   78.2 ms | stutters/s 23.3 | loss 0.00% | rtt   0.2 | mbps   9.1
+m_wifi_60              fps avg   60.0 min   60 | gap p50  16.6 p99  22.8 worst   51.0 ms | stutters/s  0.4 | loss 0.72% | rtt  11.0 | mbps   3.7
+m_wifi_120             fps avg  124.5 min  109 | gap p50   8.3 p99  16.6 worst   39.5 ms | stutters/s  1.1 | loss 0.70% | rtt  11.0 | mbps   7.7
+m_badwifi_120          fps avg  124.2 min  114 | gap p50   7.6 p99  20.4 worst   90.9 ms | stutters/s  4.3 | loss 2.17% | rtt  22.6 | mbps   7.6
+m_congested6M_60       fps avg   60.0 min   60 | gap p50  16.3 p99  27.1 worst   62.2 ms | stutters/s  0.9 | loss 0.00% | rtt  11.8 | mbps   3.3
+m_reorder5_120         fps avg  124.9 min  108 | gap p50   8.0 p99  14.1 worst   23.3 ms | stutters/s  0.8 | loss 0.03% | rtt  11.1 | mbps   7.8
+m_freeze500ms_60       fps avg   59.7 min   56 | gap p50  15.5 p99  23.7 worst  518.6 ms | stutters/s  0.5 | loss 0.00% | rtt  41.9 | mbps   3.7
+```
+
+- m_wifi_120: dropped=12 fec_fixed=74
+- m_badwifi_120: dropped=78 fec_fixed=220
+- m_freeze500ms_60: dropped=56 fec_fixed=0
+
+## Use cases
+
+| Case | Result | Detail |
+|---|---|---|
+| Discovery: normal | ✅ pass | found (how="answered"), connected |
+| Discovery: firewall | ✅ pass | found (how="announced"), connected |
+| Discovery: nobeacon | ✅ pass | found (how="answered"), connected |
+| Discovery: everything blocked | ✅ pass | connected via remembered address |
+| Clipboard text, both ways, 2% loss | ✅ pass | Mac→PC 6/6, PC→Mac 6/6 (last may be in flight) |
+| Clipboard 4 MB image, 1% loss | ✅ pass | 3/3 whole after the selective-repeat fix (~1 s direct) |
+| Microphone Mac→PC, 1% loss | ✅ pass | frames=992 concealed=10 (≈100 frames/s) |
+| Controller (DualSense) 1% loss | ✅ pass | plugged once as PlayStation, 2251 updates (≈250/s) |
+| Mouse input reaches host | ✅ pass | count=1 |
+| PC program restarted mid-session | ✅ pass | Mac reconnected by itself, stream fps=60 |
+| Mac app restarted (crash) and reconnects | ✅ pass | host let the same machine take over at once |
+| Second computer while one is connected | ✅ pass | politely refused: host busy |
+| Soak 90 s (video 120 fps + mic + pad + clipboard, Wi-Fi) | ✅ pass | memory growth host 0 MB, viewer 0 MB between 20 s and 90 s |
+    soak                   fps avg  120.5 min   79 | gap p50   8.5 p99  15.3 worst   77.7 ms | stutters/s  0.8 | loss 0.51% | rtt  11.4 | mbps   7.5
+
 
 ## 11. Coding standards
 

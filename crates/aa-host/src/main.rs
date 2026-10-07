@@ -165,11 +165,20 @@ async fn main() -> anyhow::Result<()> {
 fn start_test_clipboard(side: &'static str) {
     std::thread::spawn(move || {
         let mut n = 0u32;
+        let big = std::env::var("AA_TEST_CLIPBOARD_BYTES").is_ok();
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            // Big items get time to arrive before the next copy replaces them.
+            std::thread::sleep(std::time::Duration::from_secs(if big { 6 } else { 2 }));
             n = n.wrapping_add(1);
-            aa_platform::mock::test_clipboard()
-                .copy(aa_platform::clipboard::ClipItem::Text(format!("{side} clip {n}")));
+            // AA_TEST_CLIPBOARD_BYTES=N: copy an N-byte "image" instead of
+            // text, to test big transfers.
+            let item = match std::env::var("AA_TEST_CLIPBOARD_BYTES").ok().and_then(|v| v.parse::<usize>().ok()) {
+                Some(len) => {
+                    aa_platform::clipboard::ClipItem::Png(vec![u8::try_from(n % 251).unwrap_or(0); len].into())
+                }
+                None => aa_platform::clipboard::ClipItem::Text(format!("{side} clip {n}")),
+            };
+            aa_platform::mock::test_clipboard().copy(item);
         }
     });
 }
