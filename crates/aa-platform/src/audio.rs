@@ -97,6 +97,67 @@ impl OpusDecoder {
     }
 }
 
+/// Turns `Kind::Audio`/`Kind::Mic` payloads back into 48 kHz stereo frames:
+/// decode, conceal short gaps, rebuild the last lost frame from FEC, drop
+/// late packets. The caller decides where the frames go.
+pub struct Depacketizer {
+    decoder: OpusDecoder,
+    seq: aa_core::audio::AudioSequence,
+    pcm: Vec<i16>,
+    pub frames: u64,
+    pub concealed: u64,
+}
+
+impl std::fmt::Debug for Depacketizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Depacketizer")
+            .field("frames", &self.frames)
+            .field("concealed", &self.concealed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Depacketizer {
+    /// Max consecutive lost frames we conceal; beyond this it was a real
+    /// gap (silence or reconnect) and we just resync.
+    const MAX_CONCEAL: u16 = 5;
+
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            decoder: OpusDecoder::new()?,
+            seq: aa_core::audio::AudioSequence::default(),
+            pcm: vec![0i16; FRAME_LEN_I16],
+            frames: 0,
+            concealed: 0,
+        })
+    }
+
+    pub fn handle(&mut self, mut payload: bytes::Bytes, mut play: impl FnMut(&[i16])) {
+        let Some(header) = aa_core::audio::AudioHeader::read(&mut payload) else { return };
+        let Some(lost) = self.seq.observe(header.frame_no) else { return };
+        if lost > 0 && lost <= Self::MAX_CONCEAL {
+            // Guess all but the last missing frame; the last one is rebuilt
+            // from the copy carried inside this packet (inband FEC).
+            for _ in 1..lost {
+                if self.decoder.conceal(&mut self.pcm).is_ok() {
+                    self.concealed += 1;
+                    play(&self.pcm);
+                }
+            }
+            if self.decoder.recover_previous(&payload, &mut self.pcm).is_ok()
+                || self.decoder.conceal(&mut self.pcm).is_ok()
+            {
+                self.concealed += 1;
+                play(&self.pcm);
+            }
+        }
+        if self.decoder.decode(&payload, &mut self.pcm).is_ok() {
+            self.frames += 1;
+            play(&self.pcm);
+        }
+    }
+}
+
 /// Source of system audio on the host.
 pub trait AudioCapture: Send {
     /// Block until one 10 ms frame is available and write it to `pcm`
@@ -115,235 +176,260 @@ pub trait SpeakerControl: Send {
     fn restore(&mut self) -> Result<()>;
 }
 
+pub use crate::playout::{set_boost_db, DEFAULT_BOOST_DB};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub use player::{set_boost_db, Player, DEFAULT_BOOST_DB};
+pub use player::{Mic, Player};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod player {
-    use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-    use super::FRAME_LEN_I16;
+    use crate::playout::{InputFramer, Jitter};
     use crate::{PlatformError, Result};
 
-    /// One 10 ms frame in interleaved samples.
-    const FRAME: usize = FRAME_LEN_I16;
-    /// Starting depth. 60 ms covers ordinary Wi-Fi jitter; a bad link will
-    /// push it up from here.
-    const START_FRAMES: usize = 6;
-    const MIN_FRAMES: usize = 4;
-    /// Never buffer more than this (300 ms): past it, sync with the picture
-    /// is clearly gone and we would rather resync.
-    const MAX_FRAMES: usize = 30;
-    /// Each underrun adds this much (20 ms).
-    const GROW_FRAMES: usize = 2;
-    /// Shrink by one frame after this long without an underrun.
-    const SHRINK_AFTER_SECS: u64 = 20;
-
-    /// Default boost: +6 dB (about twice as loud). PC game and video audio
-    /// is mastered with lots of headroom, and the limiter below stops the
-    /// loud parts from clipping, so this is safe.
-    pub const DEFAULT_BOOST_DB: f32 = 6.0;
-
-    /// Extra loudness on top of what the PC sends, in hundredths of a dB.
-    /// Written by the overlay, read by the audio callback.
-    static BOOST_CENTI_DB: AtomicU32 = AtomicU32::new(600);
-
-    /// Set the volume boost in dB (0 = exactly what the PC sends, max 18).
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    pub fn set_boost_db(db: f32) {
-        BOOST_CENTI_DB.store((db.clamp(0.0, 18.0) * 100.0).round() as u32, Ordering::Relaxed);
+    fn err(what: &str, e: impl std::fmt::Display) -> PlatformError {
+        PlatformError::Backend(anyhow::anyhow!("{what}: {e}"))
     }
 
-    /// Current boost as a linear factor.
-    #[allow(clippy::cast_precision_loss)]
-    fn boost() -> f32 {
-        10f32.powf(BOOST_CENTI_DB.load(Ordering::Relaxed) as f32 / 2000.0)
+    fn device_name(d: &cpal::Device) -> String {
+        d.description().map(|d| d.name().to_owned()).unwrap_or_default()
     }
 
-    /// Loudest a sample may get after the boost; a hair under full scale.
-    const CEILING: f32 = 0.97;
-    /// Fade-in length after (re)starting playback, in samples (~5 ms stereo).
-    const FADE_SAMPLES: usize = 480;
-
-    /// Makes quiet sound louder without letting loud sound clip.
-    ///
-    /// Why: a plain gain would distort on explosions and music peaks. The
-    /// limiter looks at each output block, and if the boosted peak would
-    /// pass the ceiling it turns the gain down *just enough*, instantly;
-    /// then it lets the gain recover slowly (about a second) so you don't
-    /// hear it pumping. Gain changes are ramped across the block so there is
-    /// no zipper noise.
-    struct Limiter {
-        gain: f32,
+    /// Which output a player uses.
+    #[derive(Debug, Clone)]
+    enum Target {
+        /// Whatever the OS calls the default right now, followed live.
+        Default,
+        /// The first output whose name contains one of these (a virtual
+        /// microphone cable on the PC).
+        Named(Vec<&'static str>),
     }
 
-    impl Limiter {
-        #[allow(clippy::cast_precision_loss)] // block sizes are a few hundred samples
-        fn process(&mut self, out: &mut [f32]) {
-            let boost = boost();
-            let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-            let safe = if peak * boost > CEILING { CEILING / peak } else { boost };
-            // Down instantly, up slowly (~1 s to recover at 48 kHz blocks of ~240).
-            let target = if safe < self.gain { safe } else { self.gain + (safe - self.gain) * 0.01 };
-            let start = self.gain;
-            let n = out.len().max(1) as f32;
-            for (i, s) in out.iter_mut().enumerate() {
-                let g = start + (target - start) * (i as f32 / n);
-                *s = (*s * g).clamp(-CEILING, CEILING);
-            }
-            self.gain = target;
-        }
-    }
-
-    /// Adaptive jitter buffer.
-    ///
-    /// Why adaptive: on a calm link 30 ms is plenty and anything more is
-    /// avoidable lag; on a link whose delay swings by 150 ms, 30 ms means a
-    /// click every few packets. Instead of guessing a number, we start low,
-    /// grow each time we run dry, and creep back down while things are calm.
-    /// The viewer always pays the smallest latency the link allows.
-    struct Jitter {
-        queue: VecDeque<i16>,
-        /// Depth we try to hold, in frames.
-        target: usize,
-        /// After an underrun we stay silent until the queue refills to
-        /// `target`; starting early just produces another click.
-        filling: bool,
-        last_underrun: Instant,
-        pub underruns: u64,
-        /// Samples left in the fade-in after a restart; a hard start from
-        /// silence is an audible click.
-        fade_left: usize,
-        limiter: Limiter,
-    }
-
-    impl Jitter {
-        fn new() -> Self {
-            Self {
-                queue: VecDeque::with_capacity(FRAME * MAX_FRAMES),
-                target: START_FRAMES,
-                filling: true,
-                last_underrun: Instant::now(),
-                underruns: 0,
-                fade_left: FADE_SAMPLES,
-                limiter: Limiter { gain: boost() },
-            }
-        }
-
-        fn push(&mut self, pcm: &[i16]) {
-            // Burst arrived: drop the oldest down to target, not to zero, so
-            // the next gap still has cushion.
-            let cap = FRAME * (self.target + 10);
-            if self.queue.len() + pcm.len() > cap {
-                let keep = FRAME * self.target;
-                let excess = (self.queue.len() + pcm.len()).saturating_sub(keep);
-                let excess = excess.min(self.queue.len());
-                self.queue.drain(..excess);
-            }
-            self.queue.extend(pcm.iter().copied());
-            if self.filling && self.queue.len() >= FRAME * self.target {
-                self.filling = false;
-                self.fade_left = FADE_SAMPLES;
-            }
-            // Calm for a while: try a little less latency.
-            if self.target > MIN_FRAMES && self.last_underrun.elapsed().as_secs() >= SHRINK_AFTER_SECS {
-                self.target -= 1;
-                self.last_underrun = Instant::now();
-            }
-        }
-
-        #[allow(clippy::cast_precision_loss)] // fade length is 480
-        fn pull(&mut self, out: &mut [f32]) {
-            if self.filling || self.queue.len() < out.len() {
-                if !self.filling && !self.queue.is_empty() {
-                    // Ran dry mid-stream: the link stalled longer than our
-                    // cushion. Hold more next time.
-                    self.underruns += 1;
-                    self.target = (self.target + GROW_FRAMES).min(MAX_FRAMES);
-                    self.last_underrun = Instant::now();
-                    self.filling = true;
-                }
-                out.fill(0.0);
-                return;
-            }
-            for s in out.iter_mut() {
-                *s = self.queue.pop_front().map_or(0.0, |v| f32::from(v) / 32768.0);
-            }
-            if self.fade_left > 0 {
-                for s in out.iter_mut() {
-                    if self.fade_left == 0 {
-                        break;
-                    }
-                    *s *= 1.0 - self.fade_left as f32 / FADE_SAMPLES as f32;
-                    self.fade_left -= 1;
-                }
-            }
-            self.limiter.process(out);
-        }
-    }
-
-    /// Plays decoded frames through the default output device.
+    /// Plays 48 kHz stereo frames on an output device, converting to
+    /// whatever the device wants, and moving to the new default device when
+    /// the user switches (Bluetooth headphones connect, cable unplugged).
     pub struct Player {
         jitter: Arc<Mutex<Jitter>>,
-        _stream: cpal::Stream,
+        stream: Option<cpal::Stream>,
+        device: String,
+        target: Target,
+        /// Set by the stream's error callback (device unplugged).
+        broken: Arc<AtomicBool>,
+        last_check: Instant,
     }
 
     impl std::fmt::Debug for Player {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("Player").finish_non_exhaustive()
+            f.debug_struct("Player").field("device", &self.device).finish_non_exhaustive()
         }
     }
 
     impl Player {
+        /// The default output, with the viewer's volume boost.
         pub fn new() -> Result<Self> {
-            let host = cpal::default_host();
-            let device = host
-                .default_output_device()
-                .ok_or_else(|| PlatformError::Unavailable("no audio output device".into()))?;
-            let config = cpal::StreamConfig {
-                channels: 2,
-                sample_rate: aa_core::audio::SAMPLE_RATE,
-                // Small device buffer: the jitter buffer above is where the
-                // latency budget lives, not the OS queue.
-                buffer_size: cpal::BufferSize::Fixed(240),
-            };
-            let jitter = Arc::new(Mutex::new(Jitter::new()));
-            let j = Arc::clone(&jitter);
-            let build = |config: cpal::StreamConfig| {
-                let j = Arc::clone(&j);
-                device.build_output_stream(
-                    config,
-                    move |out: &mut [f32], _| j.lock().expect("jitter buffer").pull(out),
-                    |e| tracing::warn!("audio output error: {e}"),
-                    None,
-                )
-            };
-            // Some devices refuse a fixed buffer size; fall back to default.
-            let stream = match build(config) {
-                Ok(s) => s,
-                Err(_) => build(cpal::StreamConfig { buffer_size: cpal::BufferSize::Default, ..config })
-                    .map_err(|e| PlatformError::Backend(anyhow::anyhow!("audio output stream: {e}")))?,
-            };
-            stream.play().map_err(|e| PlatformError::Backend(anyhow::anyhow!("audio play: {e}")))?;
-            let name = device.description().map(|d| d.name().to_owned()).unwrap_or_default();
-            tracing::info!(device = name, "audio output ready");
-            Ok(Self { jitter, _stream: stream })
+            Self::open(Target::Default, true)
         }
 
-        /// Queue one decoded frame.
+        /// The first output whose name contains any of `names`; no boost.
+        pub fn on_device_named(names: &[&'static str]) -> Result<Self> {
+            Self::open(Target::Named(names.to_vec()), false)
+        }
+
+        fn find(target: &Target) -> Option<cpal::Device> {
+            let host = cpal::default_host();
+            match target {
+                Target::Default => host.default_output_device(),
+                Target::Named(names) => host.output_devices().ok()?.find(|d| {
+                    let n = device_name(d).to_ascii_lowercase();
+                    names.iter().any(|w| n.contains(&w.to_ascii_lowercase()))
+                }),
+            }
+        }
+
+        fn open(target: Target, boosted: bool) -> Result<Self> {
+            let mut p = Self {
+                jitter: Arc::new(Mutex::new(Jitter::new(boosted))),
+                stream: None,
+                device: String::new(),
+                target,
+                broken: Arc::new(AtomicBool::new(false)),
+                last_check: Instant::now(),
+            };
+            p.reopen()?;
+            Ok(p)
+        }
+
+        /// (Re)build the stream on the target device.
+        fn reopen(&mut self) -> Result<()> {
+            self.stream = None;
+            let device =
+                Self::find(&self.target).ok_or_else(|| PlatformError::Unavailable("no such audio output".into()))?;
+            let fallback = device.default_output_config().map_err(|e| err("output config", e))?;
+            let stereo48 = |buffer| cpal::StreamConfig {
+                channels: 2,
+                sample_rate: aa_core::audio::SAMPLE_RATE,
+                buffer_size: buffer,
+            };
+            // Preferred first: 48 kHz stereo with a small buffer (no
+            // conversion, least latency). Then whatever the device wants:
+            // e.g. Bluetooth hands-free is 16/24 kHz mono.
+            let candidates = [
+                stereo48(cpal::BufferSize::Fixed(240)),
+                stereo48(cpal::BufferSize::Default),
+                cpal::StreamConfig {
+                    channels: fallback.channels(),
+                    sample_rate: fallback.sample_rate(),
+                    buffer_size: cpal::BufferSize::Default,
+                },
+            ];
+            self.broken.store(false, Ordering::Relaxed);
+            self.jitter.lock().expect("jitter").reset();
+            let mut last_err = None;
+            for config in candidates {
+                let (channels, rate) = (usize::from(config.channels), config.sample_rate);
+                let j = Arc::clone(&self.jitter);
+                let broken = Arc::clone(&self.broken);
+                match device.build_output_stream(
+                    config,
+                    move |out: &mut [f32], _| j.lock().expect("jitter").pull(out, channels, rate),
+                    move |e| {
+                        tracing::warn!("audio output error: {e}");
+                        broken.store(true, Ordering::Relaxed);
+                    },
+                    None,
+                ) {
+                    Ok(stream) => {
+                        stream.play().map_err(|e| err("audio play", e))?;
+                        self.device = device_name(&device);
+                        tracing::info!(device = self.device, channels, rate, "audio output ready");
+                        self.stream = Some(stream);
+                        return Ok(());
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            Err(err("audio output stream", last_err.map_or_else(|| "no config".to_owned(), |e| e.to_string())))
+        }
+
+        /// Call often; at most once a second it checks whether the default
+        /// output changed (or the device vanished) and moves the sound there.
+        pub fn follow(&mut self) {
+            if self.last_check.elapsed() < Duration::from_secs(1) {
+                return;
+            }
+            self.last_check = Instant::now();
+            let moved = matches!(self.target, Target::Default)
+                && Self::find(&self.target).is_some_and(|d| device_name(&d) != self.device);
+            if moved || self.broken.load(Ordering::Relaxed) || self.stream.is_none() {
+                if let Err(e) = self.reopen() {
+                    tracing::debug!("audio output not ready yet: {e}");
+                }
+            }
+        }
+
+        /// Queue one decoded 48 kHz stereo frame.
         pub fn push(&self, pcm: &[i16]) {
-            self.jitter.lock().expect("jitter buffer").push(pcm);
+            self.jitter.lock().expect("jitter").push(pcm);
         }
 
         /// (current target depth in ms, underruns so far) for the stats line.
         pub fn stats(&self) -> (u32, u64) {
-            let j = self.jitter.lock().expect("jitter buffer");
+            let j = self.jitter.lock().expect("jitter");
             ((j.target * 10) as u32, j.underruns)
+        }
+
+        pub fn device(&self) -> &str {
+            &self.device
+        }
+    }
+
+    /// The default microphone, delivering 48 kHz stereo 10 ms frames.
+    /// Like the player, it follows the default input when it changes (a
+    /// headset connects).
+    pub struct Mic {
+        stream: Option<cpal::Stream>,
+        frames: std::sync::mpsc::Receiver<Vec<i16>>,
+        tx: std::sync::mpsc::SyncSender<Vec<i16>>,
+        device: String,
+        broken: Arc<AtomicBool>,
+        last_check: Instant,
+    }
+
+    impl std::fmt::Debug for Mic {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Mic").field("device", &self.device).finish_non_exhaustive()
+        }
+    }
+
+    impl Mic {
+        pub fn open() -> Result<Self> {
+            // 20 frames = 200 ms of slack before we start dropping.
+            let (tx, frames) = std::sync::mpsc::sync_channel(20);
+            let mut m = Self {
+                stream: None,
+                frames,
+                tx,
+                device: String::new(),
+                broken: Arc::new(AtomicBool::new(false)),
+                last_check: Instant::now(),
+            };
+            m.reopen()?;
+            Ok(m)
+        }
+
+        fn reopen(&mut self) -> Result<()> {
+            self.stream = None;
+            let device = cpal::default_host()
+                .default_input_device()
+                .ok_or_else(|| PlatformError::Unavailable("no microphone".into()))?;
+            let config = device.default_input_config().map_err(|e| err("mic config", e))?;
+            let (channels, rate) = (usize::from(config.channels()), config.sample_rate());
+            let tx = self.tx.clone();
+            let broken = Arc::clone(&self.broken);
+            self.broken.store(false, Ordering::Relaxed);
+            let mut framer = InputFramer::default();
+            let stream = device
+                .build_input_stream(
+                    cpal::StreamConfig {
+                        channels: config.channels(),
+                        sample_rate: rate,
+                        buffer_size: cpal::BufferSize::Default,
+                    },
+                    move |input: &[f32], _| {
+                        framer.push(input, channels, rate, |f| {
+                            let _ = tx.try_send(f.to_vec());
+                        });
+                    },
+                    move |e| {
+                        tracing::warn!("microphone error: {e}");
+                        broken.store(true, Ordering::Relaxed);
+                    },
+                    None,
+                )
+                .map_err(|e| err("mic stream (on a Mac: allow Terminal under Privacy & Security > Microphone)", e))?;
+            stream.play().map_err(|e| err("mic start", e))?;
+            self.device = device_name(&device);
+            tracing::info!(device = self.device, channels, rate, "microphone ready");
+            self.stream = Some(stream);
+            Ok(())
+        }
+
+        /// Next 10 ms frame, waiting up to `timeout`.
+        pub fn next_frame(&mut self, timeout: Duration) -> Option<Vec<i16>> {
+            if self.last_check.elapsed() >= Duration::from_secs(1) {
+                self.last_check = Instant::now();
+                let moved = cpal::default_host().default_input_device().is_some_and(|d| device_name(&d) != self.device);
+                if moved || self.broken.load(Ordering::Relaxed) || self.stream.is_none() {
+                    if let Err(e) = self.reopen() {
+                        tracing::debug!("microphone not ready: {e}");
+                    }
+                }
+            }
+            self.frames.recv_timeout(timeout).ok()
         }
     }
 }

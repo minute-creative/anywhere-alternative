@@ -29,6 +29,9 @@ pub const FRAME_SAMPLES: usize = 480;
 /// (0.6%), so there is no reason to save bits here.
 pub const DEFAULT_BITRATE: u32 = 256_000;
 pub const HEADER_LEN: usize = 6;
+/// Microphone stream (viewer → host): voice, so less than music needs,
+/// but generous enough that game chat sounds natural.
+pub const MIC_BITRATE: u32 = 96_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioHeader {
@@ -59,22 +62,27 @@ pub struct AudioSequence {
 }
 
 impl AudioSequence {
-    /// Returns how many packets were lost before this one (0 = contiguous).
-    /// Reordered or duplicate packets return 0 and are left to the caller.
-    pub fn observe(&mut self, frame_no: u16) -> u16 {
+    /// How many packets were lost just before this one (0 = contiguous),
+    /// or `None` if this packet is late or a duplicate: it must be dropped,
+    /// because its slot was already filled by concealment and playing it
+    /// now would put old sound in the middle of new.
+    ///
+    /// A late packet never moves the expected number backwards; the first
+    /// version did, so every packet after a reordered one counted as lost
+    /// again and got concealed on top of the real audio.
+    pub fn observe(&mut self, frame_no: u16) -> Option<u16> {
         let lost = match self.next {
             Some(n) => {
                 let gap = frame_no.wrapping_sub(n);
-                if gap < u16::MAX / 2 {
-                    gap
-                } else {
-                    0
+                if gap >= u16::MAX / 2 {
+                    return None;
                 }
+                gap
             }
             None => 0,
         };
         self.next = Some(frame_no.wrapping_add(1));
-        lost
+        Some(lost)
     }
 }
 
@@ -96,16 +104,18 @@ mod tests {
     #[test]
     fn sequence_counts_gaps_and_wraps() {
         let mut s = AudioSequence::default();
-        assert_eq!(s.observe(0), 0);
-        assert_eq!(s.observe(1), 0);
-        assert_eq!(s.observe(4), 2);
+        assert_eq!(s.observe(0), Some(0));
+        assert_eq!(s.observe(1), Some(0));
+        assert_eq!(s.observe(4), Some(2));
         let mut w = AudioSequence::default();
         w.observe(u16::MAX);
-        assert_eq!(w.observe(0), 0);
-        assert_eq!(w.observe(1), 0);
-        // Reordered: no loss counted.
+        assert_eq!(w.observe(0), Some(0));
+        assert_eq!(w.observe(1), Some(0));
+        // Late packet: dropped, and the ones after it are not "lost".
         let mut r = AudioSequence::default();
         r.observe(10);
-        assert_eq!(r.observe(9), 0);
+        r.observe(12);
+        assert_eq!(r.observe(11), None);
+        assert_eq!(r.observe(13), Some(0));
     }
 }

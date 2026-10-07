@@ -28,6 +28,7 @@ struct Viewer {
     last_heard: Instant,
 }
 
+#[allow(clippy::too_many_lines)] // one select! loop; splitting it would hide the flow
 pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<()> {
     let socket = Arc::new(crate::udp::bind(listen)?);
     tracing::info!("listening on {}", socket.local_addr()?);
@@ -39,6 +40,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     let clip_link = clipboard.and_then(|c| aa_platform::clipboard::spawn_worker(c).ok());
     let mut clip = aa_core::clipboard::ClipSync::default();
     let mut clip_tick = tokio::time::interval(Duration::from_millis(100));
+    let mut mic = MicSink::default();
 
     let ctl = Arc::new(PipelineControl::default());
     // A few frames of slack: sending a 250-packet keyframe over Wi-Fi takes
@@ -103,6 +105,12 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 if let Some(v) = viewer.as_mut().filter(|v| v.addr == from) {
                     v.last_heard = Instant::now();
                 }
+                if packet.header.kind == Kind::Mic {
+                    if viewer.as_ref().is_some_and(|v| v.addr == from) {
+                        mic.handle(packet.payload.clone());
+                    }
+                    continue;
+                }
                 if matches!(packet.header.kind, Kind::Clipboard | Kind::ClipboardAck) {
                     if viewer.as_ref().is_some_and(|v| v.addr == from) {
                         let (item, ack) = clip.received(&packet, &seq);
@@ -142,6 +150,65 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 ctl.shutdown.store(true, Ordering::Relaxed);
                 return Ok(());
             }
+        }
+    }
+}
+
+/// The viewer's microphone, played into a virtual microphone cable so apps
+/// on this PC can pick it as their mic.
+///
+/// Windows has no built-in way for a program to *be* a microphone; that
+/// takes a signed audio driver. The standard free ones are VB-Audio's
+/// "CABLE" and Steam's "Streaming Microphone": each adds a pretend speaker
+/// whose sound comes out of a pretend microphone. We play into the speaker
+/// side; the user picks the mic side in Discord, the game or Windows.
+#[derive(Debug, Default)]
+struct MicSink {
+    depack: Option<aa_platform::audio::Depacketizer>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    player: Option<aa_platform::audio::Player>,
+    /// We looked for a virtual cable (only once per session).
+    looked: bool,
+    last_report: Option<Instant>,
+}
+
+impl MicSink {
+    /// Names of the "speaker" side of known virtual microphone cables.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    const CABLES: [&'static str; 3] = ["CABLE Input", "Steam Streaming Microphone", "VB-Audio Virtual"];
+
+    fn handle(&mut self, payload: Bytes) {
+        if !self.looked {
+            self.looked = true;
+            self.depack = aa_platform::audio::Depacketizer::new().ok();
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            {
+                match aa_platform::audio::Player::on_device_named(&Self::CABLES) {
+                    Ok(p) => {
+                        tracing::info!(device = p.device(), "viewer microphone → virtual mic");
+                        self.player = Some(p);
+                    }
+                    Err(_) => tracing::warn!(
+                        "the viewer is sending its microphone, but this PC has no virtual microphone to play it \
+                         into. Install VB-CABLE (free, vb-audio.com/Cable), restart aa-host, then choose \
+                         \"CABLE Output\" as the microphone in Discord, the game or Windows sound settings"
+                    ),
+                }
+            }
+        }
+        let Some(depack) = self.depack.as_mut() else { return };
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(p) = self.player.as_mut() {
+            p.follow();
+            depack.handle(payload, |pcm| p.push(pcm));
+        } else {
+            depack.handle(payload, |_| {});
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        depack.handle(payload, |_| {});
+        if self.last_report.map_or(true, |t| t.elapsed() > Duration::from_secs(5)) {
+            self.last_report = Some(Instant::now());
+            tracing::info!(frames = depack.frames, concealed = depack.concealed, "viewer microphone");
         }
     }
 }

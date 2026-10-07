@@ -29,6 +29,7 @@ pub mod clipboard;
 pub mod hid_scancode;
 pub mod lan;
 pub mod mock;
+pub mod playout;
 pub mod sw;
 
 #[cfg(target_os = "macos")]

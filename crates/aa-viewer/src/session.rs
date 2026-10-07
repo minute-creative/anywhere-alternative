@@ -17,12 +17,22 @@ use tokio::sync::mpsc;
 
 use crate::link::{FrameSlot, ViewerCommand};
 
+/// Whether the session starts with the microphone on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicStart {
+    Off,
+    /// This machine's default microphone.
+    Real,
+    /// A test tone (mock runs).
+    Tone,
+}
+
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 const KEEPALIVE: Duration = Duration::from_millis(500);
 /// Don't spam the host with keyframe requests; one in flight at a time.
 const NACK_INTERVAL: Duration = Duration::from_millis(150);
 
-#[allow(clippy::too_many_lines)] // one select! loop; splitting it would hide the flow
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // one select! loop; splitting it would hide the flow
 /// Runs the whole session. `frames` receives decoded pictures (`None` in
 /// headless mode: decode and discard, print stats), `commands` carries
 /// input from the window.
@@ -34,6 +44,7 @@ pub async fn run(
     mut commands: mpsc::Receiver<ViewerCommand>,
     test_input: bool,
     stats_tx: Option<std::sync::mpsc::Sender<crate::overlay::LiveStats>>,
+    start_mic: MicStart,
 ) -> anyhow::Result<()> {
     let socket = crate::udp::bind(bind)?;
     socket.connect(host).await?;
@@ -97,6 +108,15 @@ pub async fn run(
     let mut bytes_this_second = 0usize;
     let mut wiggle = 0u16;
     let mut audio = crate::audio::AudioSink::new();
+    // Microphone to the PC, while switched on in the overlay (or --mic).
+    let mut mic: Option<(crate::audio::MicSender, mpsc::Receiver<Bytes>)> = match start_mic {
+        MicStart::Off => None,
+        MicStart::Real => Some(crate::audio::MicSender::start()),
+        MicStart::Tone => Some(crate::audio::MicSender::start_tone()),
+    };
+    if mic.is_some() {
+        tracing::info!("sending this machine's microphone to the host");
+    }
 
     loop {
         tokio::select! {
@@ -186,6 +206,7 @@ pub async fn run(
                                     ViewerCommand::SetHostMute(muted) => {
                                         send_control(&socket, &ControlMessage::SetHostMute { muted }, &seq).await?;
                                     }
+                                    ViewerCommand::SetMic(on) => set_mic(&mut mic, on),
                                     ViewerCommand::Quit => {
                                         send_input(&socket, &batch, &seq).await?;
                                         send_control(&socket, &ControlMessage::Bye, &seq).await?;
@@ -208,11 +229,25 @@ pub async fn run(
                     Some(ViewerCommand::SetHostMute(muted)) => {
                         send_control(&socket, &ControlMessage::SetHostMute { muted }, &seq).await?;
                     }
+                    Some(ViewerCommand::SetMic(on)) => set_mic(&mut mic, on),
                     Some(ViewerCommand::Quit) | None => {
                         tracing::info!("window closed");
                         send_control(&socket, &ControlMessage::Bye, &seq).await?;
                         return Ok(());
                     }
+                }
+            }
+
+            packet = async { mic.as_mut().expect("guarded").1.recv().await }, if mic.is_some() => {
+                match packet {
+                    Some(payload) => {
+                        let mut out = BytesMut::with_capacity(wire::HEADER_LEN + payload.len());
+                        Header { kind: Kind::Mic, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }.write(&mut out);
+                        out.extend_from_slice(&payload);
+                        socket.send(&out).await?;
+                    }
+                    // Mic thread ended (no microphone, or permission refused).
+                    None => mic = None,
                 }
             }
 
@@ -253,7 +288,7 @@ pub async fn run(
                     fec_fixed = reassembler.recovered,
                     gap_ms = format_args!("{:.1}/{:.1}/{:.1}", pace.p50_ms, pace.p99_ms, pace.max_ms),
                     stutters = format_args!("{}/{}", pace.stutters, pacing.total_stutters),
-                    audio = format_args!("{}f/{}c buf={}ms under={}", audio.frames, audio.concealed, audio.buffer_ms(), audio.underruns()),
+                    audio = format_args!("{}f/{}c buf={}ms under={}", audio.frames(), audio.concealed(), audio.buffer_ms(), audio.underruns()),
                     "stream"
                 );
                 // Receiver report: this interval's loss and abandoned frames, so
@@ -382,5 +417,15 @@ impl<T> TimeoutContext<T> for Result<T, tokio::time::error::Elapsed> {
         self.map_err(|_| {
             anyhow::anyhow!("no answer from host within {HANDSHAKE_TIMEOUT:?}; is aa-host running and reachable?")
         })
+    }
+}
+
+/// Switch the microphone on or off (dropping the sender closes the mic).
+fn set_mic(mic: &mut Option<(crate::audio::MicSender, mpsc::Receiver<Bytes>)>, on: bool) {
+    if on && mic.is_none() {
+        tracing::info!("sending this machine's microphone to the host");
+        *mic = Some(crate::audio::MicSender::start());
+    } else if !on {
+        *mic = None;
     }
 }

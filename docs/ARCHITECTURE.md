@@ -196,6 +196,20 @@ choices (all in `aa-core/src/audio.rs` and `aa-platform/src/audio.rs`):
   PC audio is mastered with headroom, so quiet scenes get louder and loud
   ones never clip. A 5 ms fade-in after every buffer refill removes the
   restart click.
+- **Follows the output device:** the player checks once a second whether
+  the default output changed (Bluetooth headphones connected, cable pulled)
+  or its stream errored, and reopens there. It plays 48 kHz stereo where the
+  device allows, else converts to whatever the device wants (Bluetooth
+  hands-free is 16/24 kHz mono) in `playout.rs`, which is device-free and
+  unit-tested.
+- **Microphone (viewer → host):** off by default; overlay checkbox or
+  `--mic`. The viewer captures the default input (followed like the
+  output), converts to 48 kHz stereo, Opus 96 kbps, `Kind::Mic`. The host
+  plays it into a virtual microphone cable (VB-CABLE "CABLE Input" or
+  "Steam Streaming Microphone"); apps pick the cable's mic side. Without
+  one installed the host logs what to install. `--test-mic` sends a tone.
+- **Late audio packets are dropped**, never played out of order, and don't
+  count the following packets as lost (same bug as the video loss tracker).
 - **Playback:** `cpal` on the default output, Mac and Windows. Linux builds
   decode and count but have no player (ALSA headers aren't in CI).
 

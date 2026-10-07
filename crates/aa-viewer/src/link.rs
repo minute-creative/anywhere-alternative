@@ -21,6 +21,8 @@ pub enum ViewerCommand {
     SetMaxBitrate(u32),
     /// User toggled "mute PC speakers" in the overlay.
     SetHostMute(bool),
+    /// User toggled "send my microphone to the PC".
+    SetMic(bool),
     /// The window closed; send `Bye` and exit.
     Quit,
 }

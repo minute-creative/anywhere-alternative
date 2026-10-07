@@ -343,6 +343,12 @@ impl std::fmt::Debug for App {
 }
 
 impl App {
+    /// The session was started with the mic on: show the box ticked.
+    pub fn set_mic_shown(&mut self, on: bool) {
+        self.settings.send_mic = on;
+        self.applied.send_mic = on;
+    }
+
     pub fn new(
         title: String,
         fullscreen: bool,
@@ -395,6 +401,9 @@ impl App {
         if (self.settings.max_mbps - self.applied.max_mbps).abs() > 0.01 {
             let kbps = (self.settings.max_mbps * 1000.0) as u32;
             let _ = self.commands.try_send(ViewerCommand::SetMaxBitrate(kbps));
+        }
+        if self.settings.send_mic != self.applied.send_mic {
+            let _ = self.commands.try_send(ViewerCommand::SetMic(self.settings.send_mic));
         }
         if self.settings.mute_host != self.applied.mute_host {
             let _ = self.commands.try_send(ViewerCommand::SetHostMute(self.settings.mute_host));

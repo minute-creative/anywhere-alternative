@@ -24,11 +24,21 @@ pub struct Settings {
     pub mute_host: bool,
     /// Extra loudness on this Mac, in dB (limited, so it never clips).
     pub volume_boost_db: f32,
+    /// Send this Mac's microphone to the PC.
+    pub send_mic: bool,
 }
 
 impl Settings {
     pub const fn new(fullscreen: bool, stretch: bool) -> Self {
-        Self { fullscreen, stretch, max_mbps: 80.0, show_stats: true, mute_host: false, volume_boost_db: 6.0 }
+        Self {
+            fullscreen,
+            stretch,
+            max_mbps: 80.0,
+            show_stats: true,
+            mute_host: false,
+            volume_boost_db: 6.0,
+            send_mic: false,
+        }
     }
 }
 
@@ -168,6 +178,7 @@ impl Overlay {
                     ui.heading("Audio");
                     ui.checkbox(&mut settings.mute_host, "Mute PC speakers (sound plays here only)");
                     ui.add(egui::Slider::new(&mut settings.volume_boost_db, 0.0..=18.0).text("Volume boost (dB)"));
+                    ui.checkbox(&mut settings.send_mic, "Send my microphone to the PC");
                     ui.add_space(8.0);
                     ui.monospace(format!(
                         "{} fps  {:.1} Mbps  {:.0} ms RTT  {:.1}% loss",

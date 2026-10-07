@@ -59,6 +59,9 @@ pub enum Kind {
     Clipboard = 10,
     /// "Got every piece of clipboard transfer `frame_id`."
     ClipboardAck = 11,
+    /// Viewer → host: one Opus packet of the viewer's microphone (same
+    /// layout as `Audio`).
+    Mic = 12,
 }
 
 impl Kind {
@@ -75,6 +78,7 @@ impl Kind {
             9 => Self::VideoFec,
             10 => Self::Clipboard,
             11 => Self::ClipboardAck,
+            12 => Self::Mic,
             _ => return None,
         })
     }
