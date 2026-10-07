@@ -191,6 +191,22 @@ choices (all in `aa-core/src/audio.rs` and `aa-platform/src/audio.rs`):
 - **Playback:** `cpal` on the default output, Mac and Windows. Linux builds
   decode and count but have no player (ALSA headers aren't in CI).
 
+### Codec choice
+
+`Codec::ALL` is preference order (AV1, HEVC, H.264); `negotiate` takes the
+first codec both sides list. Each side lists what it can *really* do:
+Windows adds HEVC only if a Media Foundation HEVC encoder exists; the Mac
+adds HEVC only if `VideoToolbox` opens. The engines are built from factories
+after Welcome (`HostBackends::encoder_factory`, `ViewerBackends::decoder`),
+and the host swaps encoders on the capture thread via
+`PipelineControl::codec`.
+
+### Discovery
+
+`ControlMessage::Discover` is broadcast by the viewer to 255.255.255.255:7700
+(and the /24 subnet broadcast); any host answers `Here { name }`. Same
+socket and port as streaming, so no extra listener or firewall rule.
+
 ## 7. Connectivity (stage 3)
 
 - Each machine has a device key. Pairing = typing a short code once;
@@ -235,6 +251,17 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   into Ctrl+click.
 - **Declare DPI awareness before touching the screen.** Otherwise Windows
   reports virtualised sizes and injected positions land in the wrong place.
+- **Endpoint loopback captures after the speaker mute.** On devices with
+  software volume, muting the PC also muted the stream. Per-process
+  loopback (`ActivateAudioInterfaceAsync`, exclude our own tree) taps
+  before volume/mute and is the default; endpoint loopback is the fallback.
+- **A fixed audio buffer is wrong on every link.** 30 ms crackled on Wi-Fi;
+  300 ms would lag on Ethernet. Grow on underrun, shrink when calm.
+- **Addresses change; names don't.** Home routers reassign addresses on
+  reconnect. Broadcast discovery on the port we already own costs nothing
+  and removes a whole class of "no answer from host".
+- **Pick the codec after negotiation, not at startup.** Both ends build
+  their encoder/decoder from a factory once Hello/Welcome has decided.
 
 ## 10. Measured so far
 
@@ -242,7 +269,8 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
 |------|---------|------|--------|
 | 2026-10-06 | Windows 11 25H2, Intel Core Ultra, Arc 130T, 2880×1800@60 | DXGI → software H.264 (OpenH264) | 1–10 fps; CPU bench 28 fps @1080p |
 | 2026-10-06 | same | DXGI → Quick Sync via Media Foundation, zero-copy | locked 60 fps, 0% loss, ~31 Mbps, <1 ms assembly; bench 110 fps @1080p, 73 @1440p |
-| 2026-10-07 | same → MacBook, Wi-Fi | + WASAPI loopback → Opus 128 kbps | compiles on all three CI targets; awaiting listening test |
+| 2026-10-07 | same → Mac mini M4 Pro, Wi-Fi | + WASAPI loopback → Opus 128 kbps | audio plays; crackled with a fixed 30 ms buffer (link ping 36–187 ms) → adaptive buffer shipped |
+| 2026-10-07 | same | process-loopback tap, host mute, LAN discovery, VideoToolbox decode, HEVC negotiation | all compile on CI; owner verification pending (see docs/HANDOFF.md) |
 
 ## 11. Coding standards
 

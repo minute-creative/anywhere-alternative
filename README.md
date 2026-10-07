@@ -9,12 +9,14 @@ reference for every design decision and the stage plan.
 ## Status
 
 **Stage 2 in progress.** Windows hosts its real screen (DXGI Desktop
-Duplication → hardware H.264 via Media Foundation, zero-copy) with keyboard
-and mouse forwarding, adaptive bitrate, keyframe recovery after loss, an
-in-window settings overlay (Ctrl/Cmd+Shift+S) and **system audio** (WASAPI
-loopback → Opus, played on the viewer with loss concealment). Verified
-Windows→Windows and Windows→Mac over Wi-Fi at 60 fps. macOS hosting and
-controllers are next.
+Duplication → hardware H.264/HEVC via Media Foundation, zero-copy) with
+keyboard and mouse forwarding, adaptive bitrate, keyframe recovery after
+loss, an in-window settings overlay (Ctrl/Cmd+Shift+S), **system audio**
+(process-loopback → Opus → adaptive jitter buffer, with a "mute PC
+speakers" toggle), **LAN auto-discovery** (no IP to type) and
+**VideoToolbox hardware decode** on the Mac. Verified Windows→Mac over
+Wi-Fi at 60 fps with audio. Microphone, zero-copy decode, macOS hosting and
+controllers are next. Picking this up fresh? Read `docs/HANDOFF.md`.
 
 ## Setup
 
