@@ -1,7 +1,8 @@
 #!/bin/bash
 name=$1 res=$2 fps=$3 relay=$4 secs=${5:-12}
 B=${BIN_DIR:-$(cd "$(dirname "$0")/../.." && pwd)/target/release}
-L=/tmp/claude-0/sim/$name
+S=${SIM_DIR:-$(cd "$(dirname "$0")" && pwd)}
+L=$S/$name
 $B/aa-host --mock --mock-res $res --mock-fps $fps --listen 127.0.0.1:7700 > $L.host.log 2>&1 &
 HP=$!
 target=127.0.0.1:7700; RP=
