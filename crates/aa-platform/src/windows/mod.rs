@@ -65,53 +65,10 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
         EncoderChoice::Hardware | EncoderChoice::Auto => {
             let cap = capture::DxgiCapture::new(0, capture::Output::Gpu)?;
             let (device, context) = cap.device();
-            // HEVC first: same picture at roughly half the bits, which matters
-            // most on Wi-Fi. We open it *now* rather than at negotiation, so a
-            // GPU whose HEVC encoder is listed but broken is found before we
-            // offer HEVC to anyone. The loaded encoder must always match
-            // `codecs[0]`: the session takes that as "what is running", and a
-            // mismatch means sending H.264 labelled as HEVC (a black screen).
-            let hevc = if encoder::list_hardware_encoders(encoder::HwCodec::Hevc).is_empty() {
-                None
-            } else {
-                match encoder::MfEncoder::new(device, context, encoder::HwCodec::Hevc, res, fps, kbps) {
-                    Ok(enc) => Some(enc),
-                    Err(e) => {
-                        tracing::warn!("HEVC encoder is listed but would not open ({e}); offering H.264 only");
-                        None
-                    }
-                }
-            };
-            let first = match hevc {
-                Some(enc) => Ok((Codec::Hevc, enc)),
-                None => encoder::MfEncoder::new(device, context, encoder::HwCodec::H264, res, fps, kbps)
-                    .map(|enc| (Codec::H264, enc)),
-            };
-            match first {
-                Ok((codec, enc)) => {
-                    codecs = if codec == Codec::Hevc { vec![Codec::Hevc, Codec::H264] } else { vec![Codec::H264] };
-                    tracing::info!(
-                        ?res,
-                        fps,
-                        kbps,
-                        ?codec,
-                        offered = ?codecs,
-                        encoder = enc.name(),
-                        "windows host: DXGI capture -> hardware encoder (zero-copy)"
-                    );
-                    // Builds the other codec on demand, e.g. H.264 for a
-                    // viewer that cannot decode HEVC.
-                    let (dev, ctx) = (device.clone(), context.clone());
-                    encoder_factory = Some(Box::new(move |codec| {
-                        let hw = match codec {
-                            Codec::Hevc => encoder::HwCodec::Hevc,
-                            Codec::H264 => encoder::HwCodec::H264,
-                            Codec::Av1 => return Err(crate::PlatformError::Unavailable("no AV1 encoder yet".into())),
-                        };
-                        let enc = encoder::MfEncoder::new(&dev, &ctx, hw, res, fps, kbps)?;
-                        tracing::info!(encoder = enc.name(), ?codec, "switched hardware encoder");
-                        Ok(Box::new(enc) as Box<dyn VideoEncoder>)
-                    }));
+            match open_hardware_encoder(device, context, res, fps, kbps) {
+                Ok((offered, enc, factory)) => {
+                    codecs = offered;
+                    encoder_factory = Some(factory);
                     (cap, Box::new(enc))
                 }
                 Err(e) if choice == EncoderChoice::Auto => {
@@ -165,6 +122,57 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
             can_emulate_gamepad: false,
         },
     })
+}
+
+/// Opens the hardware encoder the host starts with, HEVC when it works,
+/// else H.264. Returns the codecs to offer (the loaded one first), the
+/// encoder, and a factory for the other codec.
+///
+/// HEVC: same picture at roughly half the bits, which matters most on
+/// Wi-Fi. It is opened *here*, not at negotiation, so a GPU whose HEVC
+/// encoder is listed but broken is caught before HEVC is offered. The
+/// loaded encoder must match `codecs[0]`: the session takes that as "what is
+/// running", and a mismatch means sending H.264 labelled HEVC (black screen).
+fn open_hardware_encoder(
+    device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    context: &windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+    res: Resolution,
+    fps: u16,
+    kbps: u32,
+) -> Result<(Vec<Codec>, encoder::MfEncoder, crate::EncoderFactory)> {
+    let hevc = if encoder::list_hardware_encoders(encoder::HwCodec::Hevc).is_empty() {
+        None
+    } else {
+        encoder::MfEncoder::new(device, context, encoder::HwCodec::Hevc, res, fps, kbps)
+            .inspect_err(|e| tracing::warn!("HEVC encoder is listed but would not open ({e}); offering H.264 only"))
+            .ok()
+    };
+    let (codec, enc) = match hevc {
+        Some(enc) => (Codec::Hevc, enc),
+        None => (Codec::H264, encoder::MfEncoder::new(device, context, encoder::HwCodec::H264, res, fps, kbps)?),
+    };
+    let codecs = if codec == Codec::Hevc { vec![Codec::Hevc, Codec::H264] } else { vec![Codec::H264] };
+    tracing::info!(
+        ?res,
+        fps,
+        kbps,
+        ?codec,
+        offered = ?codecs,
+        encoder = enc.name(),
+        "windows host: DXGI capture -> hardware encoder (zero-copy)"
+    );
+    let (dev, ctx) = (device.clone(), context.clone());
+    let factory: crate::EncoderFactory = Box::new(move |codec| {
+        let hw = match codec {
+            Codec::Hevc => encoder::HwCodec::Hevc,
+            Codec::H264 => encoder::HwCodec::H264,
+            Codec::Av1 => return Err(crate::PlatformError::Unavailable("no AV1 encoder yet".into())),
+        };
+        let enc = encoder::MfEncoder::new(&dev, &ctx, hw, res, fps, kbps)?;
+        tracing::info!(encoder = enc.name(), ?codec, "switched hardware encoder");
+        Ok(Box::new(enc) as Box<dyn VideoEncoder>)
+    });
+    Ok((codecs, enc, factory))
 }
 
 pub fn viewer_backends() -> Result<ViewerBackends> {
