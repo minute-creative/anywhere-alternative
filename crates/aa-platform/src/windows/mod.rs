@@ -260,7 +260,8 @@ fn bench_frame(
         CPUAccessFlags: 0,
         MiscFlags: 0,
     };
-    let init = D3D11_SUBRESOURCE_DATA { pSysMem: px.as_ptr().cast(), SysMemPitch: (w * 4) as u32, SysMemSlicePitch: 0 };
+    let init =
+        D3D11_SUBRESOURCE_DATA { pSysMem: px.as_ptr().cast(), SysMemPitch: (width * 4) as u32, SysMemSlicePitch: 0 };
     let mut tex = None;
     // SAFETY: desc and init data are valid for the call's duration.
     #[allow(unsafe_code)]
