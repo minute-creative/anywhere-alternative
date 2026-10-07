@@ -23,7 +23,9 @@ use vigem_client::{Client, DS4Report, DualShock4Wired, TargetId, XButtons, XGame
 use crate::padmap::{to_ds4, to_xinput};
 use crate::{PlatformError, Result, VirtualGamepad};
 
-const SLOTS: usize = 4;
+/// 0-3: controllers on the viewer; 4-7: DualSenses working as generic
+/// pads when the full pass-through driver is missing (see padhub.rs).
+const SLOTS: usize = 8;
 
 fn err(what: &str, e: vigem_client::Error) -> PlatformError {
     PlatformError::Backend(anyhow::anyhow!("{what}: {e:?}"))

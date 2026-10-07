@@ -127,4 +127,28 @@ strip $S/c10.viewer.log | grep -q "connected negotiated" \
   && row "Viewer crash + instant restart" "✅ reconnected" "waited for the old session to go silent, then took over" \
   || row "Viewer crash + instant restart" "❌ FAIL" "$(strip $S/c10.viewer.log | grep -o 'Error.*' | head -1)"
 cleanup
+# 11. DualSense pass-through on a bad link (5% loss, jitter), then the
+#     viewer vanishes: host must unplug the virtual pad and stay healthy.
+python3 $S/relay.py 4 2 0.05 5 30 > /dev/null 2>&1 &
+$B/aa-host --mock --listen 127.0.0.1:7700 > $S/c11.host.log 2>&1 & HP=$!; sleep 0.7
+timeout 12 $B/aa-viewer --headless --mock --test-ds5 127.0.0.1:7800 > $S/c11.viewer.log 2>&1
+sleep 12
+outs=$(strip $S/c11.viewer.log | grep -c "DualSense output from host")
+hapt=$(strip $S/c11.viewer.log | grep -c "DualSense haptics from host")
+rate=$(strip $S/c11.host.log | grep -o 'rate="[0-9]*/s"' | tail -1)
+gone=$(strip $S/c11.host.log | grep -c "DualSense unplugged")
+alive $HP && [ $outs -ge 3 ] && [ $hapt -ge 1 ] && [ $gone -ge 1 ] \
+  && row "DualSense pass-through, 5% loss + jitter, viewer then vanishes" "✅ works" "input to the game at $rate; rumble/trigger effects back: $outs logged; haptics arrived; virtual pad unplugged after the viewer left" \
+  || row "DualSense pass-through" "❌ FAIL" "outputs=$outs haptics=$hapt unplugged=$gone $rate"
+cleanup
+
+# 12. DualSense with the PC's USB/IP driver missing: generic pad + rumble
+AA_SIMULATE_NO_USBIP=1 $B/aa-host --mock --listen 127.0.0.1:7700 > $S/c12.host.log 2>&1 & HP=$!; sleep 0.7
+timeout 6 $B/aa-viewer --headless --mock --test-ds5 127.0.0.1:7700 > $S/c12.viewer.log 2>&1
+gen=$(strip $S/c12.host.log | grep -c "mock controller plugged in slot=4")
+rum=$(strip $S/c12.viewer.log | grep -c "rumble_left=120")
+[ $gen -ge 1 ] && [ $rum -ge 1 ] \
+  && row "DualSense, driver not installed on the PC" "✅ falls back" "works as a generic PlayStation pad; game rumble still reaches the controller" \
+  || row "DualSense fallback" "❌ FAIL" "generic=$gen rumble=$rum"
+cleanup
 echo done

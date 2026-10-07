@@ -377,8 +377,31 @@ pub fn input_thread(
     mut injector: Box<dyn InputInjector>,
     mut gamepad: Option<Box<dyn VirtualGamepad>>,
     mut rx: mpsc::Receiver<InputEvent>,
+    rumble_tx: &mpsc::Sender<aa_core::input::Rumble>,
 ) {
-    while let Some(ev) = rx.blocking_recv() {
+    loop {
+        // With virtual controllers, wake every 2 ms to pass on rumble the
+        // game sent them; without, just wait for input.
+        let ev = if gamepad.is_some() {
+            match rx.try_recv() {
+                Ok(ev) => ev,
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    if let Some(pad) = gamepad.as_mut() {
+                        while let Ok(Some(r)) = pad.poll_rumble() {
+                            let _ = rumble_tx.try_send(r);
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    continue;
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        } else {
+            match rx.blocking_recv() {
+                Some(ev) => ev,
+                None => break,
+            }
+        };
         let r = match (ev, gamepad.as_mut()) {
             (InputEvent::Gamepad { slot, state }, Some(pad)) => pad.update(slot, state),
             (InputEvent::GamepadAttach { slot, kind }, Some(pad)) => pad.attach(slot, kind),

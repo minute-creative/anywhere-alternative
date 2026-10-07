@@ -178,7 +178,7 @@ pub trait SpeakerControl: Send {
 
 pub use crate::playout::{set_boost_db, DEFAULT_BOOST_DB};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub use player::{Mic, Player};
+pub use player::{Mic, PadSpeaker, Player};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod player {
@@ -344,6 +344,89 @@ mod player {
 
         pub fn device(&self) -> &str {
             &self.device
+        }
+    }
+
+    /// A DualSense's own sound card (only there while it is plugged in by
+    /// USB): channels 1-2 are its speaker / headphone jack, 3-4 its haptic
+    /// actuators. Each pair has its own jitter buffer, fed separately.
+    pub struct PadSpeaker {
+        speaker: Arc<Mutex<Jitter>>,
+        haptics: Arc<Mutex<Jitter>>,
+        _stream: cpal::Stream,
+        device: String,
+        broken: Arc<AtomicBool>,
+    }
+
+    impl std::fmt::Debug for PadSpeaker {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("PadSpeaker").field("device", &self.device).finish_non_exhaustive()
+        }
+    }
+
+    impl PadSpeaker {
+        /// Opens the first 4-channel output named like a DualSense.
+        pub fn open() -> Result<Self> {
+            let host = cpal::default_host();
+            let device = host
+                .output_devices()
+                .map_err(|e| err("audio outputs", e))?
+                .find(|d| {
+                    let n = device_name(d).to_ascii_lowercase();
+                    (n.contains("dualsense") || n.contains("wireless controller"))
+                        && d.supported_output_configs().is_ok_and(|mut c| c.any(|c| c.channels() >= 4))
+                })
+                .ok_or_else(|| PlatformError::Unavailable("no DualSense sound device (USB cable needed)".into()))?;
+            let speaker = Arc::new(Mutex::new(Jitter::new(false)));
+            let haptics = Arc::new(Mutex::new(Jitter::new(false)));
+            let broken = Arc::new(AtomicBool::new(false));
+            let config = cpal::StreamConfig {
+                channels: 4,
+                sample_rate: aa_core::audio::SAMPLE_RATE,
+                buffer_size: cpal::BufferSize::Default,
+            };
+            let (sp, hp, b) = (Arc::clone(&speaker), Arc::clone(&haptics), Arc::clone(&broken));
+            let mut pair = Vec::<f32>::new();
+            let stream = device
+                .build_output_stream(
+                    config,
+                    move |out: &mut [f32], _| {
+                        let frames = out.len() / 4;
+                        pair.resize(frames * 2, 0.0);
+                        for (jitter, first) in [(&sp, 0), (&hp, 2)] {
+                            jitter.lock().expect("jitter").pull(&mut pair, 2, aa_core::audio::SAMPLE_RATE);
+                            for (f, lr) in pair.chunks_exact(2).enumerate() {
+                                out[f * 4 + first] = lr[0];
+                                out[f * 4 + first + 1] = lr[1];
+                            }
+                        }
+                    },
+                    move |e| {
+                        tracing::warn!("DualSense audio error: {e}");
+                        b.store(true, Ordering::Relaxed);
+                    },
+                    None,
+                )
+                .map_err(|e| err("DualSense audio stream", e))?;
+            stream.play().map_err(|e| err("DualSense audio play", e))?;
+            let device = device_name(&device);
+            tracing::info!(device, "DualSense speaker and haptics ready");
+            Ok(Self { speaker, haptics, _stream: stream, device, broken })
+        }
+
+        /// Queue 10 ms of 48 kHz stereo for the speaker pair.
+        pub fn push_speaker(&self, pcm: &[i16]) {
+            self.speaker.lock().expect("jitter").push(pcm);
+        }
+
+        /// Queue 10 ms of 48 kHz stereo for the haptic actuators.
+        pub fn push_haptics(&self, pcm: &[i16]) {
+            self.haptics.lock().expect("jitter").push(pcm);
+        }
+
+        /// The controller was unplugged (or the stream died).
+        pub fn broken(&self) -> bool {
+            self.broken.load(Ordering::Relaxed)
         }
     }
 

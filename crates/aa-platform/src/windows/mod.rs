@@ -134,6 +134,7 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
         audio,
         clipboard: crate::clipboard::system(),
         speaker,
+        pad_attach: Some(std::sync::Arc::new(usbip_attach)),
         capabilities: Capabilities {
             codecs,
             max_resolution: res,
@@ -353,4 +354,36 @@ fn bench_frame(
         resolution: res,
         capture_ts_us: 0,
     })
+}
+
+/// Where the usbip-win2 installer puts its command-line tool.
+const USBIP_EXE: &str = r"C:\Program Files\USBip\usbip.exe";
+
+/// Plug the virtual DualSense into this PC through usbip-win2 (a free,
+/// signed USB/IP driver): `usbip attach` connects to our own server on
+/// localhost and Windows sees a real USB DualSense appear.
+fn usbip_attach(server: std::net::SocketAddr, busid: &str) -> anyhow::Result<()> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let exe = if std::path::Path::new(USBIP_EXE).exists() { USBIP_EXE } else { "usbip.exe" };
+    let out = std::process::Command::new(exe)
+        .args(["--tcp-port", &server.port().to_string(), "attach", "-r", "127.0.0.1", "-b", busid])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "usbip-win2 is not installed ({e}). Install it once from github.com/vadimgrn/usbip-win2/releases \
+                 for full DualSense support (adaptive triggers, light bar, touchpad, motion); until then the \
+                 DualSense works as a basic controller"
+            )
+        })?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "usbip attach failed: {}{}",
+            String::from_utf8_lossy(&out.stdout).trim(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+    }
 }

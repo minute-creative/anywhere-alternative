@@ -17,6 +17,8 @@ use tokio::sync::mpsc;
 #[derive(Debug)]
 pub enum ViewerCommand {
     Input(InputEvent),
+    /// `DualSense` pass-through (raw reports, see `ds5.rs`).
+    Pad(aa_core::ds5::PadMsg),
     /// User changed the bitrate cap in the overlay (kbps).
     SetMaxBitrate(u32),
     /// User toggled "mute PC speakers" in the overlay.

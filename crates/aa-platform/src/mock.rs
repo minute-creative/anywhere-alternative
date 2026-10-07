@@ -234,7 +234,9 @@ impl InputInjector for MockInput {
 pub struct MockGamepad {
     pub last: Option<(u8, GamepadState)>,
     updates: u64,
-    plugged: [Option<aa_core::input::GamepadKind>; 4],
+    plugged: [Option<aa_core::input::GamepadKind>; 8],
+    /// The pretend game rumbles every pad once a second.
+    last_rumble: Option<Instant>,
 }
 
 impl VirtualGamepad for MockGamepad {
@@ -274,7 +276,12 @@ impl VirtualGamepad for MockGamepad {
     }
 
     fn poll_rumble(&mut self) -> Result<Option<Rumble>> {
-        Ok(None)
+        let Some(slot) = self.plugged.iter().position(Option::is_some) else { return Ok(None) };
+        if self.last_rumble.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            return Ok(None);
+        }
+        self.last_rumble = Some(Instant::now());
+        Ok(Some(Rumble { slot: u8::try_from(slot).unwrap_or(0), low_freq: 120, high_freq: 40 }))
     }
 }
 
@@ -294,6 +301,95 @@ fn mock_capabilities(res: Resolution, fps: u16) -> Capabilities {
 pub fn test_clipboard() -> &'static crate::clipboard::MemoryClipboard {
     static CB: std::sync::OnceLock<crate::clipboard::MemoryClipboard> = std::sync::OnceLock::new();
     CB.get_or_init(Default::default)
+}
+
+/// Stands in for the PC's USB/IP driver in mock runs: connects to the
+/// virtual `DualSense` the way usbip-win2 does, reads what Windows would
+/// (descriptors, feature reports, a stream of input reports), and plays a
+/// "game" that sends rumble and an adaptive-trigger effect back once a
+/// second. Its log lines are what the smoke test checks.
+pub fn loopback_attach() -> crate::padhub::Attach {
+    std::sync::Arc::new(|addr, busid| {
+        // AA_SIMULATE_NO_USBIP=1: the PC lacks the driver (fallback test).
+        if std::env::var_os("AA_SIMULATE_NO_USBIP").is_some() {
+            anyhow::bail!("simulated: usbip-win2 is not installed");
+        }
+        let busid = busid.to_owned();
+        std::thread::Builder::new().name("aa-mock-usbip".into()).spawn(move || {
+            if let Err(e) = mock_game(addr, &busid) {
+                tracing::info!("mock game: virtual DualSense gone ({e})");
+            }
+        })?;
+        Ok(())
+    })
+}
+
+fn mock_game(addr: std::net::SocketAddr, busid: &str) -> std::io::Result<()> {
+    use crate::usbip::client::Client;
+    let (mut c, _) = Client::import(addr, busid)?;
+    c.s.set_read_timeout(Some(Duration::from_secs(15)))?;
+    let (_, dd) = c.get_descriptor(1, 0, 0, 0, 18)?;
+    let (_, rd) = c.get_descriptor(0x22, 0, 1, 3, 1024)?;
+    let mut feature_bytes = 0;
+    for id in aa_core::ds5::FEATURES_AT_ATTACH {
+        c.submit(true, 0, 64, [0xA1, 1, id, 3, 3, 0, 64, 0], &[])?;
+        feature_bytes += c.reply_in()?.2.len();
+    }
+    tracing::info!(
+        vid = format!("{:02x}{:02x}", dd[9], dd[8]),
+        pid = format!("{:02x}{:02x}", dd[11], dd[10]),
+        report_descriptor = rd.len(),
+        feature_bytes,
+        "mock game: virtual DualSense enumerated"
+    );
+    let (mut n, mut changed, mut last) = (0u64, 0u64, Vec::new());
+    let started = Instant::now();
+    let mut next_effect = Instant::now() + Duration::from_secs(1);
+    loop {
+        c.submit(true, 0x84, 64, [0; 8], &[])?;
+        let (_, status, data) = c.reply_in()?;
+        if status != 0 {
+            return Err(std::io::Error::other(format!("transfer status {status}")));
+        }
+        n += 1;
+        if data != last {
+            changed += 1;
+            last = data;
+        }
+        if Instant::now() >= next_effect {
+            next_effect += Duration::from_secs(1);
+            let mut out = [0u8; aa_core::ds5::USB_OUTPUT_LEN];
+            out[0] = 0x02;
+            out[1] = 0x0F; // rumble + right trigger effect
+            out[3] = if n % 2 == 0 { 200 } else { 60 };
+            out[11] = 0x26; // trigger effect mode
+            c.submit(false, 0x03, 48, [0; 8], &out)?;
+            let _ = c.reply()?;
+            // …and 50 ms of haptics, as 4-channel USB audio (a 160 Hz thud
+            // on both actuators).
+            let mut pcm = Vec::with_capacity(3840);
+            for i in 0..480u32 {
+                let v = if (i / 150) % 2 == 0 { 9000i16 } else { -9000 };
+                for v in [0, 0, v, v] {
+                    pcm.extend_from_slice(&i16::to_le_bytes(v));
+                }
+            }
+            for _ in 0..5 {
+                c.submit_iso(false, 0x01, 384, 10, &pcm)?;
+            }
+            for _ in 0..5 {
+                c.reply_iso(false)?;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let rate = n as f64 / started.elapsed().as_secs_f64();
+            tracing::info!(
+                reports = n,
+                changed,
+                rate = format!("{rate:.0}/s"),
+                "mock game: DualSense input, sent rumble + trigger effect"
+            );
+        }
+    }
 }
 
 /// Mock host. `raw = true` uses the passthrough codec (huge, lossless, for
@@ -328,6 +424,7 @@ pub fn host_backends(res: Resolution, fps: u16, raw: bool) -> crate::Result<Host
         audio: None,
         speaker: None,
         clipboard: Some(Box::new(test_clipboard().clone())),
+        pad_attach: Some(loopback_attach()),
         capabilities: mock_capabilities(res, fps),
     })
 }

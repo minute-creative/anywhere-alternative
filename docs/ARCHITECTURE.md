@@ -157,8 +157,9 @@ UDP only. Every datagram ≤ 1200 bytes with a 12-byte header
 (`kind, flags, seq, frame_id, slice_index, slice_count`). See
 `aa-core/src/wire.rs` for the exact layout and the reassembler's policy.
 
-Packet kinds: Video, Audio (stage 2), Input, Control (JSON, rare), Ack,
-Nack, Ping, Pong. Stage 3 wraps every datagram in encryption below this layer.
+Packet kinds: Video, Audio, Input, Control (JSON, rare), Ack, Nack, Ping,
+Pong, VideoFec, Clipboard, ClipboardAck, Mic, Pad (DualSense pass-through,
+`aa-core/src/ds5.rs`). Stage 3 wraps every datagram in encryption below this layer.
 
 Input events are hand-packed (a mouse move is 5 bytes). Keys are sent as
 USB HID usage IDs so Mac and PC keyboards agree on what a key means.
@@ -259,12 +260,54 @@ lost packet can never leave a button stuck.
 
 Host (Windows, `windows/gamepad.rs`): ViGEmBus via `vigem-client`.
 PlayStation → virtual DualShock 4 (PlayStation icons in games), anything
-else → Xbox 360. Mapping in `padmap.rs` (portable, tested). Xbox rumble is
-captured from the driver and queued (`poll_rumble`); sending it back to the
-viewer and playing it on the Mac is not built yet. Without ViGEmBus the host
-offers no gamepad and the viewer drops controller events with a log line.
-ViGEm cannot emulate a DualSense, so adaptive triggers/haptics/gyro don't
-carry over. `--test-gamepad` on a mock viewer drives a pretend pad.
+else → Xbox 360. Mapping in `padmap.rs` (portable, tested). Slots 0–3 are
+the viewer's pads, 4–7 DualSenses in fallback mode (below). Without
+ViGEmBus the host offers no gamepad and the viewer drops controller events
+with a log line. `--test-gamepad` on a mock viewer drives a pretend pad.
+
+#### DualSense: full pass-through (2026-10-08)
+
+ViGEm cannot be a DualSense, and the DualSense's features (adaptive
+triggers, haptics, light bar, player/mic LEDs, touchpad, gyro) live in
+bytes a button snapshot drops. So a DualSense is not read through gilrs:
+
+```
+Mac: hidapi reads the real pad ──Kind::Pad Input (64-byte USB report)──►  PC: virtual DualSense
+     (USB or Bluetooth; BT 0x31       Feature 0x05/0x09/0x20 every 2 s       (USB/IP server in aa-host,
+      reports CRC-checked and                                                usbip-win2 attaches it:
+      converted to USB layout)    ◄──Output (48-byte report: rumble,        Windows sees a real USB
+                                     triggers, lights), sent twice           DualSense, VID 054C PID 0CE6)
+     haptics → DualSense sound   ◄──Audio (Opus, speaker pair +
+     card (USB) or → rumble (BT)     haptics pair, 10 ms, silence skipped)
+```
+
+- `aa-core::ds5`: message format, BT↔USB conversion (CRC-32 seeds 0xA1
+  in / 0xA2 out), report → generic pad state, haptics → rumble envelope.
+- `aa-platform::usbip`: a small USB/IP server (devlist, import,
+  CMD_SUBMIT/UNLINK, control, interrupt, isochronous). Interrupt-IN is held
+  until a new report arrives (8 ms keep-alive), like hardware.
+  Isochronous completions are paced at 1 packet/ms so the PC's audio
+  engine runs at real time. Hostile input tested (`edges.rs`).
+- `aa-platform::ds5dev`: the virtual pad. Descriptors match the real one
+  (report sizes checked by a test that parses the report descriptor like
+  Windows does). Composite like the real pad: interfaces 0–2 USB Audio
+  Class 1 (4-ch 48 kHz speaker+haptics out on EP1, 2-ch mic in on EP2),
+  3 HID (EP 0x84 in / 0x03 out). `AA_DS5_NO_AUDIO=1` drops the sound card
+  half if a PC's driver dislikes it.
+- `aa-platform::padhub`: lifecycle per slot: wait ≤1 s for the real
+  feature reports (calibration/serial/firmware) → plug in → mirror →
+  unplug on Detach, viewer change, or 10 s silence. If usbip-win2 is
+  missing or never connects (6 s), the pad becomes a **generic** DualShock 4
+  through ViGEm (slot 4+n) with rumble sent back as a DualSense rumble
+  report. Mock host has a loopback "driver + game" (`mock::loopback_attach`).
+- Viewer `ds5.rs`: hidapi (exclusive on macOS, so the Mac itself ignores
+  the pad; shared if that fails), one thread per pad, 2 ms reads. While it
+  holds a DualSense, `pads.rs` (gilrs) hands that pad over.
+- Haptics on the Mac need the pad **on a USB cable** (macOS then shows it
+  as a 4-channel sound device, `PadSpeaker`); over Bluetooth they are
+  imitated with the rumble motors (`haptics_to_rumble`).
+- Not done: DualSense Edge identity (presents as a standard DualSense),
+  the pad's microphone (silence is sent), the pad's own speaker over BT.
 
 ### Codec choice
 
@@ -512,10 +555,29 @@ against the list; each has a regression test.
 
 Test assets: `crates/aa-core/tests/fuzz.rs` (`AA_FUZZ_ROUNDS` for longer
 soaks), `crates/aa-platform/tests/edges.rs`, `tools/sim/matrix.sh` (14 use
-cases), `tools/sim/chaos.sh` (10 attacks: garbage floods, corruption,
-duplication, 30% loss, blackout, crash loops, clipboard storm, soak).
+cases), `tools/sim/chaos.sh` (12 attacks: garbage floods, corruption,
+duplication, 30% loss, blackout, crash loops, clipboard storm, soak,
+DualSense on a lossy link, DualSense without the PC driver).
 Not covered here: Mac/Windows-only code paths (capture, encoders, VT,
-ViGEm, cpal devices); those need the owner's machines or CI.
+ViGEm, cpal devices, hidapi, usbip-win2 itself); those need the owner's
+machines or CI.
+
+### DualSense pass-through, simulated (2026-10-08)
+
+Mock host with a loopback stand-in for usbip-win2 plus a pretend game;
+`aa-viewer --test-ds5` as the controller.
+- Clean link: 243 input reports/s reach the game (all distinct); rumble +
+  adaptive-trigger reports come back ≤1 frame later, each sent twice.
+- Haptics: 4-channel USB audio from the game → ~180 B Opus per 10 ms
+  (~145 kbit/s) only while non-silent; real-time paced completions
+  (40 ms of audio completes in ~40 ms).
+- 5% loss + 30 ms jitter: 188 reports/s, effects and haptics still
+  arrive; when the viewer vanished the virtual pad was unplugged.
+- Driver missing (`AA_SIMULATE_NO_USBIP=1`): generic PlayStation pad in
+  slot 4 within ~0 s of the failure; game rumble reaches the controller.
+- Pending real hardware: usbip-win2 attach on the PC, Windows/Steam
+  recognising the pad, haptics through Windows' USB audio driver, hidapi
+  on the Mac (USB and Bluetooth).
 
 ## 11. Coding standards
 

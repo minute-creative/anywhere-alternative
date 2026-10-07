@@ -55,6 +55,13 @@ fn every_parser_survives_random_bytes() {
         let _ = ClipItem::decode(&raw);
         let _ = ReceiverReport::decode(&mut raw.clone());
         let _ = AudioHeader::read(&mut raw.clone());
+        if let Some(m) = aa_core::ds5::PadMsg::decode(&raw) {
+            // Whatever decodes must re-encode to something that decodes the same.
+            assert_eq!(aa_core::ds5::PadMsg::decode(&m.encode()), Some(m));
+        }
+        if raw.len() >= aa_core::ds5::BT_REPORT_LEN {
+            let _ = aa_core::ds5::bt_input_to_usb(&raw);
+        }
         // Input decoding is a loop over a datagram: it must always consume
         // or stop, never spin.
         let mut buf = raw.clone();

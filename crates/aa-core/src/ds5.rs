@@ -20,7 +20,16 @@
 //!  viewer → host  2 feature [2][slot][feature report incl. id]   (at attach, repeated)
 //!  viewer → host  3 detach  [3][slot]
 //!  host → viewer  4 output  [4][slot][48-byte USB output report, id 0x02]
+//!  host → viewer  5 audio   [5][slot][frame u16][n u16][n bytes speaker Opus][haptics Opus]
 //! ```
+//!
+//! Audio: a DualSense is also a 4-channel USB sound card. Channels 1-2 are
+//! its little speaker / headphone jack; channels 3-4 drive the two haptic
+//! actuators, which is how games make "the feel of rain" and the like.
+//! Each pair travels as its own stereo Opus stream of 10 ms frames; a pair
+//! that is silent is sent empty.
+
+use crate::input::GamepadState;
 
 /// Sony's USB vendor id and the two DualSense product ids.
 pub const VID_SONY: u16 = 0x054C;
@@ -52,6 +61,7 @@ pub enum PadMsg {
     Feature { slot: u8, report: Vec<u8> },
     Detach { slot: u8 },
     Output { slot: u8, report: [u8; USB_OUTPUT_LEN] },
+    Audio { slot: u8, frame: u16, speaker: Vec<u8>, haptics: Vec<u8> },
 }
 
 impl PadMsg {
@@ -61,6 +71,11 @@ impl PadMsg {
             Self::Feature { slot, report } => [&[2, *slot][..], &report[..]].concat(),
             Self::Detach { slot } => vec![3, *slot],
             Self::Output { slot, report } => [&[4, *slot][..], &report[..]].concat(),
+            Self::Audio { slot, frame, speaker, haptics } => {
+                let n = u16::try_from(speaker.len()).unwrap_or(0);
+                let speaker = &speaker[..usize::from(n)];
+                [&[5, *slot][..], &frame.to_be_bytes(), &n.to_be_bytes(), speaker, haptics].concat()
+            }
         }
     }
 
@@ -76,6 +91,12 @@ impl PadMsg {
             2 if (2..=64).contains(&body.len()) => Self::Feature { slot, report: body.to_vec() },
             3 => Self::Detach { slot },
             4 => Self::Output { slot, report: body.get(..USB_OUTPUT_LEN)?.try_into().ok()? },
+            5 => {
+                let frame = u16::from_be_bytes(body.get(..2)?.try_into().ok()?);
+                let n = usize::from(u16::from_be_bytes(body.get(2..4)?.try_into().ok()?));
+                let rest = body.get(4..)?;
+                Self::Audio { slot, frame, speaker: rest.get(..n)?.to_vec(), haptics: rest[n..].to_vec() }
+            }
             _ => return None,
         })
     }
@@ -123,6 +144,30 @@ pub fn usb_output_to_bt(usb: &[u8; USB_OUTPUT_LEN], seq: u8) -> [u8; BT_REPORT_L
     bt
 }
 
+/// How hard to run the two rumble motors to imitate 10 ms of haptic audio
+/// (interleaved stereo: left actuator, right actuator). Used when the real
+/// haptic actuators can't be fed (controller on Bluetooth): the "feel" is
+/// coarser, but the game's effects are still felt rather than lost.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+pub fn haptics_to_rumble(pcm: &[i16]) -> (u8, u8) {
+    let mut sum = [0f64; 2];
+    for (i, s) in pcm.iter().enumerate() {
+        sum[i % 2] += f64::from(*s) * f64::from(*s);
+    }
+    let frames = (pcm.len() / 2).max(1) as f64;
+    // Haptic tracks are quiet next to music: full motor at a third of full
+    // scale RMS, and nothing for the faint hiss of an idle stream.
+    let level = |sq: f64| {
+        let rms = (sq / frames).sqrt() / 32768.0;
+        if rms < 0.01 {
+            0
+        } else {
+            (rms * 3.0 * 255.0).min(255.0) as u8
+        }
+    };
+    (level(sum[0]), level(sum[1]))
+}
+
 /// The neutral input report (sticks centred, nothing pressed, d-pad
 /// released), sent by the virtual controller before the first real one.
 pub fn neutral_input() -> [u8; USB_INPUT_LEN] {
@@ -133,9 +178,97 @@ pub fn neutral_input() -> [u8; USB_INPUT_LEN] {
     r
 }
 
+/// The buttons and sticks of a USB input report as a generic pad state.
+/// Used when the PC cannot present a real virtual DualSense (the USB/IP
+/// driver is not installed): the controller then still works, as a
+/// DualShock 4 through ViGEm, minus the DualSense-only extras.
+pub fn usb_input_to_state(r: &[u8; USB_INPUT_LEN]) -> GamepadState {
+    use crate::input::gamepad_buttons as b;
+    // Byte 0 is full left/up; ours is i16 with positive = right/up.
+    let axis = |v: u8, invert: bool| {
+        let x = i32::from(v) * 256 - 32_768 + 128;
+        let x = if invert { -x - 1 } else { x };
+        i16::try_from(x.clamp(-32_768, 32_767)).unwrap_or(0)
+    };
+    let mut buttons = match r[8] & 0x0F {
+        0 => b::DPAD_UP,
+        1 => b::DPAD_UP | b::DPAD_RIGHT,
+        2 => b::DPAD_RIGHT,
+        3 => b::DPAD_DOWN | b::DPAD_RIGHT,
+        4 => b::DPAD_DOWN,
+        5 => b::DPAD_DOWN | b::DPAD_LEFT,
+        6 => b::DPAD_LEFT,
+        7 => b::DPAD_UP | b::DPAD_LEFT,
+        _ => 0,
+    };
+    let bits: [(usize, u8, u32); 13] = [
+        (8, 0x10, b::SQUARE),
+        (8, 0x20, b::CROSS),
+        (8, 0x40, b::CIRCLE),
+        (8, 0x80, b::TRIANGLE),
+        (9, 0x01, b::L1),
+        (9, 0x02, b::R1),
+        (9, 0x10, b::SHARE),
+        (9, 0x20, b::OPTIONS),
+        (9, 0x40, b::L3),
+        (9, 0x80, b::R3),
+        (10, 0x01, b::PS),
+        (10, 0x02, b::TOUCHPAD),
+        (10, 0x04, b::SHARE), // mic button: nearest equivalent on a DualShock 4
+    ];
+    for (byte, mask, ours) in bits {
+        if r[byte] & mask != 0 {
+            buttons |= ours;
+        }
+    }
+    GamepadState {
+        buttons,
+        left_x: axis(r[1], false),
+        left_y: axis(r[2], true),
+        right_x: axis(r[3], false),
+        right_y: axis(r[4], true),
+        left_trigger: r[5],
+        right_trigger: r[6],
+    }
+}
+
+/// An output report that only sets the two rumble motors (classic
+/// "compatible vibration"), for games that rumble a generic pad.
+pub fn rumble_output(low_freq: u8, high_freq: u8) -> [u8; USB_OUTPUT_LEN] {
+    let mut r = [0u8; USB_OUTPUT_LEN];
+    r[0] = 0x02;
+    r[1] = 0x03; // compatible vibration + haptics select
+    r[3] = high_freq; // right (small) motor
+    r[4] = low_freq; // left (large) motor
+    r[39] = 0x04; // compatible vibration, newer firmware
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generic_state_from_a_report() {
+        use crate::input::gamepad_buttons as b;
+        let mut r = neutral_input();
+        assert_eq!(
+            usb_input_to_state(&r),
+            GamepadState { left_x: 128, left_y: -129, right_x: 128, right_y: -129, ..Default::default() }
+        );
+        r[1] = 0;
+        r[2] = 0; // full left, full up
+        r[4] = 255; // right stick full down
+        r[6] = 200;
+        r[8] = 0x23; // cross + d-pad down-right
+        r[9] = 0x01;
+        r[10] = 0x01;
+        let s = usb_input_to_state(&r);
+        assert_eq!((s.left_x, s.left_y), (-32_640, 32_639));
+        assert!(s.right_y < -32_000);
+        assert_eq!(s.right_trigger, 200);
+        assert_eq!(s.buttons, b::CROSS | b::DPAD_DOWN | b::DPAD_RIGHT | b::L1 | b::PS);
+    }
 
     #[test]
     fn crc_matches_the_standard_check_value() {
@@ -153,6 +286,8 @@ mod tests {
             PadMsg::Feature { slot: 0, report: vec![0x05, 1, 2, 3] },
             PadMsg::Detach { slot: 1 },
             PadMsg::Output { slot: 2, report: [7; USB_OUTPUT_LEN] },
+            PadMsg::Audio { slot: 1, frame: 65_535, speaker: vec![], haptics: vec![9; 100] },
+            PadMsg::Audio { slot: 1, frame: 3, speaker: vec![1, 2, 3], haptics: vec![] },
         ] {
             assert_eq!(PadMsg::decode(&m.encode()), Some(m));
         }
@@ -160,6 +295,21 @@ mod tests {
         assert_eq!(PadMsg::decode(&[1, 0, 1, 2]), None, "short report");
         assert_eq!(PadMsg::decode(&[9, 0]), None, "unknown type");
         assert_eq!(PadMsg::decode(&[]), None);
+        assert_eq!(PadMsg::decode(&[5, 0, 0, 1, 0, 9, 1, 2]), None, "speaker length past the end");
+    }
+
+    #[test]
+    fn haptic_audio_becomes_rumble() {
+        assert_eq!(haptics_to_rumble(&[0; 960]), (0, 0));
+        assert_eq!(haptics_to_rumble(&[30; 960]), (0, 0), "idle hiss is not a buzz");
+        let mut loud_left = vec![0i16; 960];
+        for (i, s) in loud_left.iter_mut().enumerate().step_by(2) {
+            *s = if i % 40 < 20 { 12_000 } else { -12_000 };
+        }
+        let (l, r) = haptics_to_rumble(&loud_left);
+        assert!(l > 200 && r == 0, "{l} {r}");
+        assert_eq!(haptics_to_rumble(&[i16::MIN; 960]), (255, 255));
+        assert_eq!(haptics_to_rumble(&[]), (0, 0));
     }
 
     #[test]

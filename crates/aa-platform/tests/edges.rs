@@ -154,3 +154,44 @@ fn png_decoder_refuses_lies_and_garbage() {
     // Wrong buffer size for the stated dimensions must not panic.
     assert!(rgba_to_png(10, 10, &[0u8; 7]).is_none());
 }
+
+/// The virtual-USB server faces whatever connects to localhost: garbage,
+/// truncated commands, lies about sizes, sudden disconnects. It must keep
+/// serving, and a proper client must still get a working DualSense after.
+#[test]
+fn usbip_server_survives_garbage_and_still_serves() {
+    use aa_platform::ds5dev::VirtualDualSense;
+    use aa_platform::usbip::{client::Client, Export, Server, UsbDevice};
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+
+    let server = Server::start("127.0.0.1:0".parse().unwrap()).unwrap();
+    let dev: Arc<dyn UsbDevice> =
+        Arc::new(VirtualDualSense::new(0, false, Box::new(|_| {})).with_audio(Box::new(|_| {})));
+    let export = server.add(Export::new("1-1", 1, dev));
+    let mut r = Rng(9);
+    for i in 0..300 {
+        let Ok(mut s) = std::net::TcpStream::connect(server.addr()) else { continue };
+        s.set_read_timeout(Some(std::time::Duration::from_millis(20))).unwrap();
+        let mut junk: Vec<u8> = (0..r.below(400)).map(|_| r.next() as u8).collect();
+        if i % 3 == 0 {
+            // A real import first, then garbage URBs (some with huge sizes).
+            let mut req = vec![0x01, 0x11, 0x80, 0x03, 0, 0, 0, 0];
+            let mut b = b"1-1".to_vec();
+            b.resize(32, 0);
+            req.extend(b);
+            req.extend(junk);
+            junk = req;
+        }
+        let _ = s.write_all(&junk);
+        let mut sink = [0u8; 4096];
+        let _ = s.read(&mut sink);
+    }
+    // Still alive and serving properly.
+    let (mut c, _) = Client::import(server.addr(), "1-1").expect("server still serves");
+    let (status, d) = c.get_descriptor(1, 0, 0, 0, 18).unwrap();
+    assert_eq!((status, d.len()), (0, 18));
+    drop(c);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(!export.attached(), "closed connections are forgotten");
+}

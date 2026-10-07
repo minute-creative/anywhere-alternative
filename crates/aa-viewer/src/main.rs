@@ -13,6 +13,7 @@
 
 mod audio;
 mod discover;
+mod ds5;
 mod keymap;
 mod link;
 mod overlay;
@@ -84,6 +85,11 @@ struct Args {
     /// With --mock: a pretend controller that moves and presses buttons.
     #[arg(long)]
     test_gamepad: bool,
+
+    /// With --mock: a pretend `DualSense` (raw pass-through) that logs what
+    /// the host's game sends back to it.
+    #[arg(long)]
+    test_ds5: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -103,6 +109,7 @@ fn main() -> anyhow::Result<()> {
     } else {
         pads::spawn(cmd_tx.clone());
     }
+    let pad_out = if args.test_ds5 { Some(ds5::spawn_test(cmd_tx.clone())) } else { ds5::spawn(cmd_tx.clone()) };
     let mic = if args.test_mic {
         MicStart::Tone
     } else if args.mic {
@@ -113,7 +120,7 @@ fn main() -> anyhow::Result<()> {
 
     if args.headless {
         // Keep the sender alive: a closed command channel means "window closed".
-        let result = runtime.block_on(run_reconnecting(&args, host, None, cmd_rx, None, mic, None));
+        let result = runtime.block_on(run_reconnecting(&args, host, None, cmd_rx, None, mic, None, pad_out));
         drop(cmd_tx);
         return result;
     }
@@ -144,6 +151,7 @@ fn main() -> anyhow::Result<()> {
             Some(stats_tx),
             mic,
             Some(std::sync::Arc::new(status)),
+            pad_out,
         ));
         let reason = match result {
             Ok(()) => {
@@ -196,6 +204,7 @@ type StatusFn = std::sync::Arc<dyn Fn(window::Wake) + Send + Sync>;
 /// crashed, Wi-Fi blip) we look for it again (it may have a new address)
 /// and reconnect, for up to two minutes, instead of freezing on the last
 /// picture.
+#[allow(clippy::too_many_arguments)]
 async fn run_reconnecting(
     args: &Args,
     first_host: SocketAddr,
@@ -204,6 +213,7 @@ async fn run_reconnecting(
     stats_tx: Option<std::sync::mpsc::Sender<overlay::LiveStats>>,
     mic: MicStart,
     status: Option<StatusFn>,
+    pad_out: Option<std::sync::mpsc::Sender<aa_core::ds5::PadMsg>>,
 ) -> anyhow::Result<()> {
     let mut host = first_host;
     let mut lost_since: Option<std::time::Instant> = None;
@@ -217,6 +227,7 @@ async fn run_reconnecting(
             test_input: args.test_input,
             stats_tx: stats_tx.clone(),
             mic,
+            pad_out: pad_out.clone(),
             on_connected,
             on_status: status.clone().map(|s| {
                 Box::new(move |m: Option<String>| s(window::Wake::HostStatus(m))) as Box<dyn Fn(Option<String>) + Send>

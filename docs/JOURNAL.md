@@ -214,6 +214,27 @@ fps (PC panel supports 120 Hz+, currently set to 60).
 - fps: stream follows the PC refresh rate (rounded), capped at 300 in
   negotiation; viewer advertises 300.
 
+## Day 5 — DualSense, everything (2026-10-08)
+
+Owner made the repo public (CI free again) and asked for DualSense
+haptics and controller feedback. ViGEm can't be a DualSense, and gilrs
+only sees buttons, so we went raw:
+- Studied VIIPER (GPL, study only) for descriptors and feature reports;
+  wrote our own USB/IP server + virtual DualSense in Rust, served on
+  localhost and attached by usbip-win2 (free, signed driver).
+- Mac reads the real pad with hidapi (USB + Bluetooth; BT reports
+  CRC-checked and converted), forwards reports untouched; game output
+  reports come back and are written to the pad.
+- Haptics are USB audio: the virtual pad is a composite device with a
+  4-channel sound card; isochronous transfers paced at real time; haptic
+  pair sent as Opus; played on the pad's own sound card (USB) or turned
+  into rumble (Bluetooth).
+- Fallback when usbip-win2 is missing: generic DualShock 4 + rumble.
+- CI caught `SlotTable` needing a manual Default (gilrs ids).
+- Found while writing: hidapi's `BusType` has no `PartialEq` (use
+  `matches!`); `is_none_or` is newer than our MSRV 1.80.
+- Simulated end to end, chaos suite 12/12.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.

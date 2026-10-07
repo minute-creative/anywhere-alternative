@@ -73,10 +73,16 @@ Everything else (all simulated end to end, see ARCHITECTURE §10):
    Microphone permission for Terminal.
 7. Clipboard both ways (text, images ≤32 MB) and Cmd+C/V fix.
 8. Discovery: beacons + every-adapter asking + remembered last host.
-9. Controllers: PC needs **ViGEmBus** (github.com/nefarius/ViGEmBus/releases).
-   DualSense → virtual DualShock 4, others → Xbox 360. Rumble is captured on
-   the PC but not yet sent back/played on the Mac (macOS needs the
-   GameController framework for rumble; gilrs can't).
+9. Controllers: PC needs **ViGEmBus** (github.com/nefarius/ViGEmBus/releases)
+   for Xbox/other pads (→ virtual Xbox 360). **DualSense: full
+   pass-through** (2026-10-08): PC also needs **usbip-win2**
+   (github.com/vadimgrn/usbip-win2/releases) so the host can plug in a
+   virtual USB DualSense mirroring the real one: adaptive triggers, light
+   bar, LEDs, touchpad, gyro, rumble, and haptics (haptics need the pad
+   on a USB cable on the Mac; over Bluetooth they become rumble). Without
+   usbip-win2 the DualSense still works as a basic DualShock 4 with
+   rumble. Untested on real hardware yet. Rumble for non-DualSense pads
+   back to the Mac: still not built.
 10. Auto-reconnect after PC sleep/restart/Wi-Fi drop (title shows it).
 
 Their answers so far: PC refresh supports 120 Hz+; colours "washed out /
@@ -87,8 +93,13 @@ grey"; want all accessories (mic, headphones, controllers, other USB).
 1. CI back → fix whatever the uncompiled code trips on.
 2. Owner retest of items above; collect `refresh_hz`, `--bench`, `stream
    colour`, `encoder colour path` lines.
-3. Rumble back to the Mac: host `poll_rumble` → new `Kind::Feedback` packet
-   → Mac GameController framework (`GCController.haptics`) via objc2.
+3. Owner test of DualSense pass-through: install usbip-win2 on the PC,
+   pad on USB then Bluetooth on the Mac; check the PC log lines
+   "DualSense plugged in" / "the game is sending sound/haptics" and the
+   Mac's "DualSense connected (full pass-through)". If Windows shows a
+   driver problem for the sound part, `AA_DS5_NO_AUDIO=1` on the host.
+   Then: rumble back for non-DualSense pads (Mac GameController
+   framework, `GCController.haptics`, via objc2).
 4. **Other USB devices (owner wants them)**. Honest scope: generic USB
    passthrough *from a Mac* needs user-space access to the raw device,
    which macOS only allows with Apple's restricted VM entitlement

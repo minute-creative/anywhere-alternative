@@ -51,6 +51,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
         audio,
         mut speaker,
         clipboard,
+        pad_attach,
         capabilities,
     } = backends;
     // Shared copy/paste: a thread watches this PC's clipboard; `clip` turns
@@ -69,6 +70,25 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     // viewer's latest-frame slot, which always shows the newest.
     let (frame_tx, frame_rx) = mpsc::channel::<EncodedFrame>(6);
     let (input_tx, input_rx) = mpsc::channel::<InputEvent>(256);
+    // DualSense pass-through: messages for the viewer (from the virtual
+    // controller's threads) and rumble from generic fallback pads.
+    let (pad_out_tx, mut pad_out_rx) = mpsc::channel::<aa_core::ds5::PadMsg>(64);
+    let (rumble_tx, mut rumble_rx) = mpsc::channel::<aa_core::input::Rumble>(64);
+    let mut pads = {
+        let fallback_tx = input_tx.clone();
+        aa_platform::padhub::PadHub::new(aa_platform::padhub::PadHooks {
+            attach: pad_attach,
+            to_viewer: Arc::new(move |m| {
+                let _ = pad_out_tx.try_send(m);
+            }),
+            fallback: Box::new(move |ev| {
+                let _ = fallback_tx.try_send(ev);
+            }),
+        })
+    };
+    let mut pad_owner: Option<SocketAddr> = None;
+    let mut pad_tick = tokio::time::interval(Duration::from_millis(20));
+    pad_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Audio: ~100 packets/s; 32 deep is a third of a second of slack.
     let (audio_tx, audio_rx) = mpsc::channel::<pipeline::AudioPacket>(32);
     // Who to send video to. Written by the receive loop, read by the sender
@@ -85,7 +105,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     })?;
     std::thread::Builder::new()
         .name("aa-input".into())
-        .spawn(move || pipeline::input_thread(input, gamepad, input_rx))?;
+        .spawn(move || pipeline::input_thread(input, gamepad, input_rx, &rumble_tx))?;
     if let Some(audio) = audio {
         let audio_ctl = Arc::clone(&ctl);
         std::thread::Builder::new()
@@ -146,6 +166,18 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                     }
                     continue;
                 }
+                if packet.header.kind == Kind::Pad {
+                    if viewer.as_ref().is_some_and(|v| v.addr == from) {
+                        if pad_owner != Some(from) {
+                            pads.clear();
+                            pad_owner = Some(from);
+                        }
+                        if let Some(m) = aa_core::ds5::PadMsg::decode(&packet.payload) {
+                            pads.handle(&m);
+                        }
+                    }
+                    continue;
+                }
                 if matches!(packet.header.kind, Kind::Clipboard | Kind::ClipboardAck) {
                     if viewer.as_ref().is_some_and(|v| v.addr == from) {
                         let (item, ack) = clip.received(&packet, &seq);
@@ -179,6 +211,27 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 if let Err(e) = clip_pump(&socket, clip_link.as_ref(), &mut clip, viewer.as_ref().map(|v| v.addr), &seq).await {
                     tracing::debug!("clipboard send error (continuing): {e:#}");
                 }
+            }
+
+            Some(m) = pad_out_rx.recv() => {
+                if let Some(v) = viewer.as_ref().filter(|v| Some(v.addr) == pad_owner) {
+                    let body = m.encode();
+                    let mut out = BytesMut::with_capacity(wire::HEADER_LEN + body.len());
+                    Header { kind: Kind::Pad, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }.write(&mut out);
+                    out.extend_from_slice(&body);
+                    let _ = socket.send_to(&out, v.addr).await;
+                }
+            }
+
+            Some(r) = rumble_rx.recv() => pads.rumble(r),
+
+            _ = pad_tick.tick(), if pads.active() > 0 => {
+                // A different viewer took over: its controllers are new ones.
+                if viewer.as_ref().map(|v| v.addr) != pad_owner {
+                    pads.clear();
+                    pad_owner = None;
+                }
+                pads.tick();
             }
 
             _ = housekeeping.tick() => {

@@ -199,7 +199,31 @@ mod real {
                 }
                 let ids: Vec<GamepadId> = gilrs.gamepads().map(|(id, _)| id).collect();
                 for id in ids {
-                    let Some(slot) = slots.find(id) else { continue };
+                    // DualSenses read directly (crate::ds5) are not ours: hand
+                    // them over, or the PC would see every press twice.
+                    let pad = gilrs.gamepad(id);
+                    if crate::ds5::raw_active() && crate::ds5::is_dualsense(pad.vendor_id(), pad.product_id()) {
+                        if let Some(slot) = slots.release(id) {
+                            tracing::info!(slot, "DualSense handed to direct pass-through");
+                            kinds.remove(&slot);
+                            last.remove(&id);
+                            leaving.push((slot, Instant::now()));
+                            send(InputEvent::GamepadDetach { slot });
+                        }
+                        continue;
+                    }
+                    let Some(slot) = slots.find(id).or_else(|| {
+                        // Re-adopt a pad handed over earlier whose direct
+                        // reader has since let go.
+                        let slot = slots.take(id)?;
+                        let kind = kind_of(pad.name(), pad.vendor_id());
+                        kinds.insert(slot, kind);
+                        leaving.retain(|(s, _)| *s != slot);
+                        send(InputEvent::GamepadAttach { slot, kind });
+                        Some(slot)
+                    }) else {
+                        continue;
+                    };
                     let state = snapshot(&gilrs.gamepad(id));
                     if last.get(&id) != Some(&state) {
                         last.insert(id, state);

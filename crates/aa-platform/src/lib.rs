@@ -26,12 +26,15 @@ use bytes::Bytes;
 
 pub mod audio;
 pub mod clipboard;
+pub mod ds5dev;
 pub mod hid_scancode;
 pub mod lan;
 pub mod mock;
+pub mod padhub;
 pub mod padmap;
 pub mod playout;
 pub mod sw;
+pub mod usbip;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -194,6 +197,10 @@ pub struct HostBackends {
     pub speaker: Option<Box<dyn audio::SpeakerControl>>,
     /// Shared copy/paste; `None` where there is no clipboard.
     pub clipboard: Option<Box<dyn clipboard::SystemClipboard>>,
+    /// Plugs a virtual USB device (the `DualSense` mirror) into this
+    /// computer; `None` where that is not possible (`DualSense`s then work as
+    /// generic controllers).
+    pub pad_attach: Option<padhub::Attach>,
     pub capabilities: Capabilities,
 }
 

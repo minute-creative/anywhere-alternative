@@ -59,6 +59,8 @@ pub struct Options {
     pub test_input: bool,
     pub stats_tx: Option<std::sync::mpsc::Sender<crate::overlay::LiveStats>>,
     pub mic: MicStart,
+    /// Where the host's `DualSense` output reports go (rumble, triggers…).
+    pub pad_out: Option<std::sync::mpsc::Sender<aa_core::ds5::PadMsg>>,
     /// Called once the host has accepted us (used to re-apply settings
     /// after a reconnect).
     pub on_connected: Option<Box<dyn Fn() + Send>>,
@@ -75,7 +77,7 @@ pub async fn run(
     backends: ViewerBackends,
     commands: &mut mpsc::Receiver<ViewerCommand>,
 ) -> anyhow::Result<()> {
-    let Options { host, bind, frames, test_input, stats_tx, mic: start_mic, on_connected, on_status } = opts;
+    let Options { host, bind, frames, test_input, stats_tx, mic: start_mic, pad_out, on_connected, on_status } = opts;
     let mut last_status: Option<String> = None;
     let socket = crate::udp::bind(bind)?;
     socket.connect(host).await?;
@@ -224,6 +226,13 @@ pub async fn run(
                         }
                     }
                     Kind::Audio => audio.handle(packet.payload),
+                    Kind::Pad => {
+                        if let (Some(m @ (aa_core::ds5::PadMsg::Output { .. } | aa_core::ds5::PadMsg::Audio { .. })), Some(out)) =
+                            (aa_core::ds5::PadMsg::decode(&packet.payload), pad_out.as_ref())
+                        {
+                            let _ = out.send(m);
+                        }
+                    }
                     Kind::Clipboard | Kind::ClipboardAck => {
                         let (item, ack) = clip.received(&packet, &seq);
                         if let (Some(item), Some(link)) = (item, clip_link.as_ref()) {
@@ -278,6 +287,7 @@ pub async fn run(
                                         send_control(&socket, &ControlMessage::SetHostMute { muted }, &seq).await?;
                                     }
                                     ViewerCommand::SetMic(on) => set_mic(&mut mic, on),
+                                    ViewerCommand::Pad(m) => send_pad(&socket, &m, &seq).await?,
                                     ViewerCommand::Quit => {
                                         send_input(&socket, &batch, &seq, negotiated.gamepad).await?;
                                         send_control(&socket, &ControlMessage::Bye, &seq).await?;
@@ -301,6 +311,7 @@ pub async fn run(
                         send_control(&socket, &ControlMessage::SetHostMute { muted }, &seq).await?;
                     }
                     Some(ViewerCommand::SetMic(on)) => set_mic(&mut mic, on),
+                    Some(ViewerCommand::Pad(m)) => send_pad(&socket, &m, &seq).await?,
                     Some(ViewerCommand::Quit) | None => {
                         tracing::info!("window closed");
                         send_control(&socket, &ControlMessage::Bye, &seq).await?;
@@ -455,6 +466,16 @@ async fn send_control(socket: &UdpSocket, msg: &ControlMessage, seq: &SeqCounter
     Header { kind: Kind::Control, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }
         .write(&mut out);
     out.extend_from_slice(&payload);
+    socket.send(&out).await?;
+    Ok(())
+}
+
+/// One `DualSense` pass-through message, in its own datagram.
+async fn send_pad(socket: &UdpSocket, m: &aa_core::ds5::PadMsg, seq: &SeqCounter) -> anyhow::Result<()> {
+    let body = m.encode();
+    let mut out = BytesMut::with_capacity(wire::HEADER_LEN + body.len());
+    Header { kind: Kind::Pad, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }.write(&mut out);
+    out.extend_from_slice(&body);
     socket.send(&out).await?;
     Ok(())
 }
