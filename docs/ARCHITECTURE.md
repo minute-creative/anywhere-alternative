@@ -273,6 +273,12 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
 - **windows-rs `PROPVARIANT` frees its payload on drop.** A `VT_BLOB`
   pointing at stack memory → `STATUS_HEAP_CORRUPTION` at exit of scope.
   Wrap in `ManuallyDrop` when the blob is borrowed, not owned.
+- **A late packet is not two lost packets.** The loss tracker used to
+  move its "expected next" back to a late packet's number, so everything
+  after it counted as lost again. On a reordering link (5% of packets
+  1.5 ms late, nothing lost) it reported ~10% loss and the controller cut
+  bitrate by a quarter. Late packets now cancel one loss and never move the
+  counter backwards.
 - **The loaded encoder must be `codecs[0]`.** Windows offered HEVC first
   but had opened H.264; the session took `codecs[0]` as "what is loaded",
   saw HEVC == HEVC, never switched, and sent H.264 labelled HEVC. The Mac
@@ -289,6 +295,24 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
 | 2026-10-06 | same | DXGI → Quick Sync via Media Foundation, zero-copy | locked 60 fps, 0% loss, ~31 Mbps, <1 ms assembly; bench 110 fps @1080p, 73 @1440p |
 | 2026-10-07 | same → Mac mini M4 Pro, Wi-Fi | + WASAPI loopback → Opus 128 kbps | audio plays; crackled with a fixed 30 ms buffer (link ping 36–187 ms) → adaptive buffer shipped |
 | 2026-10-07 | same | process-loopback tap, host mute, LAN discovery, VideoToolbox decode, HEVC negotiation | all compile on CI; owner verification pending (see docs/HANDOFF.md) |
+
+### Gaming simulation, 2026-10-07 (mock pipeline, 2-core cloud box)
+
+Synthetic full-motion 1280×720 source, software H.264 both ends, a UDP
+relay injecting delay/jitter/loss/stalls. Real hardware encode/decode is
+far faster; this tests the transport and pacing, not the GPUs.
+
+| Link | Target | Avg fps | Min fps | Gap p99 | Worst gap | Loss |
+|---|---|---|---|---|---|---|
+| clean | 60 | 60.0 | 59 | 22 ms | 37 ms | 0.1% |
+| clean | 120 | 120.1 | 113 | 16 ms | 31 ms | 0.2% |
+| clean | 240 / 300 | 142 / 145 | 100–106 | 13 ms | 31 ms | CPU-bound |
+| Wi-Fi (4±2 ms, 0.5% loss, 40 ms stall / 5 s) | 60 | 58.6 | 57 | 27 ms | 53 ms | 0.6% |
+| same | 120 | 117.4 | 111 | 18 ms | 44 ms | 0.8% |
+| bad Wi-Fi (8±6 ms, 2% loss, 80 ms stall / 2 s) | 120 | 111.6 | 103 | 24 ms | 84 ms | 2.4% |
+
+Ceilings found: capture fps = host display refresh (DXGI duplication);
+viewer shows at most its display refresh (Fifo vsync).
 
 ## 11. Coding standards
 

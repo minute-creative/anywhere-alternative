@@ -43,10 +43,20 @@ impl LossTracker {
         if let Some(exp) = self.expected_next {
             // Distance forward from what we expected, treating wrap correctly.
             let gap = seq.wrapping_sub(exp);
-            // Gaps larger than half the range are reordering/duplicates, not loss.
-            if gap != 0 && gap < u16::MAX / 2 {
+            if gap < u16::MAX / 2 {
+                // On time or ahead: anything skipped is (for now) lost.
                 self.lost += u64::from(gap);
+                self.expected_next = Some(seq.wrapping_add(1));
+            } else {
+                // Behind: a packet we already counted as lost turned up late
+                // (Wi-Fi reorders now and then). Give it back, and do *not*
+                // move `expected_next` backwards, or every packet after it
+                // gets counted as lost a second time. That double count read
+                // as ~30-45% loss on a jittery link and made the bitrate
+                // controller cut quality for nothing.
+                self.lost = self.lost.saturating_sub(1);
             }
+            return;
         }
         self.expected_next = Some(seq.wrapping_add(1));
     }
@@ -91,6 +101,25 @@ impl Default for StreamStats {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reordering_is_not_loss() {
+        let mut t = super::LossTracker::default();
+        for seq in [1u16, 2, 4, 3, 5, 7, 6, 8] {
+            t.observe(seq);
+        }
+        assert_eq!(t.lost, 0);
+        assert_eq!(t.received, 8);
+    }
+
+    #[test]
+    fn real_gaps_still_count() {
+        let mut t = super::LossTracker::default();
+        for seq in [1u16, 2, 5, 6] {
+            t.observe(seq);
+        }
+        assert_eq!(t.lost, 2);
+    }
+
     use super::*;
 
     #[test]
