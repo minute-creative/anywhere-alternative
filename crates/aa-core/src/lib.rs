@@ -22,6 +22,7 @@ pub mod clipboard;
 pub mod config;
 pub mod control;
 pub mod control_flow;
+pub mod ds5;
 pub mod input;
 pub mod stats;
 pub mod video;

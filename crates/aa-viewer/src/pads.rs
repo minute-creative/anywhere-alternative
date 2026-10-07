@@ -22,9 +22,17 @@ pub const SLOTS: usize = 4;
 
 /// Hands out the lowest free slot, so the first controller is always
 /// player 1 and a reconnecting one gets its old place back if free.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SlotTable<K: PartialEq> {
     slots: [Option<K>; SLOTS],
+}
+
+// By hand: a derived Default would demand `K: Default`, which gilrs's
+// controller ids don't have (CI caught it; Linux never builds this path).
+impl<K: PartialEq> Default for SlotTable<K> {
+    fn default() -> Self {
+        Self { slots: std::array::from_fn(|_| None) }
+    }
 }
 
 impl<K: PartialEq + Copy> SlotTable<K> {

@@ -62,6 +62,8 @@ pub enum Kind {
     /// Viewer → host: one Opus packet of the viewer's microphone (same
     /// layout as `Audio`).
     Mic = 12,
+    /// `DualSense` raw pass-through, both directions; see `ds5`.
+    Pad = 13,
 }
 
 impl Kind {
@@ -79,6 +81,7 @@ impl Kind {
             10 => Self::Clipboard,
             11 => Self::ClipboardAck,
             12 => Self::Mic,
+            13 => Self::Pad,
             _ => return None,
         })
     }
