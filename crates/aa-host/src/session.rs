@@ -26,7 +26,15 @@ const VIEWER_TIMEOUT: Duration = Duration::from_secs(5);
 struct Viewer {
     addr: SocketAddr,
     last_heard: Instant,
+    /// When its Hello was accepted (repeats right after are just re-answered).
+    welcomed: Instant,
 }
+
+/// A viewer silent this long may be replaced by a new one from the same
+/// computer (it crashed or lost the network and came back). A *live*
+/// viewer is never replaced: two viewer apps on one Mac used to take the
+/// stream from each other every few seconds.
+const TAKEOVER_AFTER_SILENCE: Duration = Duration::from_millis(1500);
 
 #[allow(clippy::too_many_lines)] // one select! loop; splitting it would hide the flow
 pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<()> {
@@ -341,8 +349,25 @@ async fn handle_packet(
                     // machine on a new port is that viewer reconnecting (it
                     // lost us for a moment): let it take over at once rather
                     // than waiting out the old session's timeout.
+                    // The current viewer repeating its Hello (it resends until
+                    // answered): answer again, but don't restart the stream.
+                    if let Some(v) =
+                        viewer.as_ref().filter(|v| v.addr == from && v.welcomed.elapsed() < Duration::from_secs(3))
+                    {
+                        let _ = v;
+                        if let Ok(negotiated) = negotiate(host_caps, &capabilities) {
+                            send_control(
+                                socket,
+                                from,
+                                &ControlMessage::Welcome { protocol: PROTOCOL_VERSION, negotiated },
+                                seq,
+                            )
+                            .await?;
+                        }
+                        return Ok(());
+                    }
                     if let Some(v) = viewer.as_ref().filter(|v| v.addr != from) {
-                        if v.addr.ip() == from.ip() {
+                        if v.addr.ip() == from.ip() && v.last_heard.elapsed() > TAKEOVER_AFTER_SILENCE {
                             tracing::info!(old = %v.addr, new = %from, "viewer reconnected");
                         } else {
                             send_control(socket, from, &ControlMessage::Reject { reason: "host busy".into() }, seq)
@@ -361,7 +386,7 @@ async fn handle_packet(
                                 seq,
                             )
                             .await?;
-                            *viewer = Some(Viewer { addr: from, last_heard: Instant::now() });
+                            *viewer = Some(Viewer { addr: from, last_heard: Instant::now(), welcomed: Instant::now() });
                             *video_dest.lock().expect("dest") = Some(from);
                             *bitrate = BitrateController::new(
                                 StreamConfig::suggested_bitrate_kbps(host_caps.max_resolution, host_caps.max_fps),

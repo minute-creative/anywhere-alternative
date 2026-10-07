@@ -27,7 +27,7 @@ pub enum MicStart {
     Tone,
 }
 
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(6);
 const KEEPALIVE: Duration = Duration::from_millis(500);
 /// Don't spam the host with keyframe requests; one in flight at a time.
 const NACK_INTERVAL: Duration = Duration::from_millis(150);
@@ -88,24 +88,44 @@ pub async fn run(
     let seq = SeqCounter::default();
 
     // --- handshake ---------------------------------------------------------
-    send_control(&socket, &ControlMessage::hello(capabilities), &seq).await?;
+    // Hello is repeated every 300 ms until the host answers: one lost packet
+    // (either way) used to fail the whole connection on a lossy link. Junk
+    // that arrives meanwhile is skipped instead of aborting, and "busy" is
+    // retried because the previous viewer may be about to time out.
+    let hello = ControlMessage::hello(capabilities);
     let mut buf = vec![0u8; wire::MAX_DATAGRAM * 2];
-    let negotiated = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+    let mut said_busy = false;
+    let handshake = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+        let mut resend = tokio::time::interval(Duration::from_millis(300));
         loop {
-            let n = socket.recv(&mut buf).await?;
-            let packet = Packet::parse(Bytes::copy_from_slice(&buf[..n]))?;
-            if packet.header.kind != Kind::Control {
-                continue;
-            }
-            match ControlMessage::decode(&packet.payload)? {
-                ControlMessage::Welcome { negotiated, .. } => return anyhow::Ok(negotiated),
-                ControlMessage::Reject { reason } => anyhow::bail!("host rejected us: {reason}"),
-                _ => {}
+            tokio::select! {
+                _ = resend.tick() => send_control(&socket, &hello, &seq).await?,
+                recv = socket.recv(&mut buf) => {
+                    let n = recv?;
+                    let Ok(packet) = Packet::parse(Bytes::copy_from_slice(&buf[..n])) else { continue };
+                    if packet.header.kind != Kind::Control {
+                        continue;
+                    }
+                    match ControlMessage::decode(&packet.payload) {
+                        Ok(ControlMessage::Welcome { negotiated, .. }) => return anyhow::Ok(negotiated),
+                        Ok(ControlMessage::Reject { reason }) if reason.contains("busy") => {
+                            if !said_busy {
+                                tracing::info!("host is busy with another viewer; waiting");
+                                said_busy = true;
+                            }
+                        }
+                        Ok(ControlMessage::Reject { reason }) => anyhow::bail!("host rejected us: {reason}"),
+                        _ => {}
+                    }
+                }
             }
         }
     })
-    .await
-    .context_timeout()??;
+    .await;
+    if handshake.is_err() && said_busy {
+        anyhow::bail!("the host is busy: another computer is connected to it right now");
+    }
+    let negotiated = handshake.context_timeout()??;
     tracing::info!(?negotiated, "connected");
     crate::discover::remember(host);
     if let Some(cb) = &on_connected {

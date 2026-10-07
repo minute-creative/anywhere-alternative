@@ -476,6 +476,47 @@ m_freeze500ms_60       fps avg   59.7 min   56 | gap p50  15.5 p99  23.7 worst  
     soak                   fps avg  120.5 min   79 | gap p50   8.5 p99  15.3 worst   77.7 ms | stutters/s  0.8 | loss 0.51% | rtt  11.4 | mbps   7.5
 
 
+### Failure patterns (from fuzzing and chaos runs, 2026-10-08)
+
+Every bug the hostile tests found fits one of these. Check new code
+against the list; each has a regression test.
+
+1. **One-shot message over UDP.** Anything that must arrive (Hello,
+   controller plug/unplug) is repeated until answered, and the receiver
+   treats repeats as no-ops. *Found:* a single lost Hello failed the whole
+   connection at 30% loss (now resent every 300 ms for 6 s; host re-answers
+   repeats without restarting the stream).
+2. **Numbers that wrap or restart.** Sequence numbers, frame ids and
+   transfer ids are compared by distance (`is_newer`, TCP-style), start at
+   random where a restart could collide, and "already seen" memories
+   expire. *Found:* clipboard ids restarting at 1 after a reconnect could be
+   mistaken for repeats and dropped; frame ids would stop after a wrap.
+3. **State a peer can create without limit.** Cap everything keyed by
+   incoming data. *Found:* unfinished clipboard transfers piled up without
+   bound (13,678 in one fuzz run; now max 2).
+4. **Trusting driver values.** Sample rates, channel counts and buffer
+   sizes are range-checked. *Found:* a "1 Hz" microphone produced 100k
+   frames from 2 samples; odd-channel buffers left samples unwritten (noise).
+5. **Transient error treated as fatal.** Long-running loops log and carry
+   on; only the user (or "host said bye") ends a session. *Found:* closed
+   viewer → `ConnectionReset` → host exited; junk during the handshake
+   aborted it.
+6. **Facts captured once at startup.** Resolution, refresh rate, display
+   and GPU device are re-read and rebuilt on change. *Found:* encoder stuck
+   at the old size forever; frame ids restarting with each new encoder.
+7. **Subtracting counters that can go down.** Saturating arithmetic.
+   *Found:* loss delta wrapped to ~2^64 and reported 100% loss.
+8. **Takeover rules.** A *live* viewer is never replaced; only a silent one
+   (1.5 s) from the same computer. *Found:* two viewer apps on one Mac
+   stole the stream from each other forever.
+
+Test assets: `crates/aa-core/tests/fuzz.rs` (`AA_FUZZ_ROUNDS` for longer
+soaks), `crates/aa-platform/tests/edges.rs`, `tools/sim/matrix.sh` (14 use
+cases), `tools/sim/chaos.sh` (10 attacks: garbage floods, corruption,
+duplication, 30% loss, blackout, crash loops, clipboard storm, soak).
+Not covered here: Mac/Windows-only code paths (capture, encoders, VT,
+ViGEm, cpal devices); those need the owner's machines or CI.
+
 ## 11. Coding standards
 
 - `cargo fmt`, `cargo clippy --all-targets` with pedantic lints: zero warnings.

@@ -273,7 +273,9 @@ fn start_test_clipboard(side: &'static str) {
         let big = std::env::var("AA_TEST_CLIPBOARD_BYTES").is_ok();
         loop {
             // Big items get time to arrive before the next copy replaces them.
-            std::thread::sleep(std::time::Duration::from_secs(if big { 6 } else { 2 }));
+            // AA_TEST_CLIPBOARD_MS overrides the interval (clipboard storms).
+            let ms = std::env::var("AA_TEST_CLIPBOARD_MS").ok().and_then(|v| v.parse().ok());
+            std::thread::sleep(std::time::Duration::from_millis(ms.unwrap_or(if big { 6000 } else { 2000 })));
             n = n.wrapping_add(1);
             // AA_TEST_CLIPBOARD_BYTES=N: copy an N-byte "image" instead of
             // text, to test big transfers.

@@ -5,6 +5,20 @@ base_ms, jitter_ms, loss, stall_every_s, stall_ms = map(float, sys.argv[1:6])
 reorder = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0
 rate_mbps = float(sys.argv[7]) if len(sys.argv) > 7 else 0.0  # 0 = unlimited; host->viewer only
 MAX_QUEUE_S = 0.08  # drop-tail once 80 ms is queued, like a router
+import os
+CORRUPT = float(os.environ.get("RELAY_CORRUPT", "0"))   # fraction of datagrams with a flipped byte
+DUP = float(os.environ.get("RELAY_DUP", "0"))           # fraction delivered twice
+_bo = os.environ.get("RELAY_BLACKOUT", "")              # "start_s,duration_s[,every_s]": drop everything
+BO = tuple(map(float, _bo.split(","))) if _bo else None
+T0 = time.monotonic()
+def blacked_out():
+    if not BO: return False
+    t = time.monotonic() - T0
+    start, dur = BO[0], BO[1]
+    every = BO[2] if len(BO) > 2 else 0
+    if t < start: return False
+    if every: t = start + (t - start) % every
+    return t < start + dur
 HOST = ("127.0.0.1", 7700)
 random.seed(1)
 class Relay:
@@ -12,7 +26,11 @@ class Relay:
     def send_later(s, direction, data, addr, sock):
         loop=asyncio.get_running_loop(); now=loop.time()
         if now>=s.next_stall: s.stall_until=now+stall_ms/1000; s.next_stall=now+stall_every_s*random.uniform(0.5,1.5)
-        if random.random()<loss: return
+        if random.random()<loss or blacked_out(): return
+        if CORRUPT and random.random()<CORRUPT and len(data)>0:
+            b=bytearray(data); i=random.randrange(len(b)); b[i]^=1<<random.randrange(8); data=bytes(b)
+        if DUP and random.random()<DUP:
+            asyncio.get_running_loop().call_later(0.002, sock.sendto, data, addr)
         d=(base_ms+random.uniform(-jitter_ms,jitter_ms))/1000
         t=max(now+d, s.next_free[direction], s.stall_until)  # Wi-Fi keeps order; stalls hold the queue
         if rate_mbps and direction==1:
