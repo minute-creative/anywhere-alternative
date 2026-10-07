@@ -235,17 +235,17 @@ fn bench_frame(
     };
     use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 
-    let w = res.width as usize;
-    let h = res.height as usize;
-    let mut px = vec![0u8; w * h * 4];
-    for y in 0..h {
-        for x in 0..w {
-            let i = (y * w + x) * 4;
-            let (x, y) = (x + shift, y + shift * 3);
-            px[i] = x as u8;
-            px[i + 1] = y as u8;
-            px[i + 2] = (x ^ y) as u8;
-            px[i + 3] = 255;
+    let width = res.width as usize;
+    let height = res.height as usize;
+    let mut px = vec![0u8; width * height * 4];
+    for row in 0..height {
+        for col in 0..width {
+            let at = (row * width + col) * 4;
+            let (gx, gy) = (col + shift, row + shift * 3);
+            px[at] = gx as u8;
+            px[at + 1] = gy as u8;
+            px[at + 2] = (gx ^ gy) as u8;
+            px[at + 3] = 255;
         }
     }
     let desc = D3D11_TEXTURE2D_DESC {
