@@ -132,7 +132,10 @@ impl WasapiLoopback {
             };
             // PROPVARIANT's inner struct sits behind ManuallyDrop in a
             // union; build it whole rather than poking fields through it.
-            let pv = PROPVARIANT {
+            // The whole thing is wrapped in ManuallyDrop because the
+            // bindings' Drop calls PropVariantClear, which would try to
+            // free `params` — a stack variable — and corrupt the heap.
+            let pv = std::mem::ManuallyDrop::new(PROPVARIANT {
                 Anonymous: PROPVARIANT_0 {
                     Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
                         vt: VT_BLOB,
@@ -147,23 +150,26 @@ impl WasapiLoopback {
                         },
                     }),
                 },
-            };
+            });
 
             let done = CreateEventW(None, false, false, None).map_err(|e| win(e, "CreateEventW"))?;
             let handler: IActivateAudioInterfaceCompletionHandler = ActivationDone(done).into();
             let op = ActivateAudioInterfaceAsync(
                 VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
                 &IAudioClient::IID,
-                Some(&raw const pv),
+                Some(&raw const *pv),
                 &handler,
             )
             .map_err(|e| win(e, "ActivateAudioInterfaceAsync"))?;
             let _ = WaitForSingleObject(done, 2_000);
-            let _ = windows::Win32::Foundation::CloseHandle(done);
 
             let mut hr = windows::core::HRESULT(0);
             let mut unknown: Option<windows::core::IUnknown> = None;
-            op.GetActivateResult(&mut hr, &mut unknown).map_err(|e| win(e, "GetActivateResult"))?;
+            let result = op.GetActivateResult(&mut hr, &mut unknown);
+            // Only now is the handler guaranteed not to signal the event again.
+            drop(handler);
+            let _ = windows::Win32::Foundation::CloseHandle(done);
+            result.map_err(|e| win(e, "GetActivateResult"))?;
             hr.ok().map_err(|e| win(e, "process loopback activation"))?;
             let client: IAudioClient = unknown
                 .ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("activation returned no interface")))?
