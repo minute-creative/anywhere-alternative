@@ -48,6 +48,12 @@ pub struct NvConverter {
     output: ID3D11Texture2D,
 }
 
+impl std::fmt::Debug for NvConverter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NvConverter").finish_non_exhaustive()
+    }
+}
+
 impl NvConverter {
     /// `input` is the BGRA texture the capture is copied into; it must stay
     /// alive as long as the converter (the encoder owns both).
