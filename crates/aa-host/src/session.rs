@@ -183,16 +183,15 @@ impl MicSink {
             self.depack = aa_platform::audio::Depacketizer::new().ok();
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
-                match aa_platform::audio::Player::on_device_named(&Self::CABLES) {
-                    Ok(p) => {
-                        tracing::info!(device = p.device(), "viewer microphone → virtual mic");
-                        self.player = Some(p);
-                    }
-                    Err(_) => tracing::warn!(
+                if let Ok(p) = aa_platform::audio::Player::on_device_named(&Self::CABLES) {
+                    tracing::info!(device = p.device(), "viewer microphone → virtual mic");
+                    self.player = Some(p);
+                } else {
+                    tracing::warn!(
                         "the viewer is sending its microphone, but this PC has no virtual microphone to play it \
                          into. Install VB-CABLE (free, vb-audio.com/Cable), restart aa-host, then choose \
                          \"CABLE Output\" as the microphone in Discord, the game or Windows sound settings"
-                    ),
+                    );
                 }
             }
         }
