@@ -112,6 +112,19 @@ timeout 5 $B/aa-viewer --headless --mock > $S/vr.viewer.log 2>&1
 strip $S/vr.viewer.log | grep -q "connected negotiated" && strip $S/vr.host.log | grep -q "viewer reconnected" \
   && pass "Mac app restarted (crash) and reconnects" "host let the same machine take over at once" || fail "Viewer restart" "see vr logs"
 
+# Host screen faults: resolution change, capture errors, GPU reset, lock, refresh change
+cleanup
+python3 $S/relay.py 4 2 0.005 0 0 > /dev/null 2>&1 &
+AA_SIMULATE_CAPTURE_FAULTS=1 $B/aa-host --mock --mock-res 1280x720 --listen 127.0.0.1:7700 > $S/heal.host.log 2>&1 & sleep 0.7
+timeout 34 $B/aa-viewer --headless --mock 127.0.0.1:7800 > $S/heal.viewer.log 2>&1
+tail_fps=$(strip $S/heal.viewer.log | grep -o "stream fps=[0-9]*" | tail -3 | cut -d= -f2 | tr '\n' ' ')
+rebuilt=$(strip $S/heal.host.log | grep -c "video pipeline rebuilt")
+locked=$(strip $S/heal.viewer.log | grep -c "host: ")
+low=$(strip $S/heal.viewer.log | grep -o "stream fps=[0-9]*" | tail -3 | cut -d= -f2 | awk '$1<50' | wc -l)
+[ "$rebuilt" -ge 1 ] && [ "$locked" -ge 2 ] && [ "$low" -eq 0 ] \
+  && pass "PC screen faults (resize, errors, GPU reset, lock, 120 Hz)" "recovered every time; last seconds fps: $tail_fps; viewer told about the lock" \
+  || fail "PC screen faults" "rebuilt=$rebuilt status_msgs=$locked last fps: $tail_fps"
+
 # Second machine while busy
 cleanup
 $B/aa-host --mock --listen 0.0.0.0:7700 > /dev/null 2>&1 & sleep 0.7

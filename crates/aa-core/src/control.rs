@@ -34,6 +34,9 @@ pub enum ControlMessage {
     /// `port`". The viewer only listens, so this works even when the PC's
     /// firewall drops incoming broadcasts (outgoing ones are allowed).
     Beacon { name: String, port: u16 },
+    /// Host → viewer: why the picture is paused ("the PC is locked…"), or
+    /// `None` when it is back. Repeated every few seconds while set.
+    HostStatus { message: Option<String> },
 }
 
 impl ControlMessage {

@@ -370,6 +370,24 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   means lost: it rediscovers and reconnects for up to 2 min, re-sending the
   user's settings; the host lets the same machine (same IP, new port) take
   over at once instead of answering "busy".
+- **A host nobody sits at must heal itself.** Owner: "when the screen
+  freezes or I close the window, the app crashes and gets stuck". Causes
+  found: (1) Windows reports a closed viewer as `ConnectionReset` on the
+  next receive, and `recv?` ended the host; (2) a resolution or refresh
+  change left the encoder at the old size, failing forever; (3) GPU reset
+  / sleep-resume left capture retrying a dead device; (4) display sleep
+  and PC sleep froze the stream. Now: network errors are logged and
+  survived; the capture thread rebuilds the encoder on any size/rate
+  change, re-grabs the screen (re-picking the display) on any capture
+  error, and rebuilds the whole pipeline on device loss or long failure;
+  the PC is kept awake with its display on while streamed; the viewer is
+  told (window title) when the screen is locked or off. Frame ids are
+  assigned by the capture thread, because each new encoder restarts at 0
+  and the viewer drops non-increasing ids (froze after the first rebuild
+  in simulation). Mock: `AA_SIMULATE_CAPTURE_FAULTS=1`.
+  Still unsolved: the lock screen and UAC prompts can't be captured or
+  typed into by a normal program; that needs the host to run as a
+  Windows service (SYSTEM) like Parsec/Sunshine.
 - **A late packet is not two lost packets.** The loss tracker used to
   move its "expected next" back to a late packet's number, so everything
   after it counted as lost again. On a reordering link (5% of packets

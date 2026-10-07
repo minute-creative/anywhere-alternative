@@ -33,14 +33,26 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     let socket = Arc::new(crate::udp::bind(listen)?);
     tracing::info!("listening on {}", socket.local_addr()?);
 
-    let HostBackends { capture, encoder, encoder_factory, input, gamepad, audio, mut speaker, clipboard, capabilities } =
-        backends;
+    let HostBackends {
+        capture,
+        encoder,
+        encoder_factory,
+        rebuild,
+        input,
+        gamepad,
+        audio,
+        mut speaker,
+        clipboard,
+        capabilities,
+    } = backends;
     // Shared copy/paste: a thread watches this PC's clipboard; `clip` turns
     // copies into datagrams and datagrams back into pastes.
     let clip_link = clipboard.and_then(|c| aa_platform::clipboard::spawn_worker(c).ok());
     let mut clip = aa_core::clipboard::ClipSync::default();
     let mut clip_tick = tokio::time::interval(Duration::from_millis(100));
     let mut mic = MicSink::default();
+    // What we last told the viewer about the screen, and when.
+    let mut told: (Option<&'static str>, Option<SocketAddr>, Instant) = (None, None, Instant::now());
 
     let ctl = Arc::new(PipelineControl::default());
     // A few frames of slack: sending a 250-packet keyframe over Wi-Fi takes
@@ -60,7 +72,8 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     let cap_ctl = Arc::clone(&ctl);
     let initial_codec = capabilities.codecs.first().copied().unwrap_or(aa_core::video::Codec::H264);
     std::thread::Builder::new().name("aa-capture".into()).spawn(move || {
-        pipeline::capture_thread(capture, encoder, initial_codec, encoder_factory, &cap_ctl, &frame_tx);
+        let p = pipeline::Pipeline { capture, encoder, codec: initial_codec, factory: encoder_factory, rebuild };
+        pipeline::capture_thread(p, &cap_ctl, &frame_tx);
     })?;
     std::thread::Builder::new()
         .name("aa-input".into())
@@ -96,7 +109,21 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     loop {
         tokio::select! {
             recv = socket.recv_from(&mut buf) => {
-                let (n, from) = recv?;
+                let (n, from) = match recv {
+                    Ok(x) => x,
+                    // Windows quirk: when the viewer quits, our next datagram to
+                    // it bounces ("port unreachable") and Windows reports that
+                    // as an error on the *next receive*. It means nothing for
+                    // us; it used to end the whole host. Any other receive
+                    // error is logged and survived too: a host must keep
+                    // running through Wi-Fi drops and sleep/resume.
+                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+                    Err(e) => {
+                        tracing::warn!("network receive error (continuing): {e}");
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        continue;
+                    }
+                };
                 let datagram = Bytes::copy_from_slice(&buf[..n]);
                 let packet = match Packet::parse(datagram) {
                     Ok(p) => p,
@@ -118,16 +145,32 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                             let _ = link.paste_here.send(item);
                         }
                         if let Some(ack) = ack {
-                            socket.send_to(&ack, from).await?;
+                            let _ = socket.send_to(&ack, from).await;
                         }
                     }
                     continue;
                 }
-                handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &seq, &mut bitrate, &video_dest, &mut speaker).await?;
+                if let Err(e) = handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &seq, &mut bitrate, &video_dest, &mut speaker).await {
+                    tracing::warn!("network send error (continuing): {e:#}");
+                }
             }
 
             _ = clip_tick.tick() => {
-                clip_pump(&socket, clip_link.as_ref(), &mut clip, viewer.as_ref().map(|v| v.addr), &seq).await?;
+                // Screen status (locked, no display) to the viewer: on every
+                // change, to a newly connected viewer, and every 3 s while set.
+                let status = *ctl.screen_status.lock().expect("status");
+                let dest = viewer.as_ref().map(|v| v.addr);
+                if let Some(d) = dest {
+                    let due = status.is_some() && told.2.elapsed() > Duration::from_secs(3);
+                    if status != told.0 || dest != told.1 || due {
+                        let msg = ControlMessage::HostStatus { message: status.map(str::to_owned) };
+                        let _ = send_control(&socket, d, &msg, &seq).await;
+                        told = (status, dest, Instant::now());
+                    }
+                }
+                if let Err(e) = clip_pump(&socket, clip_link.as_ref(), &mut clip, viewer.as_ref().map(|v| v.addr), &seq).await {
+                    tracing::debug!("clipboard send error (continuing): {e:#}");
+                }
             }
 
             _ = housekeeping.tick() => {
@@ -144,7 +187,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutting down");
                 if let Some(v) = viewer.as_ref() {
-                    send_control(&socket, v.addr, &ControlMessage::Bye, &seq).await?;
+                    let _ = send_control(&socket, v.addr, &ControlMessage::Bye, &seq).await;
                 }
                 restore_speakers(&mut speaker);
                 ctl.shutdown.store(true, Ordering::Relaxed);

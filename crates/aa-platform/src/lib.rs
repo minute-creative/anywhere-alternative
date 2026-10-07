@@ -93,6 +93,10 @@ pub enum PlatformError {
     Unavailable(String),
     #[error("not implemented yet: {0}")]
     NotImplemented(&'static str),
+    /// The GPU or display went away under us (driver reset, sleep/resume,
+    /// monitor unplugged): the whole capture/encode pipeline must be rebuilt.
+    #[error("device lost: {0}")]
+    DeviceLost(String),
     #[error("{0}")]
     Backend(#[from] anyhow::Error),
 }
@@ -107,6 +111,12 @@ pub trait ScreenCapture: Send {
     fn next_frame(&mut self, timeout: Duration) -> Result<Option<CapturedFrame>>;
     fn resolution(&self) -> Resolution;
     fn refresh_rate_hz(&self) -> u16;
+    /// Why no frames are coming, when the cause is known and outside our
+    /// control: e.g. "PC is locked" (Windows hides the lock screen and UAC
+    /// prompts from normal programs). Shown to the viewer.
+    fn unavailable_reason(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Turns captured frames into a codec bitstream.
@@ -148,7 +158,21 @@ pub trait VirtualGamepad: Send {
 /// Builds an encoder for the codec a viewer negotiated. The codec is only
 /// known once a viewer says Hello, so the host cannot pick its encoder at
 /// startup; it asks this instead.
-pub type EncoderFactory = Box<dyn FnMut(Codec) -> Result<Box<dyn VideoEncoder>> + Send>;
+pub type EncoderFactory = Box<dyn FnMut(Codec, Resolution, u16) -> Result<Box<dyn VideoEncoder>> + Send>;
+/// Rebuilds capture from scratch (new GPU device, re-picked display) plus an
+/// encoder factory bound to it. Used when the old pipeline is beyond repair:
+/// GPU reset, sleep/resume, the captured monitor unplugged.
+pub type PipelineFactory = Box<dyn FnMut() -> Result<(Box<dyn ScreenCapture>, EncoderFactory)> + Send>;
+
+/// Keep this PC awake with its display on while someone is streaming it
+/// (the person isn't touching it, so Windows would otherwise dim, lock and
+/// sleep). Call from a long-lived thread; `false` restores normal power.
+pub fn keep_awake(on: bool) {
+    #[cfg(target_os = "windows")]
+    windows::keep_awake(on);
+    #[cfg(not(target_os = "windows"))]
+    let _ = on;
+}
 /// Same idea on the viewer: build the decoder for the codec the host chose.
 pub type DecoderFactory = Box<dyn FnMut(Codec) -> Result<Box<dyn VideoDecoder>> + Send>;
 
@@ -158,8 +182,10 @@ pub struct HostBackends {
     /// codec: the session treats `codecs[0]` as "what is loaded" and only
     /// rebuilds when a viewer negotiates something else.
     pub encoder: Box<dyn VideoEncoder>,
-    /// Builds an encoder for any other codec in `capabilities.codecs`.
+    /// Builds an encoder for any codec in `capabilities.codecs`, at any size.
     pub encoder_factory: Option<EncoderFactory>,
+    /// Starts over from nothing when capture is broken for good.
+    pub rebuild: Option<PipelineFactory>,
     pub input: Box<dyn InputInjector>,
     pub gamepad: Option<Box<dyn VirtualGamepad>>,
     /// System-audio source; `None` on platforms without one yet.

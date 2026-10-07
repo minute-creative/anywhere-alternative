@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use aa_core::video::{PixelFormat, Resolution};
 use bytes::BytesMut;
 use windows::core::Interface;
-use windows::Win32::Foundation::{HMODULE, RECT};
+use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE,
@@ -29,8 +29,9 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
-    DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+    CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_WAIT_TIMEOUT,
+    DXGI_OUTDUPL_FRAME_INFO,
 };
 
 use crate::{CapturedFrame, FrameBuffer, GpuApi, PlatformError, Result, ScreenCapture};
@@ -59,6 +60,58 @@ pub struct DxgiCapture {
     refresh_hz: u16,
     desktop_rect: RECT,
     started: Instant,
+    /// Windows refused to show us the screen: lock screen, UAC prompt or
+    /// Ctrl+Alt+Del (the "secure desktop", off limits to normal programs).
+    locked: bool,
+    /// No display is on (laptop lid closed with nothing else attached,
+    /// monitor powered off).
+    no_display: bool,
+    /// When re-grabbing the screen started failing for reasons other than
+    /// the two above; past a limit we ask for a full rebuild.
+    failing_since: Option<Instant>,
+}
+
+/// Where the captured screen sits on the virtual desktop, shared with the
+/// input injector so clicks land right after a resolution change.
+static OUTPUT_RECT: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::new(None);
+
+pub fn current_output_rect() -> Option<RECT> {
+    *OUTPUT_RECT.lock().expect("output rect")
+}
+
+fn publish_rect(r: RECT) {
+    *OUTPUT_RECT.lock().expect("output rect") = Some(r);
+}
+
+/// Re-grabbing that fails this long (not locked, a display is on) means
+/// this GPU device is beyond saving: ask for a full rebuild.
+const GIVE_UP_AFTER: Duration = Duration::from_secs(15);
+
+/// The output to capture: `preferred` if it shows a desktop, else the first
+/// that does (lid closed onto an external monitor, monitor swapped).
+///
+/// SAFETY: plain COM enumeration on a live adapter.
+unsafe fn pick_output(adapter: &IDXGIAdapter1, preferred: u32) -> Option<(u32, IDXGIOutput)> {
+    let order = std::iter::once(preferred).chain((0..8).filter(|&i| i != preferred));
+    for i in order {
+        // SAFETY: see function contract.
+        let Ok(o) = (unsafe { adapter.EnumOutputs(i) }) else { continue };
+        // SAFETY: as above.
+        if unsafe { o.GetDesc() }.is_ok_and(|d| d.AttachedToDesktop.as_bool()) {
+            return Some((i, o));
+        }
+    }
+    None
+}
+
+fn refresh_of(desc: &windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_DESC) -> u16 {
+    let rr = desc.ModeDesc.RefreshRate;
+    // Rounded, so 59.94 Hz (60000/1001) reads as 60, and 143.9 as 144.
+    (rr.Numerator + rr.Denominator / 2).checked_div(rr.Denominator).map_or(60, |hz| hz.clamp(1, 1000) as u16)
+}
+
+fn is_device_gone(code: windows::core::HRESULT) -> bool {
+    code == DXGI_ERROR_DEVICE_REMOVED || code == DXGI_ERROR_DEVICE_RESET
 }
 
 // SAFETY: the D3D11 device is created single-threaded-safe by default and
@@ -85,9 +138,11 @@ impl DxgiCapture {
         unsafe {
             let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(|e| win(e, "CreateDXGIFactory1"))?;
             let adapter = factory.EnumAdapters1(0).map_err(|e| win(e, "EnumAdapters1(0)"))?;
-            let output = adapter.EnumOutputs(output_index).map_err(|e| win(e, "EnumOutputs"))?;
+            let (output_index, output) = pick_output(&adapter, output_index)
+                .ok_or_else(|| PlatformError::DeviceLost("no display is on (lid closed or monitor off?)".into()))?;
             let output1: IDXGIOutput1 = output.cast().map_err(|e| win(e, "IDXGIOutput1"))?;
             let out_desc = output.GetDesc().map_err(|e| win(e, "output GetDesc"))?;
+            publish_rect(out_desc.DesktopCoordinates);
 
             // VIDEO_SUPPORT unlocks the GPU's video processor, which does our
             // colour conversion (convert.rs). Retry without it on GPUs that
@@ -117,38 +172,42 @@ impl DxgiCapture {
             let device = device.ok_or_else(|| PlatformError::Unavailable("no D3D11 device".into()))?;
             let context = context.ok_or_else(|| PlatformError::Unavailable("no D3D11 context".into()))?;
 
-            let dup = output1.DuplicateOutput(&device).map_err(|e| {
-                if e.code().0 as u32 == 0x8007_0005 {
-                    PlatformError::Permission(
-                        "desktop duplication denied (another app owns it, or a secure desktop is up)".into(),
-                    )
-                } else {
-                    win(e, "DuplicateOutput")
+            // Started while the PC is locked: carry on without a picture
+            // and pick the screen up the moment it unlocks, rather than
+            // refusing to start.
+            let (dup, res, refresh_hz, locked) = match output1.DuplicateOutput(&device) {
+                Ok(dup) => {
+                    let desc = dup.GetDesc();
+                    (Some(dup), Resolution::new(desc.ModeDesc.Width, desc.ModeDesc.Height), refresh_of(&desc), false)
                 }
-            })?;
-            let desc = dup.GetDesc();
-            let res = Resolution::new(desc.ModeDesc.Width, desc.ModeDesc.Height);
-            let rr = desc.ModeDesc.RefreshRate;
-            // Rounded, so 59.94 Hz (60000/1001) reads as 60, and 143.9 as 144.
-            let refresh_hz = (rr.Numerator + rr.Denominator / 2)
-                .checked_div(rr.Denominator)
-                .map_or(60, |hz| hz.clamp(1, 1000) as u16);
+                Err(e) if e.code() == E_ACCESSDENIED => {
+                    let r = out_desc.DesktopCoordinates;
+                    tracing::info!("screen is locked; will start capturing once it is unlocked");
+                    let res = Resolution::new((r.right - r.left) as u32, (r.bottom - r.top) as u32);
+                    (None, res, 60, true)
+                }
+                Err(e) if is_device_gone(e.code()) => return Err(PlatformError::DeviceLost(format!("{e}"))),
+                Err(e) => return Err(win(e, "DuplicateOutput")),
+            };
 
             let staging = Self::make_staging(&device, res)?;
             let gpu_tex = if output_mode == Output::Gpu { Some(Self::make_gpu_tex(&device, res)?) } else { None };
-            tracing::info!(?res, refresh_hz, ?output_mode, "desktop duplication ready");
+            tracing::info!(?res, refresh_hz, output_index, ?output_mode, "desktop duplication ready");
             Ok(Self {
                 device,
                 context,
                 gpu_tex,
                 adapter,
                 output_index,
-                dup: Some(dup),
+                dup,
                 staging,
                 res,
                 refresh_hz,
                 desktop_rect: out_desc.DesktopCoordinates,
                 started: Instant::now(),
+                locked,
+                no_display: false,
+                failing_since: None,
             })
         }
     }
@@ -203,25 +262,48 @@ impl DxgiCapture {
         tex.ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("CreateTexture2D returned nothing")))
     }
 
-    /// Recreate the duplication after `DXGI_ERROR_ACCESS_LOST`. The desktop
-    /// mode may have changed, so resolution is re-read too.
+    /// Recreate the duplication after it was lost (mode change, lock
+    /// screen, UAC prompt, display off). Re-reads size and refresh rate and
+    /// re-picks the display if ours went away.
     fn reacquire(&mut self) -> Result<()> {
         self.dup = None;
         // SAFETY: COM calls on live objects.
         unsafe {
-            let output = self.adapter.EnumOutputs(self.output_index).map_err(|e| win(e, "EnumOutputs"))?;
+            let Some((index, output)) = pick_output(&self.adapter, self.output_index) else {
+                self.no_display = true;
+                return Err(PlatformError::Unavailable("no display is on".into()));
+            };
+            self.no_display = false;
+            if index != self.output_index {
+                tracing::info!(display = index, "the captured display went away; now capturing another");
+                self.output_index = index;
+            }
             let output1: IDXGIOutput1 = output.cast().map_err(|e| win(e, "IDXGIOutput1"))?;
             self.desktop_rect = output.GetDesc().map_err(|e| win(e, "output GetDesc"))?.DesktopCoordinates;
-            let dup = output1.DuplicateOutput(&self.device).map_err(|e| win(e, "DuplicateOutput"))?;
+            publish_rect(self.desktop_rect);
+            let dup = match output1.DuplicateOutput(&self.device) {
+                Ok(d) => d,
+                Err(e) if e.code() == E_ACCESSDENIED => {
+                    self.locked = true;
+                    return Err(win(e, "DuplicateOutput (locked)"));
+                }
+                Err(e) if is_device_gone(e.code()) => return Err(PlatformError::DeviceLost(format!("{e}"))),
+                Err(e) => return Err(win(e, "DuplicateOutput")),
+            };
+            self.locked = false;
             let desc = dup.GetDesc();
             let res = Resolution::new(desc.ModeDesc.Width, desc.ModeDesc.Height);
-            if res != self.res {
-                tracing::info!(old = ?self.res, new = ?res, "display mode changed");
-                self.res = res;
-                self.staging = Self::make_staging(&self.device, res)?;
-                if self.gpu_tex.is_some() {
-                    self.gpu_tex = Some(Self::make_gpu_tex(&self.device, res)?);
+            let hz = refresh_of(&desc);
+            if res != self.res || hz != self.refresh_hz {
+                tracing::info!(old = ?self.res, new = ?res, refresh_hz = hz, "display mode changed");
+                if res != self.res {
+                    self.res = res;
+                    self.staging = Self::make_staging(&self.device, res)?;
+                    if self.gpu_tex.is_some() {
+                        self.gpu_tex = Some(Self::make_gpu_tex(&self.device, res)?);
+                    }
                 }
+                self.refresh_hz = hz;
             }
             self.dup = Some(dup);
         }
@@ -230,15 +312,37 @@ impl DxgiCapture {
 }
 
 impl ScreenCapture for DxgiCapture {
+    fn unavailable_reason(&self) -> Option<&'static str> {
+        if self.locked {
+            Some("the PC is locked or showing a security prompt; unlock it at the PC")
+        } else if self.no_display {
+            Some("no screen is on at the PC (lid closed or monitor off)")
+        } else {
+            None
+        }
+    }
+
     fn next_frame(&mut self, timeout: Duration) -> Result<Option<CapturedFrame>> {
-        let Some(dup) = self.dup.as_ref() else {
-            // Lost earlier; try to come back, and give the caller a beat if we can't.
-            if let Err(e) = self.reacquire() {
-                tracing::debug!("reacquire failed: {e}");
-                std::thread::sleep(Duration::from_millis(250));
+        if self.dup.is_none() {
+            match self.reacquire() {
+                Ok(()) => self.failing_since = None,
+                Err(PlatformError::DeviceLost(m)) => return Err(PlatformError::DeviceLost(m)),
+                Err(e) => {
+                    // Locked or no display: wait as long as it takes, the
+                    // viewer is told why. Anything else gets a time limit.
+                    if self.locked || self.no_display {
+                        self.failing_since = None;
+                    } else if self.failing_since.get_or_insert_with(Instant::now).elapsed() > GIVE_UP_AFTER {
+                        self.failing_since = None;
+                        return Err(PlatformError::DeviceLost(format!("screen capture won't come back: {e}")));
+                    }
+                    tracing::debug!("reacquire failed: {e}");
+                    std::thread::sleep(Duration::from_millis(250));
+                }
             }
             return Ok(None);
-        };
+        }
+        let Some(dup) = self.dup.as_ref() else { return Ok(None) };
 
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
@@ -252,7 +356,13 @@ impl ScreenCapture for DxgiCapture {
                 self.dup = None;
                 return Ok(None);
             }
-            Err(e) => return Err(win(e, "AcquireNextFrame")),
+            Err(e) if is_device_gone(e.code()) => return Err(PlatformError::DeviceLost(format!("{e}"))),
+            Err(e) => {
+                // Unknown trouble: start over with a fresh duplication next call.
+                tracing::debug!("AcquireNextFrame: {e}; reacquiring");
+                self.dup = None;
+                return Ok(None);
+            }
         }
 
         // A frame with no new desktop image means only the mouse moved.

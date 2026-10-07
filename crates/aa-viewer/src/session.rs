@@ -62,6 +62,9 @@ pub struct Options {
     /// Called once the host has accepted us (used to re-apply settings
     /// after a reconnect).
     pub on_connected: Option<Box<dyn Fn() + Send>>,
+    /// Called with the host's explanation when the picture pauses (PC
+    /// locked, screen off), and `None` when it is back.
+    pub on_status: Option<Box<dyn Fn(Option<String>) + Send>>,
 }
 
 /// Runs the whole session. `commands` carries input and settings from the
@@ -72,7 +75,8 @@ pub async fn run(
     backends: ViewerBackends,
     commands: &mut mpsc::Receiver<ViewerCommand>,
 ) -> anyhow::Result<()> {
-    let Options { host, bind, frames, test_input, stats_tx, mic: start_mic, on_connected } = opts;
+    let Options { host, bind, frames, test_input, stats_tx, mic: start_mic, on_connected, on_status } = opts;
+    let mut last_status: Option<String> = None;
     let socket = crate::udp::bind(bind)?;
     socket.connect(host).await?;
     tracing::info!("connecting to {host} from {}", socket.local_addr()?);
@@ -216,12 +220,24 @@ pub async fn run(
                             stats.rtt_ms.push((now.saturating_sub(sent)) as f64 / 1000.0);
                         }
                     }
-                    Kind::Control => {
-                        if let Ok(ControlMessage::Bye) = ControlMessage::decode(&packet.payload) {
+                    Kind::Control => match ControlMessage::decode(&packet.payload) {
+                        Ok(ControlMessage::Bye) => {
                             tracing::info!("host said bye");
                             return Ok(());
                         }
-                    }
+                        Ok(ControlMessage::HostStatus { message }) if message != last_status => {
+                            if let Some(m) = &message {
+                                tracing::info!("host: {m}");
+                            } else {
+                                tracing::info!("host: screen is back");
+                            }
+                            if let Some(cb) = &on_status {
+                                cb(message.clone());
+                            }
+                            last_status = message;
+                        }
+                        _ => {}
+                    },
                     other => tracing::trace!(?other, "ignored packet"),
                 }
             }

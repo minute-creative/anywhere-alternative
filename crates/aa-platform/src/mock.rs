@@ -30,24 +30,80 @@ const MAGIC: &[u8; 4] = b"AAMK";
 pub struct MockCapture {
     res: Resolution,
     fps: u16,
+    /// Size and rate it was created with; faults change `res`/`fps` for a while.
+    base_res: Resolution,
+    base_fps: u16,
     started: Instant,
     frame: u32,
     next_due: Instant,
+    locked: bool,
+}
+
+/// `AA_SIMULATE_CAPTURE_FAULTS=1`: on a 30 s cycle the mock screen does
+/// what real Windows screens do to a host, so recovery can be tested:
+/// 6-8 s resolution drops to 3/4; 10-11 s capture errors; 14 s the "GPU"
+/// is lost once; 18-21 s the "PC is locked"; 24-26 s refresh rate doubles.
+fn faults_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("AA_SIMULATE_CAPTURE_FAULTS").is_some())
+}
+
+/// Process-wide clock for the fault schedule, so a rebuilt capture carries on
+/// where the old one stopped, and the device loss fires once per cycle.
+fn fault_clock() -> &'static (Instant, std::sync::atomic::AtomicU64) {
+    static C: std::sync::OnceLock<(Instant, std::sync::atomic::AtomicU64)> = std::sync::OnceLock::new();
+    C.get_or_init(|| (Instant::now(), std::sync::atomic::AtomicU64::new(u64::MAX)))
 }
 
 impl MockCapture {
     pub fn new(res: Resolution, fps: u16) -> Self {
         let now = Instant::now();
-        Self { res, fps, started: now, frame: 0, next_due: now }
+        Self { res, fps, base_res: res, base_fps: fps, started: now, frame: 0, next_due: now, locked: false }
     }
 
     fn frame_interval(&self) -> Duration {
         Duration::from_secs_f64(1.0 / f64::from(self.fps.max(1)))
     }
+
+    /// Apply the fault schedule; `Err` means "fail this call".
+    fn faults(&mut self) -> Result<()> {
+        if !faults_on() {
+            return Ok(());
+        }
+        let (start, lost_cycle) = fault_clock();
+        let t = start.elapsed().as_secs();
+        let (cycle, sec) = (t / 30, t % 30);
+        self.res = if (6..8).contains(&sec) {
+            Resolution::new((self.base_res.width * 3 / 4) & !1, (self.base_res.height * 3 / 4) & !1)
+        } else {
+            self.base_res
+        };
+        self.fps = if (24..26).contains(&sec) { self.base_fps * 2 } else { self.base_fps };
+        self.locked = (18..21).contains(&sec);
+        if sec == 10 {
+            return Err(PlatformError::Backend(anyhow::anyhow!("simulated capture error")));
+        }
+        if sec == 14 && lost_cycle.swap(cycle, std::sync::atomic::Ordering::Relaxed) != cycle {
+            return Err(PlatformError::DeviceLost("simulated GPU reset".into()));
+        }
+        Ok(())
+    }
 }
 
 impl ScreenCapture for MockCapture {
+    fn unavailable_reason(&self) -> Option<&'static str> {
+        self.locked.then_some("PC is locked")
+    }
+
     fn next_frame(&mut self, timeout: Duration) -> Result<Option<CapturedFrame>> {
+        if let Err(e) = self.faults() {
+            std::thread::sleep(Duration::from_millis(50));
+            return Err(e);
+        }
+        if self.locked {
+            std::thread::sleep(timeout);
+            return Ok(None);
+        }
         let now = Instant::now();
         if self.next_due > now {
             let wait = self.next_due - now;
@@ -250,12 +306,25 @@ pub fn host_backends(res: Resolution, fps: u16, raw: bool) -> crate::Result<Host
         let kbps = aa_core::config::StreamConfig::suggested_bitrate_kbps(res, fps);
         Box::new(crate::sw::SwEncoder::new(res, fps, kbps)?)
     };
+    let factory = move || -> crate::EncoderFactory {
+        Box::new(move |_codec, res, fps| -> crate::Result<Box<dyn VideoEncoder>> {
+            if raw {
+                Ok(Box::new(MockEncoder::default()))
+            } else {
+                let kbps = aa_core::config::StreamConfig::suggested_bitrate_kbps(res, fps);
+                Ok(Box::new(crate::sw::SwEncoder::new(res, fps, kbps)?))
+            }
+        })
+    };
     Ok(HostBackends {
         capture: Box::new(MockCapture::new(res, fps)),
         encoder,
         input: Box::new(MockInput::default()),
         gamepad: Some(Box::new(MockGamepad::default())),
-        encoder_factory: None,
+        encoder_factory: Some(factory()),
+        rebuild: Some(Box::new(move || {
+            Ok((Box::new(MockCapture::new(res, fps)) as Box<dyn ScreenCapture>, factory()))
+        })),
         audio: None,
         speaker: None,
         clipboard: Some(Box::new(test_clipboard().clone())),

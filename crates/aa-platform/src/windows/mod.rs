@@ -59,9 +59,12 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
     let kbps = StreamConfig::suggested_bitrate_kbps(res, fps);
 
     let mut codecs = vec![Codec::H264];
-    let mut encoder_factory: Option<crate::EncoderFactory> = None;
+    let encoder_factory: crate::EncoderFactory;
+    let rebuild: crate::PipelineFactory;
     let (cap, encoder): (capture::DxgiCapture, Box<dyn VideoEncoder>) = match choice {
         EncoderChoice::Software => {
+            encoder_factory = sw_factory();
+            rebuild = sw_rebuild();
             (capture::DxgiCapture::new(0, capture::Output::Cpu)?, Box::new(crate::sw::SwEncoder::new(res, fps, kbps)?))
         }
         EncoderChoice::Hardware | EncoderChoice::Auto => {
@@ -70,12 +73,15 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
             match open_hardware_encoder(device, context, res, fps, kbps) {
                 Ok((offered, enc, factory)) => {
                     codecs = offered;
-                    encoder_factory = Some(factory);
+                    encoder_factory = factory;
+                    rebuild = hw_rebuild();
                     (cap, Box::new(enc))
                 }
                 Err(e) if choice == EncoderChoice::Auto => {
                     tracing::warn!("hardware encoder unavailable ({e}); falling back to software H.264");
                     drop(cap);
+                    encoder_factory = sw_factory();
+                    rebuild = sw_rebuild();
                     (
                         capture::DxgiCapture::new(0, capture::Output::Cpu)?,
                         Box::new(crate::sw::SwEncoder::new(res, fps, kbps)?),
@@ -121,7 +127,8 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
     Ok(HostBackends {
         capture: Box::new(cap),
         encoder,
-        encoder_factory,
+        encoder_factory: Some(encoder_factory),
+        rebuild: Some(rebuild),
         input: Box::new(input),
         gamepad,
         audio,
@@ -175,18 +182,71 @@ fn open_hardware_encoder(
         encoder = enc.name(),
         "windows host: DXGI capture -> hardware encoder (zero-copy)"
     );
-    let (dev, ctx) = (device.clone(), context.clone());
-    let factory: crate::EncoderFactory = Box::new(move |codec| {
+    let factory = hw_factory(device.clone(), context.clone());
+    Ok((codecs, enc, factory))
+}
+
+/// Hardware encoders on one GPU device, at whatever size and rate the
+/// screen is now (the capture thread asks again when it changes).
+fn hw_factory(
+    dev: windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    ctx: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+) -> crate::EncoderFactory {
+    Box::new(move |codec, res, fps| {
         let hw = match codec {
             Codec::Hevc => encoder::HwCodec::Hevc,
             Codec::H264 => encoder::HwCodec::H264,
             Codec::Av1 => return Err(crate::PlatformError::Unavailable("no AV1 encoder yet".into())),
         };
+        let kbps = StreamConfig::suggested_bitrate_kbps(res, fps);
         let enc = encoder::MfEncoder::new(&dev, &ctx, hw, res, fps, kbps)?;
-        tracing::info!(encoder = enc.name(), ?codec, "switched hardware encoder");
+        tracing::info!(encoder = enc.name(), ?codec, ?res, fps, "hardware encoder ready");
         Ok(Box::new(enc) as Box<dyn VideoEncoder>)
-    });
-    Ok((codecs, enc, factory))
+    })
+}
+
+fn sw_factory() -> crate::EncoderFactory {
+    Box::new(|_codec, res, fps| {
+        let kbps = StreamConfig::suggested_bitrate_kbps(res, fps);
+        Ok(Box::new(crate::sw::SwEncoder::new(res, fps, kbps)?) as Box<dyn VideoEncoder>)
+    })
+}
+
+/// Start over: new GPU device, display re-picked, encoders bound to it.
+fn hw_rebuild() -> crate::PipelineFactory {
+    Box::new(|| {
+        let cap = capture::DxgiCapture::new(0, capture::Output::Gpu)?;
+        let (d, c) = cap.device();
+        let factory = hw_factory(d.clone(), c.clone());
+        Ok((Box::new(cap) as Box<dyn crate::ScreenCapture>, factory))
+    })
+}
+
+fn sw_rebuild() -> crate::PipelineFactory {
+    Box::new(|| {
+        Ok((
+            Box::new(capture::DxgiCapture::new(0, capture::Output::Cpu)?) as Box<dyn crate::ScreenCapture>,
+            sw_factory(),
+        ))
+    })
+}
+
+/// Keep the PC awake and its display on while someone streams it. The
+/// request belongs to the calling thread and lasts until changed, so the
+/// capture thread (alive for the whole host run) makes it.
+pub fn keep_awake(on: bool) {
+    use windows::Win32::System::Power::{
+        SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
+    };
+    let flags = if on { ES_CONTINUOUS.0 | ES_SYSTEM_REQUIRED.0 | ES_DISPLAY_REQUIRED.0 } else { ES_CONTINUOUS.0 };
+    // SAFETY: plain Win32 call with a flag value.
+    #[allow(unsafe_code)]
+    let prev = unsafe { SetThreadExecutionState(windows::Win32::System::Power::EXECUTION_STATE(flags)) };
+    if prev.0 == 0 {
+        tracing::warn!("could not change the PC's sleep setting");
+    } else if on {
+        tracing::info!("keeping the PC awake while streaming");
+    }
 }
 
 pub fn viewer_backends() -> Result<ViewerBackends> {

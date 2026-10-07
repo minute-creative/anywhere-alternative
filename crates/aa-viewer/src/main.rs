@@ -218,6 +218,9 @@ async fn run_reconnecting(
             stats_tx: stats_tx.clone(),
             mic,
             on_connected,
+            on_status: status.clone().map(|s| {
+                Box::new(move |m: Option<String>| s(window::Wake::HostStatus(m))) as Box<dyn Fn(Option<String>) + Send>
+            }),
         };
         let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = std::sync::Arc::clone(&connected);

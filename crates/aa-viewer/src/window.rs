@@ -38,6 +38,8 @@ pub enum Wake {
     Reconnecting,
     /// The host accepted us (first time or after a reconnect).
     Connected,
+    /// Why the host's picture is paused, or `None` when it is back.
+    HostStatus(Option<String>),
 }
 
 pub fn build_event_loop() -> anyhow::Result<EventLoop<Wake>> {
@@ -495,6 +497,14 @@ impl ApplicationHandler<Wake> for App {
                 self.reconnecting = true;
                 if let Some(w) = &self.window {
                     w.set_title(&format!("{} — reconnecting…", self.title));
+                }
+            }
+            Wake::HostStatus(msg) => {
+                if let Some(w) = &self.window {
+                    match msg {
+                        Some(m) => w.set_title(&format!("{} — paused: {m}", self.title)),
+                        None => w.set_title(&self.title),
+                    }
                 }
             }
             Wake::Connected => {

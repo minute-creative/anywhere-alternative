@@ -81,10 +81,13 @@ impl SendInputInjector {
 
     /// Stream-normalised (0..=65535 over the captured output) → screen pixels.
     fn to_pixels(&self, x: u16, y: u16) -> (i32, i32) {
-        let ow = f64::from(self.output.right - self.output.left);
-        let oh = f64::from(self.output.bottom - self.output.top);
-        let px = f64::from(self.output.left) + f64::from(x) / 65535.0 * ow;
-        let py = f64::from(self.output.top) + f64::from(y) / 65535.0 * oh;
+        // The captured screen as it is *now*: resolution changes and display
+        // switches move it, and a stale rectangle sends clicks to the wrong place.
+        let o = super::capture::current_output_rect().unwrap_or(self.output);
+        let ow = f64::from(o.right - o.left);
+        let oh = f64::from(o.bottom - o.top);
+        let px = f64::from(o.left) + f64::from(x) / 65535.0 * ow;
+        let py = f64::from(o.top) + f64::from(y) / 65535.0 * oh;
         (px.round() as i32, py.round() as i32)
     }
 
@@ -92,8 +95,20 @@ impl SendInputInjector {
     /// virtual desktop). Used so a click carries its own position and lands
     /// right even if the preceding move was lost.
     fn to_absolute(&self, px: i32, py: i32) -> (i32, i32) {
-        let nx = f64::from(px - self.virt_x) / f64::from(self.virt_w) * 65535.0;
-        let ny = f64::from(py - self.virt_y) / f64::from(self.virt_h) * 65535.0;
+        // Live virtual-desktop size, for the same reason as above.
+        // SAFETY: GetSystemMetrics has no preconditions.
+        let (vx, vy, vw, vh) = unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        };
+        let (vx, vy, vw, vh) =
+            if vw > 0 && vh > 0 { (vx, vy, vw, vh) } else { (self.virt_x, self.virt_y, self.virt_w, self.virt_h) };
+        let nx = f64::from(px - vx) / f64::from(vw) * 65535.0;
+        let ny = f64::from(py - vy) / f64::from(vh) * 65535.0;
         (nx.round().clamp(0.0, 65535.0) as i32, ny.round().clamp(0.0, 65535.0) as i32)
     }
 
