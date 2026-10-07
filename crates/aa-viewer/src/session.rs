@@ -65,6 +65,7 @@ pub async fn run(
     .await
     .context_timeout()??;
     tracing::info!(?negotiated, "connected");
+    crate::discover::remember(host);
     // Now we know the codec, build the decoder for it.
     let decoder = decoder_factory(negotiated.codec)
         .map_err(|e| anyhow::anyhow!("no decoder for negotiated codec {:?}: {e}", negotiated.codec))?;

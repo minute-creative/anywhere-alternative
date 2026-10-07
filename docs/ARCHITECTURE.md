@@ -243,9 +243,19 @@ and the host swaps encoders on the capture thread via
 
 ### Discovery
 
-`ControlMessage::Discover` is broadcast by the viewer to 255.255.255.255:7700
-(and the /24 subnet broadcast); any host answers `Here { name }`. Same
-socket and port as streaming, so no extra listener or firewall rule.
+Three routes at once, first answer wins (`aa_platform::lan`, viewer
+`discover.rs`):
+1. **Beacon:** the host sends `Beacon { name, port }` every second on every
+   adapter: subnet broadcast (real netmask), all-ones broadcast and multicast
+   239.255.77.1, to UDP 7701. The viewer only listens, so the PC firewall's
+   handling of *incoming* broadcasts is irrelevant.
+2. **Ask:** `Discover` to every adapter's subnet broadcast + all-ones;
+   hosts answer `Here`.
+3. **Memory:** the last host that accepted us (`last-host` in the user's
+   app-data folder) is asked directly, and used outright if nothing answers.
+If macOS refuses the sends (Local Network privacy) the error says which
+setting to switch on. Test switches on the host: `AA_SIMULATE_FIREWALL`
+(ignore `Discover`), `AA_SIMULATE_NO_BEACON`.
 
 ## 7. Connectivity (stage 3)
 

@@ -72,6 +72,8 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
         drop(audio_tx);
     }
 
+    start_beacon(listen.port());
+
     let mut viewer: Option<Viewer> = None;
     let seq = Arc::new(SeqCounter::default());
     let fps = capabilities.max_fps;
@@ -142,6 +144,32 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
             }
         }
     }
+}
+
+/// Announce this PC on every network adapter once a second so viewers can
+/// find it without anyone typing an address (see `aa_platform::lan`).
+fn start_beacon(port: u16) {
+    // AA_SIMULATE_NO_BEACON: test switch, as if the router filtered them.
+    if std::env::var_os("AA_SIMULATE_NO_BEACON").is_some() {
+        return;
+    }
+    let name = gethostname::gethostname().to_string_lossy().into_owned();
+    let payload = ControlMessage::Beacon { name, port }.encode();
+    let mut out = BytesMut::with_capacity(wire::HEADER_LEN + payload.len());
+    Header { kind: Kind::Control, flags: 0, seq: 0, frame_id: 0, slice_index: 0, slice_count: 1 }.write(&mut out);
+    out.extend_from_slice(&payload);
+    let _ = std::thread::Builder::new().name("aa-beacon".into()).spawn(move || {
+        let mut warned = false;
+        loop {
+            let errors = aa_platform::lan::send_everywhere(&out, aa_platform::lan::BEACON_PORT, true);
+            if !errors.is_empty() && !warned {
+                tracing::warn!("discovery beacon could not go out everywhere: {}", errors.join("; "));
+                warned = true;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+    tracing::info!("announcing this PC on the local network");
 }
 
 /// Send what was copied on this PC (if a viewer is connected; otherwise the
@@ -253,6 +281,9 @@ async fn handle_packet(
                 // Discovery answers come from any state, even mid-session:
                 // a second Mac asking "who's there" should still learn our
                 // name (it will be told we're busy when it says Hello).
+                // AA_SIMULATE_FIREWALL: test switch that drops discovery
+                // questions like a PC firewall would (beacons still go out).
+                ControlMessage::Discover if std::env::var_os("AA_SIMULATE_FIREWALL").is_some() => {}
                 ControlMessage::Discover => {
                     let name = gethostname::gethostname().to_string_lossy().into_owned();
                     send_control(socket, from, &ControlMessage::Here { name }, seq).await?;

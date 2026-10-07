@@ -1,17 +1,21 @@
 //! Finding the host without typing its address.
 //!
 //! Home routers hand out a fresh address whenever a machine reconnects, so
-//! "192.168.1.3" is true for a day and wrong the next. Instead the viewer
-//! broadcasts a tiny `Discover` message to the whole local network on the
-//! host's normal port, and every host answers with its computer name. No
-//! extra port, no extra firewall rule, no service to install: the host is
-//! already listening there.
+//! "192.168.1.3" is true for a day and wrong the next. The viewer finds the
+//! host three ways at once and takes whichever answers:
 //!
-//! Why not mDNS/Bonjour: it is the "proper" answer but needs a resolver on
-//! both sides and a multicast group; for a LAN with a handful of machines a
-//! broadcast on a port we already own does the same job in 60 lines.
+//! 1. **Listen for the host's beacon** (`aa_platform::lan`): the host
+//!    announces itself every second by broadcast *and* multicast on every
+//!    adapter. Listening needs nothing to get through the PC's firewall.
+//! 2. **Ask**: broadcast `Discover` on every adapter's own subnet (from its
+//!    real netmask) plus the all-ones broadcast; hosts answer `Here`.
+//! 3. **Ask the last host directly** at the address that worked last time.
+//!
+//! The first version only did (2) on one guessed subnet, and on the owner's
+//! network nothing answered.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use aa_core::control::ControlMessage;
@@ -21,9 +25,10 @@ use tokio::net::UdpSocket;
 
 /// The host's default port; discovery uses the same one.
 pub const DEFAULT_PORT: u16 = 7700;
-/// How long to listen for answers. Hosts reply within a millisecond; the
-/// wait is for Wi-Fi, which can hold a broadcast for a while.
-const LISTEN: Duration = Duration::from_millis(1500);
+/// Longest we listen. Beacons come every second, so 2.5 s hears at least two.
+const LISTEN: Duration = Duration::from_millis(2500);
+/// Once something answered, wait this much longer for other hosts.
+const AFTER_FIRST: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
@@ -31,69 +36,130 @@ pub struct Found {
     pub addr: SocketAddr,
 }
 
-/// Broadcast and collect every host that answers, nearest first.
+/// Where the last good host address is kept.
+fn memory_file() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"));
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let base = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"));
+    base.map(|b| b.join("AnywhereAlternative").join("last-host"))
+}
+
+/// Remember a host that accepted us, to ask it first next time.
+pub fn remember(addr: SocketAddr) {
+    if let Some(path) = memory_file() {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, addr.to_string());
+    }
+}
+
+fn remembered() -> Option<SocketAddr> {
+    std::fs::read_to_string(memory_file()?).ok()?.trim().parse().ok()
+}
+
+fn control_datagram(msg: &ControlMessage) -> Bytes {
+    let payload = msg.encode();
+    let mut out = BytesMut::with_capacity(wire::HEADER_LEN + payload.len());
+    Header {
+        kind: Kind::Control,
+        flags: 0,
+        seq: SeqCounter::default().take(),
+        frame_id: 0,
+        slice_index: 0,
+        slice_count: 1,
+    }
+    .write(&mut out);
+    out.extend_from_slice(&payload);
+    out.freeze()
+}
+
+/// macOS refuses local-network traffic from apps the user hasn't allowed
+/// (System Settings → Privacy & Security → Local Network) with "no route to
+/// host" or "permission denied".
+fn looks_like_local_network_block(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(65 | 13 | 1))
+}
+
+/// Ask and listen; return every host heard, in the order heard.
 pub async fn find_hosts(port: u16) -> anyhow::Result<Vec<Found>> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
-    let seq = SeqCounter::default();
+    let beacons = match aa_platform::lan::beacon_listener().and_then(UdpSocket::from_std) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::debug!("not listening for beacons ({e}); asking only");
+            None
+        }
+    };
 
-    let payload = ControlMessage::Discover.encode();
-    let mut out = BytesMut::with_capacity(wire::HEADER_LEN + payload.len());
-    Header { kind: Kind::Control, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }
-        .write(&mut out);
-    out.extend_from_slice(&payload);
-    let out = out.freeze();
-
-    // The all-ones broadcast reaches every interface; the subnet broadcast
-    // is a fallback for routers that drop the former.
-    let mut targets = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), port)];
-    if let Some(local) = local_ipv4().await {
-        let [a, b, c, _] = local.octets();
-        targets.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(a, b, c, 255)), port));
+    let ask = control_datagram(&ControlMessage::Discover);
+    let mut targets: Vec<SocketAddr> =
+        aa_platform::lan::ipv4_interfaces().iter().map(|i| SocketAddr::new(IpAddr::V4(i.broadcast), port)).collect();
+    targets.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), port));
+    if let Some(last) = remembered() {
+        targets.push(last);
     }
 
     let mut found: Vec<Found> = Vec::new();
+    let mut blocked = false;
     let mut buf = vec![0u8; wire::MAX_DATAGRAM * 2];
-    let deadline = tokio::time::Instant::now() + LISTEN;
+    let mut beacon_buf = vec![0u8; wire::MAX_DATAGRAM * 2];
+    let mut deadline = tokio::time::Instant::now() + LISTEN;
     let mut resend = tokio::time::interval(Duration::from_millis(400));
 
     loop {
         tokio::select! {
             _ = resend.tick() => {
                 for t in &targets {
-                    if let Err(e) = socket.send_to(&out, t).await {
+                    if let Err(e) = socket.send_to(&ask, t).await {
+                        blocked |= looks_like_local_network_block(&e);
                         tracing::debug!("discover send to {t}: {e}");
                     }
                 }
             }
             recv = socket.recv_from(&mut buf) => {
                 let (n, from) = recv?;
-                let Ok(packet) = Packet::parse(Bytes::copy_from_slice(&buf[..n])) else { continue };
-                if packet.header.kind != Kind::Control {
-                    continue;
+                if let Some(ControlMessage::Here { name }) = parse(&buf[..n]) {
+                    add(&mut found, &mut deadline, name, from, "answered");
                 }
-                if let Ok(ControlMessage::Here { name }) = ControlMessage::decode(&packet.payload) {
-                    if !found.iter().any(|f| f.addr == from) {
-                        tracing::info!(%from, name, "found host");
-                        found.push(Found { name, addr: from });
+            }
+            recv = async { beacons.as_ref().expect("guarded").recv_from(&mut beacon_buf).await }, if beacons.is_some() => {
+                if let Ok((n, from)) = recv {
+                    if let Some(ControlMessage::Beacon { name, port }) = parse(&beacon_buf[..n]) {
+                        add(&mut found, &mut deadline, name, SocketAddr::new(from.ip(), port), "announced");
                     }
                 }
             }
             () = tokio::time::sleep_until(deadline) => break,
         }
     }
+    if found.is_empty() && blocked {
+        anyhow::bail!(
+            "macOS is blocking local network access for this app. Open System Settings → Privacy & Security → \
+             Local Network, switch on Terminal (or the app you run aa-viewer from), then try again"
+        );
+    }
     Ok(found)
 }
 
-/// Our own LAN address, learned by asking the OS which interface it would
-/// use to reach the internet. Nothing is actually sent.
-async fn local_ipv4() -> Option<Ipv4Addr> {
-    let probe = UdpSocket::bind("0.0.0.0:0").await.ok()?;
-    probe.connect("8.8.8.8:53").await.ok()?;
-    match probe.local_addr().ok()?.ip() {
-        IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => Some(v4),
-        _ => None,
+fn parse(datagram: &[u8]) -> Option<ControlMessage> {
+    let packet = Packet::parse(Bytes::copy_from_slice(datagram)).ok()?;
+    (packet.header.kind == Kind::Control).then(|| ControlMessage::decode(&packet.payload).ok()).flatten()
+}
+
+fn add(found: &mut Vec<Found>, deadline: &mut tokio::time::Instant, name: String, addr: SocketAddr, how: &str) {
+    if found.iter().any(|f| f.addr == addr) {
+        return;
     }
+    tracing::info!(%addr, name, how, "found host");
+    if found.is_empty() {
+        *deadline = (*deadline).min(tokio::time::Instant::now() + AFTER_FIRST);
+    }
+    found.push(Found { name, addr });
 }
 
 /// Turn whatever the user typed into an address: a full `ip:port`, a bare
@@ -108,7 +174,18 @@ pub async fn resolve(input: Option<&str>) -> anyhow::Result<SocketAddr> {
         }
     }
     tracing::info!("looking for hosts on the local network…");
-    let hosts = find_hosts(DEFAULT_PORT).await?;
+    let hosts = match find_hosts(DEFAULT_PORT).await {
+        Ok(h) if h.is_empty() && input.is_none() => {
+            // Nothing answered or announced. If a PC accepted us before,
+            // its address is still the best bet (most routers keep it).
+            if let Some(last) = remembered() {
+                tracing::info!(addr = %last, "nothing answered; trying the PC that worked last time");
+                return Ok(last);
+            }
+            h
+        }
+        other => other?,
+    };
     let wanted = input.map(str::to_ascii_lowercase);
     let pick = match &wanted {
         Some(w) => hosts.iter().find(|h| h.name.to_ascii_lowercase().contains(w)),

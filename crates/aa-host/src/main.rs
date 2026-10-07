@@ -164,8 +164,10 @@ async fn main() -> anyhow::Result<()> {
 /// 2 s, so a mock session exercises clipboard sharing end to end.
 fn start_test_clipboard(side: &'static str) {
     std::thread::spawn(move || {
-        for n in 1u32.. {
+        let mut n = 0u32;
+        loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
+            n = n.wrapping_add(1);
             aa_platform::mock::test_clipboard()
                 .copy(aa_platform::clipboard::ClipItem::Text(format!("{side} clip {n}")));
         }

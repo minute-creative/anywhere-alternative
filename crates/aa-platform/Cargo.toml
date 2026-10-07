@@ -19,6 +19,9 @@ openh264.workspace = true
 opus.workspace = true
 # Clipboard images travel as PNG (pure Rust, so it builds everywhere).
 png = "0.18"
+# Every network adapter with its broadcast address, for LAN discovery.
+if-addrs = "0.15"
+socket2 = { workspace = true, features = ["all"] }
 
 # Real backends are added per stage. Each one is its own module behind
 # `#[cfg(target_os)]` and, where it needs a vendor SDK, its own feature flag.

@@ -27,6 +27,7 @@ use bytes::Bytes;
 pub mod audio;
 pub mod clipboard;
 pub mod hid_scancode;
+pub mod lan;
 pub mod mock;
 pub mod sw;
 

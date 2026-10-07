@@ -37,6 +37,7 @@ dependencies = [
  "arboard",
  "bytes",
  "cpal",
+ "if-addrs",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
  "objc2-core-media",
@@ -45,6 +46,7 @@ dependencies = [
  "openh264",
  "opus",
  "png",
+ "socket2",
  "thiserror 2.0.21",
  "tracing",
  "windows",
@@ -1107,6 +1109,16 @@ name = "hermit-abi"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
+
+[[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "image"

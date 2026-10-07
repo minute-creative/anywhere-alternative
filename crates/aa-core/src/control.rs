@@ -30,6 +30,10 @@ pub enum ControlMessage {
     Discover,
     /// Host → viewer: I am, and this is my name. Sent to whoever asked.
     Here { name: String },
+    /// Host → whole LAN, every second, unasked: "I'm here, connect on
+    /// `port`". The viewer only listens, so this works even when the PC's
+    /// firewall drops incoming broadcasts (outgoing ones are allowed).
+    Beacon { name: String, port: u16 },
 }
 
 impl ControlMessage {
