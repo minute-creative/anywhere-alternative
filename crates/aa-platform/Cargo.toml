@@ -73,6 +73,9 @@ windows = { version = "0.62", features = [
     "Win32_System_Variant",
     "Win32_System_DataExchange",
 ] }
+# Virtual Xbox 360 / DualShock 4 controllers through the ViGEmBus driver
+# (installed once on the PC; see windows/gamepad.rs).
+vigem-client = { version = "0.1.4", features = ["unstable_ds4", "unstable_xtarget_notification"] }
 # The `#[implement]` macro expands to `windows_core::` paths, so the crate
 # must be a direct dependency even though we only use it through `windows`.
 windows-core = "0.62"

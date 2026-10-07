@@ -53,7 +53,7 @@ pub fn probe_capabilities() -> Capabilities {
         // the host caps this at its own screen's refresh rate.
         max_fps: aa_core::capability::MAX_FPS,
         color_ranges: vec![ColorRange::Sdr],
-        has_gamepad: false,
+        has_gamepad: true,
         can_emulate_gamepad: false,
     }
 }

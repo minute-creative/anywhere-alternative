@@ -227,6 +227,12 @@ pub fn input_thread(
     while let Some(ev) = rx.blocking_recv() {
         let r = match (ev, gamepad.as_mut()) {
             (InputEvent::Gamepad { slot, state }, Some(pad)) => pad.update(slot, state),
+            (InputEvent::GamepadAttach { slot, kind }, Some(pad)) => pad.attach(slot, kind),
+            (InputEvent::GamepadDetach { slot }, Some(pad)) => pad.detach(slot),
+            (
+                InputEvent::Gamepad { .. } | InputEvent::GamepadAttach { .. } | InputEvent::GamepadDetach { .. },
+                None,
+            ) => Ok(()),
             (ev, _) => injector.inject(ev),
         };
         if let Err(e) = r {

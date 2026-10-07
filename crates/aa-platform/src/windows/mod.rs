@@ -19,6 +19,7 @@ pub mod audio;
 pub mod capture;
 pub mod convert;
 pub mod encoder;
+pub mod gamepad;
 pub mod input;
 
 use aa_core::capability::Capabilities;
@@ -87,6 +88,17 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
     codecs.dedup();
 
     let input = input::SendInputInjector::new(desktop_rect)?;
+    let gamepad: Option<Box<dyn crate::VirtualGamepad>> = match gamepad::ViGEmPads::new() {
+        Ok(p) => {
+            tracing::info!("controllers ready (ViGEmBus)");
+            Some(Box::new(p))
+        }
+        Err(e) => {
+            tracing::warn!("{e}");
+            None
+        }
+    };
+    let can_emulate_gamepad = gamepad.is_some();
     let audio: Option<Box<dyn crate::audio::AudioCapture>> = match audio::WasapiLoopback::new() {
         Ok(a) => {
             if a.tap() == audio::Tap::Endpoint {
@@ -111,7 +123,7 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
         encoder,
         encoder_factory,
         input: Box::new(input),
-        gamepad: None,
+        gamepad,
         audio,
         clipboard: crate::clipboard::system(),
         speaker,
@@ -121,7 +133,7 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
             max_fps: fps,
             color_ranges: vec![ColorRange::Sdr],
             has_gamepad: false,
-            can_emulate_gamepad: false,
+            can_emulate_gamepad,
         },
     })
 }
@@ -186,7 +198,7 @@ pub fn viewer_backends() -> Result<ViewerBackends> {
             max_resolution: Resolution::new(3840, 2160),
             max_fps: aa_core::capability::MAX_FPS,
             color_ranges: vec![ColorRange::Sdr],
-            has_gamepad: false,
+            has_gamepad: true,
             can_emulate_gamepad: false,
         },
     })

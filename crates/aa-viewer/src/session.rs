@@ -77,6 +77,9 @@ pub async fn run(
     .context_timeout()??;
     tracing::info!(?negotiated, "connected");
     crate::discover::remember(host);
+    if !negotiated.gamepad {
+        tracing::info!("controllers won't reach the host: it has no virtual controller driver (ViGEmBus on Windows)");
+    }
     // Now we know the codec, build the decoder for it.
     let decoder = decoder_factory(negotiated.codec)
         .map_err(|e| anyhow::anyhow!("no decoder for negotiated codec {:?}: {e}", negotiated.codec))?;
@@ -208,7 +211,7 @@ pub async fn run(
                                     }
                                     ViewerCommand::SetMic(on) => set_mic(&mut mic, on),
                                     ViewerCommand::Quit => {
-                                        send_input(&socket, &batch, &seq).await?;
+                                        send_input(&socket, &batch, &seq, negotiated.gamepad).await?;
                                         send_control(&socket, &ControlMessage::Bye, &seq).await?;
                                         return Ok(());
                                     }
@@ -221,7 +224,7 @@ pub async fn run(
                                 break;
                             }
                         }
-                        send_input(&socket, &batch, &seq).await?;
+                        send_input(&socket, &batch, &seq, negotiated.gamepad).await?;
                     }
                     Some(ViewerCommand::SetMaxBitrate(kbps)) => {
                         send_control(&socket, &ControlMessage::SetMaxBitrate { kbps }, &seq).await?;
@@ -317,7 +320,7 @@ pub async fn run(
 
                 if test_input {
                     wiggle = wiggle.wrapping_add(1000);
-                    send_input(&socket, &[InputEvent::MouseMoveAbs { x: wiggle, y: wiggle }], &seq).await?;
+                    send_input(&socket, &[InputEvent::MouseMoveAbs { x: wiggle, y: wiggle }], &seq, true).await?;
                 }
             }
 
@@ -381,11 +384,19 @@ async fn send_control(socket: &UdpSocket, msg: &ControlMessage, seq: &SeqCounter
     Ok(())
 }
 
-async fn send_input(socket: &UdpSocket, events: &[InputEvent], seq: &SeqCounter) -> anyhow::Result<()> {
+/// `pads_ok`: the host has virtual controllers. Without them controller
+/// events are dropped here rather than sent for nothing.
+async fn send_input(socket: &UdpSocket, events: &[InputEvent], seq: &SeqCounter, pads_ok: bool) -> anyhow::Result<()> {
+    let is_pad = |e: &&InputEvent| {
+        matches!(e, InputEvent::Gamepad { .. } | InputEvent::GamepadAttach { .. } | InputEvent::GamepadDetach { .. })
+    };
+    if !pads_ok && events.iter().all(|e| is_pad(&e)) {
+        return Ok(());
+    }
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN + events.len() * InputEvent::MAX_ENCODED);
     Header { kind: Kind::Input, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }
         .write(&mut out);
-    for ev in events {
+    for ev in events.iter().filter(|e| pads_ok || !is_pad(e)) {
         ev.encode(&mut out);
     }
     socket.send(&out).await?;

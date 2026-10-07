@@ -210,7 +210,10 @@ impl InputInjector for SendInputInjector {
                 };
                 INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki } }
             }
-            InputEvent::Gamepad { .. } | InputEvent::ReleaseAll => return Ok(()), // handled above / elsewhere
+            InputEvent::Gamepad { .. }
+            | InputEvent::GamepadAttach { .. }
+            | InputEvent::GamepadDetach { .. }
+            | InputEvent::ReleaseAll => return Ok(()), // handled above / elsewhere
         };
         Self::send(&[input])
     }

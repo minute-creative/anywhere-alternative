@@ -17,6 +17,7 @@ mod keymap;
 mod link;
 mod overlay;
 mod pacing;
+mod pads;
 mod session;
 mod udp;
 mod window;
@@ -79,6 +80,10 @@ struct Args {
     /// With --mock: send a test tone as the microphone.
     #[arg(long)]
     test_mic: bool,
+
+    /// With --mock: a pretend controller that moves and presses buttons.
+    #[arg(long)]
+    test_gamepad: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -100,6 +105,11 @@ fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
     let host: SocketAddr = runtime.block_on(discover::resolve(args.host.as_deref()))?;
     let (cmd_tx, cmd_rx) = link::command_channel();
+    if args.test_gamepad {
+        pads::spawn_test(cmd_tx.clone());
+    } else {
+        pads::spawn(cmd_tx.clone());
+    }
 
     if args.headless {
         // Keep the sender alive: a closed command channel means "window closed".

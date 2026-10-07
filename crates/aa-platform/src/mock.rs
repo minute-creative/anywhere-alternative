@@ -171,10 +171,42 @@ impl InputInjector for MockInput {
 #[derive(Debug, Default)]
 pub struct MockGamepad {
     pub last: Option<(u8, GamepadState)>,
+    updates: u64,
+    plugged: [Option<aa_core::input::GamepadKind>; 4],
 }
 
 impl VirtualGamepad for MockGamepad {
+    fn attach(&mut self, slot: u8, kind: aa_core::input::GamepadKind) -> Result<()> {
+        if let Some(p) = self.plugged.get_mut(usize::from(slot)) {
+            if *p != Some(kind) {
+                *p = Some(kind);
+                tracing::info!(slot, ?kind, "mock controller plugged in");
+            }
+        }
+        Ok(())
+    }
+
+    fn detach(&mut self, slot: u8) -> Result<()> {
+        if let Some(p) = self.plugged.get_mut(usize::from(slot)) {
+            if p.take().is_some() {
+                tracing::info!(slot, "mock controller unplugged");
+            }
+        }
+        Ok(())
+    }
+
     fn update(&mut self, slot: u8, state: GamepadState) -> Result<()> {
+        self.updates += 1;
+        if self.updates % 250 == 1 {
+            let x = crate::padmap::to_xinput(&state);
+            tracing::info!(
+                slot,
+                updates = self.updates,
+                buttons = format_args!("{:#06x}", x.buttons),
+                lx = x.thumb_lx,
+                "mock controller state"
+            );
+        }
         self.last = Some((slot, state));
         Ok(())
     }
@@ -190,7 +222,7 @@ fn mock_capabilities(res: Resolution, fps: u16) -> Capabilities {
         max_resolution: res,
         max_fps: fps,
         color_ranges: vec![ColorRange::Sdr],
-        has_gamepad: false,
+        has_gamepad: true,
         can_emulate_gamepad: true,
     }
 }

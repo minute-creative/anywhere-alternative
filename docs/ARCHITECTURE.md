@@ -245,6 +245,25 @@ once whole, and the sender repeats the transfer at 0.3/0.6/1/2 s until
 acked. Only copies made *after* connecting are shared. Limit 32 MB.
 Unencrypted on the LAN until stage 3 adds encryption.
 
+### Controllers
+
+Viewer (`pads.rs`): `gilrs` reads every controller (DualSense, DualShock,
+Xbox, Switch Pro…, USB or Bluetooth), slots 0–3 lowest-free. It sends
+`GamepadAttach { slot, kind }` (PlayStation if Sony vendor id / name),
+full `Gamepad` snapshots on change at 250 Hz, and `GamepadDetach`. Plug and
+unplug notices repeat every 2 s (unplug for 7 s) because input is plain
+UDP; the host treats repeats as no-ops. Snapshots, not button events, so a
+lost packet can never leave a button stuck.
+
+Host (Windows, `windows/gamepad.rs`): ViGEmBus via `vigem-client`.
+PlayStation → virtual DualShock 4 (PlayStation icons in games), anything
+else → Xbox 360. Mapping in `padmap.rs` (portable, tested). Xbox rumble is
+captured from the driver and queued (`poll_rumble`); sending it back to the
+viewer and playing it on the Mac is not built yet. Without ViGEmBus the host
+offers no gamepad and the viewer drops controller events with a log line.
+ViGEm cannot emulate a DualSense, so adaptive triggers/haptics/gyro don't
+carry over. `--test-gamepad` on a mock viewer drives a pretend pad.
+
 ### Codec choice
 
 `Codec::ALL` is preference order (AV1, HEVC, H.264); `negotiate` takes the

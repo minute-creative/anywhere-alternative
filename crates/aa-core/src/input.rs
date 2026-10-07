@@ -67,6 +67,15 @@ pub mod gamepad_buttons {
     pub const DPAD_RIGHT: u32 = 1 << 15;
 }
 
+/// What a controller is, so the host can present the matching virtual pad
+/// (`PlayStation` button prompts for a `DualSense`, Xbox prompts otherwise).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GamepadKind {
+    Xbox = 0,
+    PlayStation = 1,
+}
+
 /// An input event from the viewer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
@@ -102,6 +111,15 @@ pub enum InputEvent {
         slot: u8,
         state: GamepadState,
     },
+    /// A controller was connected on the viewer: plug in a virtual one.
+    GamepadAttach {
+        slot: u8,
+        kind: GamepadKind,
+    },
+    /// The controller in `slot` was disconnected: unplug the virtual one.
+    GamepadDetach {
+        slot: u8,
+    },
     /// Release every key and mouse button the host believes is held. Sent
     /// when the viewer loses focus or disconnects, so nothing stays stuck.
     ReleaseAll,
@@ -123,6 +141,8 @@ mod tag {
     pub const KEY: u8 = 5;
     pub const GAMEPAD: u8 = 6;
     pub const RELEASE_ALL: u8 = 7;
+    pub const GAMEPAD_ATTACH: u8 = 8;
+    pub const GAMEPAD_DETACH: u8 = 9;
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -167,6 +187,15 @@ impl InputEvent {
                 out.put_u8(u8::from(pressed));
             }
             Self::ReleaseAll => out.put_u8(tag::RELEASE_ALL),
+            Self::GamepadAttach { slot, kind } => {
+                out.put_u8(tag::GAMEPAD_ATTACH);
+                out.put_u8(slot);
+                out.put_u8(kind as u8);
+            }
+            Self::GamepadDetach { slot } => {
+                out.put_u8(tag::GAMEPAD_DETACH);
+                out.put_u8(slot);
+            }
             Self::Gamepad { slot, state } => {
                 out.put_u8(tag::GAMEPAD);
                 out.put_u8(slot);
@@ -189,10 +218,11 @@ impl InputEvent {
         let t = buf.get_u8();
         let need = match t {
             tag::MOUSE_MOVE_ABS | tag::MOUSE_MOVE_REL | tag::MOUSE_SCROLL => 4,
-            tag::MOUSE_BUTTON => 2,
+            tag::MOUSE_BUTTON | tag::GAMEPAD_ATTACH => 2,
             tag::KEY => 3,
             tag::GAMEPAD => 15,
             tag::RELEASE_ALL => 0,
+            tag::GAMEPAD_DETACH => 1,
             other => return Err(InputDecodeError::UnknownTag(other)),
         };
         if buf.remaining() < need {
@@ -213,6 +243,16 @@ impl InputEvent {
                 Self::Key { hid_usage, pressed }
             }
             tag::RELEASE_ALL => Self::ReleaseAll,
+            tag::GAMEPAD_ATTACH => {
+                let slot = buf.get_u8();
+                let kind = match buf.get_u8() {
+                    0 => GamepadKind::Xbox,
+                    1 => GamepadKind::PlayStation,
+                    _ => return Err(InputDecodeError::InvalidValue),
+                };
+                Self::GamepadAttach { slot, kind }
+            }
+            tag::GAMEPAD_DETACH => Self::GamepadDetach { slot: buf.get_u8() },
             tag::GAMEPAD => {
                 let slot = buf.get_u8();
                 let state = GamepadState {
@@ -253,6 +293,8 @@ mod tests {
         round_trip(InputEvent::MouseScroll { dx: 0, dy: -120 });
         round_trip(InputEvent::Key { hid_usage: 0x04, pressed: false });
         round_trip(InputEvent::ReleaseAll);
+        round_trip(InputEvent::GamepadAttach { slot: 2, kind: GamepadKind::PlayStation });
+        round_trip(InputEvent::GamepadDetach { slot: 3 });
         round_trip(InputEvent::Gamepad {
             slot: 1,
             state: GamepadState {

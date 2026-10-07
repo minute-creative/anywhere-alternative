@@ -29,6 +29,7 @@ pub mod clipboard;
 pub mod hid_scancode;
 pub mod lan;
 pub mod mock;
+pub mod padmap;
 pub mod playout;
 pub mod sw;
 
@@ -130,6 +131,14 @@ pub trait InputInjector: Send {
 
 /// Presents a virtual game controller to the host OS.
 pub trait VirtualGamepad: Send {
+    /// A controller appeared on the viewer: plug in a matching virtual one.
+    fn attach(&mut self, _slot: u8, _kind: aa_core::input::GamepadKind) -> Result<()> {
+        Ok(())
+    }
+    /// The viewer's controller went away: unplug its virtual twin.
+    fn detach(&mut self, _slot: u8) -> Result<()> {
+        Ok(())
+    }
     fn update(&mut self, slot: u8, state: aa_core::input::GamepadState) -> Result<()>;
     /// Poll for rumble the game sent to the virtual pad, to forward to the viewer.
     fn poll_rumble(&mut self) -> Result<Option<Rumble>>;

@@ -28,5 +28,11 @@ egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true
 
+# Game controllers (DualSense, DualShock, Xbox, Switch Pro, most others;
+# USB or Bluetooth). Mac/Windows only: on Linux it needs libudev, and we
+# never ship a Linux viewer.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+gilrs = "0.11"
+
 [lints]
 workspace = true
