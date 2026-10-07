@@ -142,13 +142,12 @@ mod real {
             return;
         }
         snd.last_haptics = Instant::now();
-        match usb_card {
-            Some(c) => c.push_haptics(&snd.pcm),
-            None => {
-                let (l, r) = ds5::haptics_to_rumble(&snd.pcm);
-                snd.rumbling = l > 0 || r > 0;
-                let _ = o.to_device.send(ds5::rumble_output(l, r));
-            }
+        if let Some(c) = usb_card {
+            c.push_haptics(&snd.pcm);
+        } else {
+            let (l, r) = ds5::haptics_to_rumble(&snd.pcm);
+            snd.rumbling = l > 0 || r > 0;
+            let _ = o.to_device.send(ds5::rumble_output(l, r));
         }
     }
 
