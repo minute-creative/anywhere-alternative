@@ -51,7 +51,7 @@ pub fn probe_capabilities() -> Capabilities {
         max_resolution: Resolution::new(3840, 2160),
         // Up to the fastest Mac displays (ProMotion 120 Hz, external 240 Hz);
         // the host caps this at its own screen's refresh rate.
-        max_fps: 240,
+        max_fps: aa_core::capability::MAX_FPS,
         color_ranges: vec![ColorRange::Sdr],
         has_gamepad: false,
         can_emulate_gamepad: false,

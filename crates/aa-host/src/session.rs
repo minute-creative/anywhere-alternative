@@ -302,7 +302,7 @@ async fn sender_task(
             }
         };
         let Some(dest) = *video_dest.lock().expect("dest") else { continue };
-        let slices = match wire::slice_frame(&frame.data, frame.meta.frame_id, frame.meta.is_keyframe, &seq) {
+        let slices = match wire::slice_frame_with_fec(&frame.data, frame.meta.frame_id, frame.meta.is_keyframe, &seq) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("frame too large to slice: {e}");

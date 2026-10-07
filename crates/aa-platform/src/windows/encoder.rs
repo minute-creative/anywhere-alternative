@@ -11,8 +11,8 @@
 //! Pipeline per frame:
 //!
 //! ```text
-//!  capture texture ──CopyResource──► NV12? no: BGRA texture (the MFT
-//!  converts internally on Intel/AMD/NVIDIA) ──► IMFSample ──► ProcessInput
+//!  capture texture ──CopyResource──► our BGRA texture ──video processor──►
+//!  NV12 (BT.709 video range, convert.rs) ──► IMFSample ──► ProcessInput
 //!  ──► drain ProcessOutput ──► Annex-B bitstream
 //! ```
 //!
@@ -118,6 +118,8 @@ pub struct MfEncoder {
     /// A texture we own that the encoder reads from; capture copies into it
     /// so the encoder never holds the desktop duplication frame hostage.
     input_tex: ID3D11Texture2D,
+    /// BGRA->NV12 with explicit colour maths; `None` = encoder takes BGRA.
+    converter: Option<super::convert::NvConverter>,
     input_id: u32,
     output_id: u32,
     output_provides_samples: bool,
@@ -294,9 +296,40 @@ impl MfEncoder {
             let _ = out_type.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
             mft.SetOutputType(output_id, &out_type, 0).map_err(|e| win(e, "SetOutputType"))?;
 
-            // --- input type: prefer BGRA so the GPU does the colour convert ---
+            // --- our input texture ------------------------------------------
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: res.width,
+                Height: res.height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut tex = None;
+            device.CreateTexture2D(&desc, None, Some(&mut tex)).map_err(|e| win(e, "CreateTexture2D(input)"))?;
+            let input_tex = tex.ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("no input texture")))?;
+
+            // Our own BGRA->NV12 conversion with explicit BT.709 video range
+            // (see convert.rs). If the GPU can't, fall back to handing the
+            // encoder BGRA and letting the driver convert.
+            let converter = match super::convert::NvConverter::new(device, context, &input_tex, res, fps) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::warn!("GPU colour converter unavailable ({e}); encoder will convert BGRA itself");
+                    None
+                }
+            };
+
+            // --- input type: NV12 from our converter, else BGRA ---
+
             let mut chosen_input = None;
-            for sub in [MFVideoFormat_ARGB32, MFVideoFormat_NV12] {
+            let candidates: &[GUID] =
+                if converter.is_some() { &[MFVideoFormat_NV12, MFVideoFormat_ARGB32] } else { &[MFVideoFormat_ARGB32] };
+            for &sub in candidates {
                 let in_type = MFCreateMediaType().map_err(|e| win(e, "MFCreateMediaType"))?;
                 in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| win(e, "major"))?;
                 in_type.SetGUID(&MF_MT_SUBTYPE, &sub).map_err(|e| win(e, "subtype"))?;
@@ -307,9 +340,14 @@ impl MfEncoder {
                 in_type
                     .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
                     .map_err(|e| win(e, "interlace"))?;
-                // Desktop pixels are full-range sRGB. Say so, or the encoder
-                // assumes limited range and blacks come out grey.
-                let _ = in_type.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_0_255.0 as u32);
+                if sub == MFVideoFormat_NV12 {
+                    // Our converter's output: BT.709, video range.
+                    let _ = in_type.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32);
+                    let _ = in_type.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
+                } else {
+                    // Desktop pixels are full-range sRGB.
+                    let _ = in_type.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_0_255.0 as u32);
+                }
                 let _ = in_type.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32);
                 let _ = in_type.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32);
                 if mft.SetInputType(input_id, &in_type, 0).is_ok() {
@@ -319,13 +357,12 @@ impl MfEncoder {
             }
             let input_fmt = chosen_input
                 .ok_or_else(|| PlatformError::Unavailable(format!("{name} accepts neither BGRA nor NV12")))?;
-            if input_fmt == MFVideoFormat_NV12 {
-                // Stage-5 follow-up: a tiny compute shader for BGRA→NV12. Until
-                // then this encoder can't take our BGRA capture.
-                return Err(PlatformError::Unavailable(format!(
-                    "{name} wants NV12 input; BGRA→NV12 conversion not written yet"
-                )));
-            }
+            let converter = if input_fmt == MFVideoFormat_NV12 { converter } else { None };
+            tracing::info!(
+                encoder = %name,
+                input = if converter.is_some() { "NV12 (our BT.709 video-range conversion)" } else { "BGRA (driver converts)" },
+                "encoder colour path"
+            );
 
             // --- codec tuning (best effort; not every driver supports every knob)
             let codec_api = mft.cast::<ICodecAPI>().ok();
@@ -348,23 +385,6 @@ impl MfEncoder {
             let out_info = mft.GetOutputStreamInfo(output_id).map_err(|e| win(e, "GetOutputStreamInfo"))?;
             let output_provides_samples = out_info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
 
-            // --- our input texture ------------------------------------------
-            let desc = D3D11_TEXTURE2D_DESC {
-                Width: res.width,
-                Height: res.height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
-            };
-            let mut tex = None;
-            device.CreateTexture2D(&desc, None, Some(&mut tex)).map_err(|e| win(e, "CreateTexture2D(input)"))?;
-            let input_tex = tex.ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("no input texture")))?;
-
             mft.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0).map_err(|e| win(e, "BEGIN_STREAMING"))?;
             mft.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0).map_err(|e| win(e, "START_OF_STREAM"))?;
             let events: IMFMediaEventGenerator = mft.cast().map_err(|e| win(e, "IMFMediaEventGenerator"))?;
@@ -377,6 +397,7 @@ impl MfEncoder {
                 device: device.clone(),
                 context: context.clone(),
                 input_tex,
+                converter,
                 input_id,
                 output_id,
                 output_provides_samples,
@@ -542,7 +563,14 @@ impl VideoEncoder for MfEncoder {
                 }
             }
 
-            let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &self.input_tex, 0, false)
+            let encoder_input = match &self.converter {
+                Some(c) => {
+                    c.convert()?;
+                    c.output()
+                }
+                None => &self.input_tex,
+            };
+            let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, encoder_input, 0, false)
                 .map_err(|e| win(e, "MFCreateDXGISurfaceBuffer"))?;
             let sample = MFCreateSample().map_err(|e| win(e, "MFCreateSample"))?;
             sample.AddBuffer(&buffer).map_err(|e| win(e, "AddBuffer"))?;

@@ -17,6 +17,7 @@
 
 pub mod audio;
 pub mod capture;
+pub mod convert;
 pub mod encoder;
 pub mod input;
 
@@ -181,7 +182,7 @@ pub fn viewer_backends() -> Result<ViewerBackends> {
         capabilities: Capabilities {
             codecs: vec![Codec::H264],
             max_resolution: Resolution::new(3840, 2160),
-            max_fps: 240,
+            max_fps: aa_core::capability::MAX_FPS,
             color_ranges: vec![ColorRange::Sdr],
             has_gamepad: false,
             can_emulate_gamepad: false,

@@ -50,6 +50,10 @@ pub enum Kind {
     /// Round-trip measurement.
     Ping = 7,
     Pong = 8,
+    /// Parity for a video frame (forward error correction); see
+    /// [`slice_frame_with_fec`]. `slice_index` is the stripe, `slice_count`
+    /// the number of parity packets for this frame.
+    VideoFec = 9,
 }
 
 impl Kind {
@@ -63,6 +67,7 @@ impl Kind {
             6 => Self::Nack,
             7 => Self::Ping,
             8 => Self::Pong,
+            9 => Self::VideoFec,
             _ => return None,
         })
     }
@@ -197,6 +202,72 @@ pub fn slice_frame(frame: &Bytes, frame_id: u32, keyframe: bool, seq: &SeqCounte
     Ok(out)
 }
 
+/// Parity packets per data packet. 10%: at 0.5-1% random Wi-Fi loss a
+/// frame of a few dozen slices almost never loses two in the same stripe,
+/// and the cost (8 Mbps at an 80 Mbps stream) is far cheaper than a frozen
+/// frame plus a recovery keyframe.
+pub const FEC_RATIO: f64 = 0.10;
+
+/// How many parity packets a frame of `data_slices` gets: 10%, at least 1.
+pub fn parity_count(data_slices: usize) -> usize {
+    ((data_slices as f64 * FEC_RATIO).ceil() as usize).clamp(1, data_slices.max(1))
+}
+
+/// XOR parity for one stripe: data slices `k, k+G, k+2G, ...`.
+///
+/// Why interleaved stripes rather than consecutive groups: Wi-Fi tends to
+/// lose packets in short bursts. With stripes, a burst of up to G
+/// consecutive packets hits G *different* stripes, each of which can
+/// rebuild its one missing slice.
+///
+/// Payload layout: `[u16 xor of slice lengths][xor of zero-padded data]`.
+/// The length lets us rebuild a short last slice to its exact size.
+fn stripe_parity(slices: &[&[u8]], stripe: usize, stripes: usize) -> BytesMut {
+    let members = slices.iter().skip(stripe).step_by(stripes);
+    let width = members.clone().map(|s| s.len()).max().unwrap_or(0);
+    let mut out = BytesMut::zeroed(2 + width);
+    let mut len_xor = 0u16;
+    for m in members {
+        len_xor ^= m.len() as u16;
+        for (o, b) in out[2..].iter_mut().zip(m.iter()) {
+            *o ^= *b;
+        }
+    }
+    out[..2].copy_from_slice(&len_xor.to_be_bytes());
+    out
+}
+
+/// [`slice_frame`] plus FEC parity packets appended after the data.
+pub fn slice_frame_with_fec(
+    frame: &Bytes,
+    frame_id: u32,
+    keyframe: bool,
+    seq: &SeqCounter,
+) -> Result<Vec<Bytes>, WireError> {
+    let mut out = slice_frame(frame, frame_id, keyframe, seq)?;
+    let data: Vec<&[u8]> = out.iter().map(|d| &d[HEADER_LEN..]).collect();
+    let stripes = parity_count(data.len());
+    let flags = if keyframe { flags::KEYFRAME } else { 0 };
+    let mut parity = Vec::with_capacity(stripes);
+    for k in 0..stripes {
+        let payload = stripe_parity(&data, k, stripes);
+        let header = Header {
+            kind: Kind::VideoFec,
+            flags,
+            seq: seq.take(),
+            frame_id,
+            slice_index: k as u16,
+            slice_count: stripes as u16,
+        };
+        let mut buf = BytesMut::with_capacity(HEADER_LEN + payload.len());
+        header.write(&mut buf);
+        buf.extend_from_slice(&payload);
+        parity.push(buf.freeze());
+    }
+    out.extend(parity);
+    Ok(out)
+}
+
 /// A frame that has been fully received.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompleteFrame {
@@ -219,9 +290,52 @@ pub enum Reassembly {
 #[derive(Debug, Default)]
 struct PartialFrame {
     keyframe: bool,
+    /// Data slices in the frame; 0 until the first data slice arrives
+    /// (a parity packet can get here first).
     slice_count: u16,
     received: u16,
     slices: Vec<Option<Bytes>>,
+    /// FEC parity by stripe; empty until the first parity packet.
+    parity: Vec<Option<Bytes>>,
+}
+
+impl PartialFrame {
+    /// Rebuild every stripe that is missing exactly one data slice and has
+    /// its parity. Returns how many slices were recovered.
+    fn recover(&mut self) -> u16 {
+        let stripes = self.parity.len();
+        if stripes == 0 || self.slice_count == 0 {
+            return 0;
+        }
+        let mut recovered = 0;
+        for k in 0..stripes {
+            let Some(parity) = self.parity[k].clone() else { continue };
+            let members: Vec<usize> = (k..self.slices.len()).step_by(stripes).collect();
+            let missing: Vec<usize> = members.iter().copied().filter(|&i| self.slices[i].is_none()).collect();
+            if missing.len() != 1 || parity.len() < 2 {
+                continue;
+            }
+            let mut len = u16::from_be_bytes([parity[0], parity[1]]);
+            let mut buf = parity[2..].to_vec();
+            for &i in &members {
+                if let Some(d) = &self.slices[i] {
+                    len ^= d.len() as u16;
+                    for (o, b) in buf.iter_mut().zip(d.iter()) {
+                        *o ^= *b;
+                    }
+                }
+            }
+            let len = usize::from(len);
+            if len > buf.len() {
+                continue; // inconsistent parity; leave the frame to the NACK path
+            }
+            buf.truncate(len);
+            self.slices[missing[0]] = Some(Bytes::from(buf));
+            self.received += 1;
+            recovered += 1;
+        }
+        recovered
+    }
 }
 
 /// Rebuilds frames from slices, in arrival order, with no waiting.
@@ -238,6 +352,8 @@ pub struct Reassembler {
     last_delivered: Option<u32>,
     /// Frames abandoned since the last call to [`Self::take_abandoned`].
     abandoned: Vec<u32>,
+    /// Slices rebuilt from FEC parity since the stream started.
+    pub recovered: u64,
 }
 
 impl Reassembler {
@@ -246,31 +362,45 @@ impl Reassembler {
 
     pub fn push(&mut self, packet: Packet) -> Reassembly {
         let h = packet.header;
-        debug_assert_eq!(h.kind, Kind::Video);
+        debug_assert!(matches!(h.kind, Kind::Video | Kind::VideoFec));
 
         if self.last_delivered.is_some_and(|last| h.frame_id <= last) {
             return Reassembly::Stale;
         }
 
-        let pf = self.partial.entry(h.frame_id).or_insert_with(|| PartialFrame {
-            keyframe: h.flags & flags::KEYFRAME != 0,
-            slice_count: h.slice_count,
-            received: 0,
-            slices: vec![None; usize::from(h.slice_count)],
-        });
+        let pf = self
+            .partial
+            .entry(h.frame_id)
+            .or_insert_with(|| PartialFrame { keyframe: h.flags & flags::KEYFRAME != 0, ..PartialFrame::default() });
 
-        // A header that disagrees with earlier slices of the same frame is
-        // corruption or an attack; drop the packet rather than the frame.
-        if pf.slice_count != h.slice_count {
-            return Reassembly::Stale;
+        if h.kind == Kind::VideoFec {
+            if pf.parity.is_empty() {
+                pf.parity = vec![None; usize::from(h.slice_count)];
+            }
+            // Disagreeing headers within one frame: corruption; drop the packet.
+            if pf.parity.len() != usize::from(h.slice_count) {
+                return Reassembly::Stale;
+            }
+            pf.parity[usize::from(h.slice_index)] = Some(packet.payload);
+        } else {
+            if pf.slice_count == 0 {
+                pf.slice_count = h.slice_count;
+                pf.slices = vec![None; usize::from(h.slice_count)];
+            }
+            if pf.slice_count != h.slice_count {
+                return Reassembly::Stale;
+            }
+            let ix = usize::from(h.slice_index);
+            if pf.slices[ix].is_none() {
+                pf.slices[ix] = Some(packet.payload);
+                pf.received += 1;
+            }
         }
-        let ix = usize::from(h.slice_index);
-        if pf.slices[ix].is_none() {
-            pf.slices[ix] = Some(packet.payload);
-            pf.received += 1;
+        if pf.slice_count > 0 && pf.received < pf.slice_count {
+            self.recovered += u64::from(pf.recover());
         }
 
-        if pf.received == pf.slice_count {
+        if pf.slice_count > 0 && pf.received == pf.slice_count {
             let pf = self.partial.remove(&h.frame_id).expect("just inserted");
             let total: usize = pf.slices.iter().flatten().map(Bytes::len).sum();
             let mut data = BytesMut::with_capacity(total);
@@ -310,6 +440,68 @@ impl Reassembler {
 
 #[cfg(test)]
 mod tests {
+
+    fn fec_packets(len: usize, id: u32) -> (Bytes, Vec<Packet>) {
+        let frame: Bytes = (0..len).map(|i| (i * 7 + 3) as u8).collect::<Vec<u8>>().into();
+        let seq = SeqCounter::default();
+        let pkts = slice_frame_with_fec(&frame, id, false, &seq)
+            .unwrap()
+            .into_iter()
+            .map(|d| Packet::parse(d).unwrap())
+            .collect();
+        (frame, pkts)
+    }
+
+    fn deliver(r: &mut Reassembler, pkts: Vec<Packet>) -> Option<CompleteFrame> {
+        let mut done = None;
+        for p in pkts {
+            if let Reassembly::Complete(f) = r.push(p) {
+                done = Some(f);
+            }
+        }
+        done
+    }
+
+    #[test]
+    fn fec_rebuilds_any_single_lost_slice_including_the_short_last_one() {
+        let (frame, pkts) = fec_packets(MAX_PAYLOAD * 23 + 77, 1);
+        let data_slices = pkts.iter().filter(|p| p.header.kind == Kind::Video).count();
+        for lost in 0..data_slices {
+            let mut r = Reassembler::default();
+            let kept = pkts.iter().cloned().enumerate().filter(|(i, _)| *i != lost).map(|(_, p)| p).collect();
+            let got = deliver(&mut r, kept).unwrap_or_else(|| panic!("slice {lost} not recovered"));
+            assert_eq!(got.data, frame);
+        }
+    }
+
+    #[test]
+    fn fec_survives_a_burst_as_long_as_the_stripe_count() {
+        let (frame, pkts) = fec_packets(MAX_PAYLOAD * 40, 1);
+        let stripes = parity_count(40);
+        let mut r = Reassembler::default();
+        let kept =
+            pkts.into_iter().enumerate().filter(|(i, _)| !(10..10 + stripes).contains(i)).map(|(_, p)| p).collect();
+        assert_eq!(deliver(&mut r, kept).unwrap().data, frame);
+    }
+
+    #[test]
+    fn fec_cannot_fix_two_losses_in_one_stripe() {
+        let (_, pkts) = fec_packets(MAX_PAYLOAD * 20, 1);
+        let stripes = parity_count(20);
+        let mut r = Reassembler::default();
+        let kept = pkts.into_iter().enumerate().filter(|(i, _)| *i != 0 && *i != stripes).map(|(_, p)| p).collect();
+        assert!(deliver(&mut r, kept).is_none());
+    }
+
+    #[test]
+    fn fec_packet_arriving_first_is_fine() {
+        let (frame, mut pkts) = fec_packets(MAX_PAYLOAD * 5 + 1, 1);
+        pkts.rotate_right(1); // parity first
+        pkts.remove(3); // and lose a data slice
+        let mut r = Reassembler::default();
+        assert_eq!(deliver(&mut r, pkts).unwrap().data, frame);
+    }
+
     use super::*;
 
     #[test]

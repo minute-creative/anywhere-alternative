@@ -106,7 +106,7 @@ pub async fn run(
                 stats.loss.observe(packet.header.seq);
 
                 match packet.header.kind {
-                    Kind::Video => {
+                    Kind::Video | Kind::VideoFec => {
                         let fid = packet.header.frame_id;
                         if !frame_first_slice.is_some_and(|(id, _)| id == fid) {
                             frame_first_slice = Some((fid, Instant::now()));
@@ -224,6 +224,7 @@ pub async fn run(
                     assembly_ms = format_args!("{:.2}", stats.frame_assembly_ms.get().unwrap_or(0.0)),
                     loss = format_args!("{:.2}%", loss_1s * 100.0),
                     dropped = stats.frames_dropped,
+                    fec_fixed = reassembler.recovered,
                     gap_ms = format_args!("{:.1}/{:.1}/{:.1}", pace.p50_ms, pace.p99_ms, pace.max_ms),
                     stutters = format_args!("{}/{}", pace.stutters, pacing.total_stutters),
                     audio = format_args!("{}f/{}c buf={}ms under={}", audio.frames, audio.concealed, audio.buffer_ms(), audio.underruns()),

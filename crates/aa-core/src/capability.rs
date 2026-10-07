@@ -43,6 +43,10 @@ pub enum NegotiationError {
     NoCommonCodec,
 }
 
+/// Hard ceiling on stream frame rate. Past 300 the per-frame overhead
+/// (packet headers, encoder calls) grows faster than anyone can perceive.
+pub const MAX_FPS: u16 = 300;
+
 /// Pick the best setup both sides support.
 ///
 /// `host` describes the machine being streamed, `viewer` the one watching.
@@ -55,7 +59,7 @@ pub fn negotiate(host: &Capabilities, viewer: &Capabilities) -> Result<Negotiate
         .ok_or(NegotiationError::NoCommonCodec)?;
 
     let resolution = fit_within(host.max_resolution, viewer.max_resolution);
-    let fps = host.max_fps.min(viewer.max_fps).max(1);
+    let fps = host.max_fps.min(viewer.max_fps).clamp(1, MAX_FPS);
 
     let color_range =
         if host.color_ranges.contains(&ColorRange::HdrPq) && viewer.color_ranges.contains(&ColorRange::HdrPq) {
@@ -106,6 +110,12 @@ mod tests {
         let n = negotiate(&host, &viewer).unwrap();
         assert_eq!(n.codec, Codec::Hevc);
         assert_eq!(n.fps, 120);
+    }
+
+    #[test]
+    fn fps_is_capped_at_300() {
+        let n = negotiate(&caps(&[Codec::H264], 1920, 1080, 500), &caps(&[Codec::H264], 1920, 1080, 1000)).unwrap();
+        assert_eq!(n.fps, MAX_FPS);
     }
 
     #[test]

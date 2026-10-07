@@ -23,8 +23,9 @@ use windows::Win32::Foundation::{HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE,
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
-    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
@@ -88,20 +89,31 @@ impl DxgiCapture {
             let output1: IDXGIOutput1 = output.cast().map_err(|e| win(e, "IDXGIOutput1"))?;
             let out_desc = output.GetDesc().map_err(|e| win(e, "output GetDesc"))?;
 
+            // VIDEO_SUPPORT unlocks the GPU's video processor, which does our
+            // colour conversion (convert.rs). Retry without it on GPUs that
+            // refuse, and the encoder falls back to converting BGRA itself.
             let mut device = None;
             let mut context = None;
-            D3D11CreateDevice(
-                &adapter,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-            .map_err(|e| win(e, "D3D11CreateDevice"))?;
+            let mut created: windows::core::Result<()> = Ok(());
+            for flags in
+                [D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_CREATE_DEVICE_BGRA_SUPPORT]
+            {
+                created = D3D11CreateDevice(
+                    &adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    HMODULE::default(),
+                    flags,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                );
+                if created.is_ok() {
+                    break;
+                }
+            }
+            created.map_err(|e| win(e, "D3D11CreateDevice"))?;
             let device = device.ok_or_else(|| PlatformError::Unavailable("no D3D11 device".into()))?;
             let context = context.ok_or_else(|| PlatformError::Unavailable("no D3D11 context".into()))?;
 
@@ -117,7 +129,10 @@ impl DxgiCapture {
             let desc = dup.GetDesc();
             let res = Resolution::new(desc.ModeDesc.Width, desc.ModeDesc.Height);
             let rr = desc.ModeDesc.RefreshRate;
-            let refresh_hz = rr.Numerator.checked_div(rr.Denominator).map_or(60, |hz| hz.clamp(1, 1000) as u16);
+            // Rounded, so 59.94 Hz (60000/1001) reads as 60, and 143.9 as 144.
+            let refresh_hz = (rr.Numerator + rr.Denominator / 2)
+                .checked_div(rr.Denominator)
+                .map_or(60, |hz| hz.clamp(1, 1000) as u16);
 
             let staging = Self::make_staging(&device, res)?;
             let gpu_tex = if output_mode == Output::Gpu { Some(Self::make_gpu_tex(&device, res)?) } else { None };

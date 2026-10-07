@@ -201,6 +201,19 @@ relay later.
 
 ---
 
+## Day 4 — picture quality from simulation (2026-10-07)
+
+Owner reported washed-out colours, a pixelated picture, and wants 120+
+fps (PC panel supports 120 Hz+, currently set to 60).
+- Colour: our own BGRA→NV12 conversion on the GPU video processor with
+  explicit BT.709 video range (convert.rs); encoder header says the same.
+  Pending owner check of the Mac's `stream colour` line.
+- Pixelation: the simulation showed the bitrate controller collapsing to
+  2 Mbps under 0.5% random loss. Fixed by RTT-aware congestion detection,
+  higher start rate and a probe phase. Plus video FEC (10% XOR stripes).
+- fps: stream follows the PC refresh rate (rounded), capped at 300 in
+  negotiation; viewer advertises 300.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.

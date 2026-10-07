@@ -199,6 +199,27 @@ choices (all in `aa-core/src/audio.rs` and `aa-platform/src/audio.rs`):
 - **Playback:** `cpal` on the default output, Mac and Windows. Linux builds
   decode and count but have no player (ALSA headers aren't in CI).
 
+### Forward error correction (video)
+
+Each frame's slices are followed by `Kind::VideoFec` parity packets: 10%
+of the slice count, at least one. Parity *k* is the XOR of data slices
+k, k+G, k+2G… (G = parity count), prefixed with the XOR of their lengths so
+a short last slice rebuilds to its exact size. Interleaved stripes mean a
+burst of up to G consecutive losses hits G different stripes and is still
+fully recoverable. The reassembler rebuilds as soon as a stripe is missing
+exactly one slice and has its parity. Simulated Wi-Fi (0.5% loss + stalls,
+120 fps): dropped frames 110 → 10 over 20 s, stutters halved.
+
+### Colour path (Windows host)
+
+The capture is BGRA (full-range sRGB). The D3D11 video processor converts
+it to NV12 with the colour spaces stated explicitly (input
+`RGB_FULL_G22_NONE_P709`, output `YCBCR_STUDIO_G22_LEFT_P709`), and the
+encoder's output type says BT.709 video range. Header and pixels agree by
+construction instead of depending on what the driver does with BGRA. If
+the GPU has no video processor the encoder takes BGRA as before (logged as
+`encoder colour path`).
+
 ### Codec choice
 
 `Codec::ALL` is preference order (AV1, HEVC, H.264); `negotiate` takes the
@@ -273,6 +294,12 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
 - **windows-rs `PROPVARIANT` frees its payload on drop.** A `VT_BLOB`
   pointing at stack memory → `STATUS_HEAP_CORRUPTION` at exit of scope.
   Wrap in `ManuallyDrop` when the blob is borrowed, not owned.
+- **Random loss is not congestion.** Treating every lost packet as "link
+  full" walked the bitrate to the 2 Mbps floor on 0.5% Wi-Fi loss and kept
+  it there: blocky picture for no gain. Light loss now cuts only when RTT
+  sits above the session's quietest RTT (a queue is filling); 5%+ loss
+  always cuts. Sessions also start at 0.05 bpp and probe +50%/s until the
+  first real loss, so a clean LAN is sharp in ~4 s instead of ~30.
 - **A late packet is not two lost packets.** The loss tracker used to
   move its "expected next" back to a late packet's number, so everything
   after it counted as lost again. On a reordering link (5% of packets
@@ -310,6 +337,11 @@ far faster; this tests the transport and pacing, not the GPUs.
 | Wi-Fi (4±2 ms, 0.5% loss, 40 ms stall / 5 s) | 60 | 58.6 | 57 | 27 ms | 53 ms | 0.6% |
 | same | 120 | 117.4 | 111 | 18 ms | 44 ms | 0.8% |
 | bad Wi-Fi (8±6 ms, 2% loss, 80 ms stall / 2 s) | 120 | 111.6 | 103 | 24 ms | 84 ms | 2.4% |
+
+Controller + FEC rerun (same Wi-Fi link, 120 fps, 20 s): bitrate climbs
+to the 80 Mbps cap instead of collapsing to 2 Mbps; dropped frames 110 → 10;
+p99 frame gap 22 → 15 ms. Congested link (6 Mbps bottleneck, 80 ms queue):
+backs off to ~2–3 Mbps and holds.
 
 Ceilings found: capture fps = host display refresh (DXGI duplication);
 viewer shows at most its display refresh (Fifo vsync).
