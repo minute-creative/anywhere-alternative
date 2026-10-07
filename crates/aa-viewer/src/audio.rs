@@ -64,11 +64,19 @@ impl AudioSink {
         };
         let lost = self.seq.observe(header.frame_no);
         if lost > 0 && lost <= MAX_CONCEAL {
-            for _ in 0..lost {
+            // Guess all but the last missing frame; the last one is rebuilt
+            // from the copy carried inside this packet (inband FEC).
+            for _ in 1..lost {
                 if self.decoder.conceal(&mut self.pcm).is_ok() {
                     self.concealed += 1;
                     self.play();
                 }
+            }
+            let recovered = self.decoder.recover_previous(&payload, &mut self.pcm).is_ok()
+                || self.decoder.conceal(&mut self.pcm).is_ok();
+            if recovered {
+                self.concealed += 1;
+                self.play();
             }
         }
         match self.decoder.decode(&payload, &mut self.pcm) {

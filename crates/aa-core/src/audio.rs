@@ -24,7 +24,10 @@ pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 2;
 /// 10 ms at 48 kHz.
 pub const FRAME_SAMPLES: usize = 480;
-pub const DEFAULT_BITRATE: u32 = 128_000;
+/// 256 kbps: Opus's "no audible difference even on good headphones" rate
+/// for stereo music. Next to a 40 Mbps video stream it is a rounding error
+/// (0.6%), so there is no reason to save bits here.
+pub const DEFAULT_BITRATE: u32 = 256_000;
 pub const HEADER_LEN: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -39,6 +39,14 @@ impl OpusEncoder {
         // one, so a single lost packet costs nothing audible on Wi-Fi.
         let _ = inner.set_inband_fec(true);
         let _ = inner.set_packet_loss_perc(5);
+        // Quality knobs. Each costs nothing that matters here: complexity 10
+        // is still well under a millisecond per frame, full bandwidth keeps
+        // the top octave (cymbals, sibilance), and Music stops Opus from
+        // switching to its speech model and thinning out game sound.
+        let _ = inner.set_complexity(10);
+        let _ = inner.set_vbr(true);
+        let _ = inner.set_max_bandwidth(opus::Bandwidth::Fullband);
+        let _ = inner.set_signal(opus::Signal::Music);
         Ok(Self { inner, out: vec![0u8; 1500] })
     }
 
@@ -80,6 +88,13 @@ impl OpusDecoder {
     pub fn conceal(&mut self, out: &mut [i16]) -> Result<usize> {
         self.inner.decode(&[], out, false).map_err(|e| PlatformError::Backend(anyhow::anyhow!("opus plc: {e}")))
     }
+
+    /// Rebuild the frame *before* `packet` from the low-quality copy the
+    /// encoder tucks into every packet (inband FEC). Much closer to the real
+    /// sound than plain concealment, which only guesses.
+    pub fn recover_previous(&mut self, packet: &[u8], out: &mut [i16]) -> Result<usize> {
+        self.inner.decode(packet, out, true).map_err(|e| PlatformError::Backend(anyhow::anyhow!("opus fec: {e}")))
+    }
 }
 
 /// Source of system audio on the host.
@@ -101,11 +116,12 @@ pub trait SpeakerControl: Send {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub use player::Player;
+pub use player::{set_boost_db, Player, DEFAULT_BOOST_DB};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod player {
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -128,6 +144,62 @@ mod player {
     /// Shrink by one frame after this long without an underrun.
     const SHRINK_AFTER_SECS: u64 = 20;
 
+    /// Default boost: +6 dB (about twice as loud). PC game and video audio
+    /// is mastered with lots of headroom, and the limiter below stops the
+    /// loud parts from clipping, so this is safe.
+    pub const DEFAULT_BOOST_DB: f32 = 6.0;
+
+    /// Extra loudness on top of what the PC sends, in hundredths of a dB.
+    /// Written by the overlay, read by the audio callback.
+    static BOOST_CENTI_DB: AtomicU32 = AtomicU32::new(600);
+
+    /// Set the volume boost in dB (0 = exactly what the PC sends, max 18).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn set_boost_db(db: f32) {
+        BOOST_CENTI_DB.store((db.clamp(0.0, 18.0) * 100.0).round() as u32, Ordering::Relaxed);
+    }
+
+    /// Current boost as a linear factor.
+    #[allow(clippy::cast_precision_loss)]
+    fn boost() -> f32 {
+        10f32.powf(BOOST_CENTI_DB.load(Ordering::Relaxed) as f32 / 2000.0)
+    }
+
+    /// Loudest a sample may get after the boost; a hair under full scale.
+    const CEILING: f32 = 0.97;
+    /// Fade-in length after (re)starting playback, in samples (~5 ms stereo).
+    const FADE_SAMPLES: usize = 480;
+
+    /// Makes quiet sound louder without letting loud sound clip.
+    ///
+    /// Why: a plain gain would distort on explosions and music peaks. The
+    /// limiter looks at each output block, and if the boosted peak would
+    /// pass the ceiling it turns the gain down *just enough*, instantly;
+    /// then it lets the gain recover slowly (about a second) so you don't
+    /// hear it pumping. Gain changes are ramped across the block so there is
+    /// no zipper noise.
+    struct Limiter {
+        gain: f32,
+    }
+
+    impl Limiter {
+        #[allow(clippy::cast_precision_loss)] // block sizes are a few hundred samples
+        fn process(&mut self, out: &mut [f32]) {
+            let boost = boost();
+            let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+            let safe = if peak * boost > CEILING { CEILING / peak } else { boost };
+            // Down instantly, up slowly (~1 s to recover at 48 kHz blocks of ~240).
+            let target = if safe < self.gain { safe } else { self.gain + (safe - self.gain) * 0.01 };
+            let start = self.gain;
+            let n = out.len().max(1) as f32;
+            for (i, s) in out.iter_mut().enumerate() {
+                let g = start + (target - start) * (i as f32 / n);
+                *s = (*s * g).clamp(-CEILING, CEILING);
+            }
+            self.gain = target;
+        }
+    }
+
     /// Adaptive jitter buffer.
     ///
     /// Why adaptive: on a calm link 30 ms is plenty and anything more is
@@ -144,6 +216,10 @@ mod player {
         filling: bool,
         last_underrun: Instant,
         pub underruns: u64,
+        /// Samples left in the fade-in after a restart; a hard start from
+        /// silence is an audible click.
+        fade_left: usize,
+        limiter: Limiter,
     }
 
     impl Jitter {
@@ -154,6 +230,8 @@ mod player {
                 filling: true,
                 last_underrun: Instant::now(),
                 underruns: 0,
+                fade_left: FADE_SAMPLES,
+                limiter: Limiter { gain: boost() },
             }
         }
 
@@ -170,6 +248,7 @@ mod player {
             self.queue.extend(pcm.iter().copied());
             if self.filling && self.queue.len() >= FRAME * self.target {
                 self.filling = false;
+                self.fade_left = FADE_SAMPLES;
             }
             // Calm for a while: try a little less latency.
             if self.target > MIN_FRAMES && self.last_underrun.elapsed().as_secs() >= SHRINK_AFTER_SECS {
@@ -178,6 +257,7 @@ mod player {
             }
         }
 
+        #[allow(clippy::cast_precision_loss)] // fade length is 480
         fn pull(&mut self, out: &mut [f32]) {
             if self.filling || self.queue.len() < out.len() {
                 if !self.filling && !self.queue.is_empty() {
@@ -194,6 +274,16 @@ mod player {
             for s in out.iter_mut() {
                 *s = self.queue.pop_front().map_or(0.0, |v| f32::from(v) / 32768.0);
             }
+            if self.fade_left > 0 {
+                for s in out.iter_mut() {
+                    if self.fade_left == 0 {
+                        break;
+                    }
+                    *s *= 1.0 - self.fade_left as f32 / FADE_SAMPLES as f32;
+                    self.fade_left -= 1;
+                }
+            }
+            self.limiter.process(out);
         }
     }
 
@@ -284,6 +374,29 @@ mod tests {
         assert_eq!(n, FRAME_SAMPLES);
         let energy: f64 = out.iter().map(|&s| f64::from(s).powi(2)).sum::<f64>() / out.len() as f64;
         assert!(energy > 1.0e6, "decoded audio should carry the tone, energy={energy}");
+    }
+
+    #[test]
+    fn fec_rebuilds_a_lost_frame() {
+        let mut enc = OpusEncoder::new(aa_core::audio::DEFAULT_BITRATE).unwrap();
+        let mut dec = OpusDecoder::new().unwrap();
+        let mut pcm = vec![0i16; FRAME_LEN_I16];
+        let mut out = vec![0i16; FRAME_LEN_I16];
+        // A few frames of tone so the encoder has something to protect.
+        let mut last = Vec::new();
+        for f in 0..5 {
+            for (i, s) in pcm.iter_mut().enumerate() {
+                let t = (f * FRAME_LEN_I16 + i) as f32 / 96_000.0;
+                *s = ((t * 440.0 * std::f32::consts::TAU).sin() * 8000.0) as i16;
+            }
+            let packet = enc.encode(&pcm).unwrap().to_vec();
+            if f < 3 {
+                dec.decode(&packet, &mut out).unwrap();
+            }
+            last = packet;
+        }
+        // Frame 3 "lost": rebuild it from frame 4's packet.
+        assert_eq!(dec.recover_previous(&last, &mut out).unwrap(), FRAME_SAMPLES);
     }
 
     #[test]

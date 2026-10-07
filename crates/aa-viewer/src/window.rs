@@ -395,6 +395,10 @@ impl App {
         if self.settings.mute_host != self.applied.mute_host {
             let _ = self.commands.try_send(ViewerCommand::SetHostMute(self.settings.mute_host));
         }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if (self.settings.volume_boost_db - self.applied.volume_boost_db).abs() > 0.01 {
+            aa_platform::audio::set_boost_db(self.settings.volume_boost_db);
+        }
         self.applied = self.settings;
     }
 

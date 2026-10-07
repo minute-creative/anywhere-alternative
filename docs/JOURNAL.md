@@ -156,6 +156,14 @@ relay later.
   params → `ManuallyDrop`. The tap itself had activated fine.
 - Pending owner confirmation: mute now leaves the Mac playing; crackle gone.
 
+- 2026-10-07 owner: audio works (PC muted, Mac plays) but wants better
+  quality and more volume. Changes: Opus 128 → 256 kbps, complexity 10,
+  fullband, Music signal; viewer now uses the FEC copy on loss instead of
+  only guessing; viewer volume boost (+6 dB default, slider to +18) behind
+  a peak limiter; 5 ms fade-in after refills. Pending owner listen test.
+  Note: the Mac mini's built-in speaker is small; headphones or external
+  speakers are the fair test of quality.
+
 ### Discovery
 - ❌ "no answer from host" once more — the PC's address had changed
   (.3 → .5) → ✅ **LAN auto-discovery**: viewer broadcasts `Discover` on

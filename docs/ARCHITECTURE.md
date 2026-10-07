@@ -169,13 +169,15 @@ Gamepad state is a 15-byte snapshot in DualSense layout.
 System audio rides the same socket as `Kind::Audio` datagrams. Why these
 choices (all in `aa-core/src/audio.rs` and `aa-platform/src/audio.rs`):
 
-- **Opus, 48 kHz stereo, 10 ms frames, 128 kbps.** Opus is what every
-  real-time system uses (WebRTC, Discord, game streaming): transparent at
-  this bitrate and encodes a frame in well under a millisecond. 10 ms frames
+- **Opus, 48 kHz stereo, 10 ms frames, 256 kbps, complexity 10, fullband,
+  `Signal::Music`.** Opus is what every real-time system uses (WebRTC,
+  Discord, game streaming): transparent at this bitrate (0.6% of a 40 Mbps
+  video stream, so not worth saving) and encodes a frame in well under a millisecond. 10 ms frames
   keep the chain (frame + network + playout buffer) near 30 ms, below the
   point where picture and sound visibly part.
-- **Inband FEC on.** Each packet carries a low-rate copy of the previous one,
-  so a single Wi-Fi loss costs nothing audible.
+- **Inband FEC on, and used.** Each packet carries a low-rate copy of the
+  previous one; on a gap the viewer rebuilds the last missing frame from
+  the next packet (`recover_previous`) and only guesses the rest.
 - **Packet-loss concealment, not silence.** The player tracks `frame_no`;
   a gap of up to 5 frames is filled by asking Opus to synthesise from what
   came before. Beyond that it was a real pause and we resync.
@@ -188,6 +190,12 @@ choices (all in `aa-core/src/audio.rs` and `aa-platform/src/audio.rs`):
 - **Capture:** Windows uses WASAPI loopback on the default output (no
   virtual cable or driver). Mac host capture comes with ScreenCaptureKit in
   the Mac-host stage.
+- **Loudness:** the viewer applies a volume boost (default +6 dB, overlay
+  slider 0–18 dB) through a peak limiter: gain drops instantly when a block
+  would pass 0.97 full scale and recovers over ~0.5 s, ramped per block.
+  PC audio is mastered with headroom, so quiet scenes get louder and loud
+  ones never clip. A 5 ms fade-in after every buffer refill removes the
+  restart click.
 - **Playback:** `cpal` on the default output, Mac and Windows. Linux builds
   decode and count but have no player (ALSA headers aren't in CI).
 
