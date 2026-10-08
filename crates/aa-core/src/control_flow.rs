@@ -77,6 +77,15 @@ pub struct BitrateController {
     /// Lowest RTT seen this session, in tenths of a ms: the link with empty
     /// queues. RTT well above this means we are filling a queue somewhere.
     base_rtt: Option<u16>,
+    /// The bitrate at which the link last choked. Growth slows right down
+    /// near it, instead of climbing straight back into the same wall: the
+    /// other-room Wi-Fi log showed a 30-second sawtooth (4 -> 80 Mbps,
+    /// choke, back to 3) where the link really carried about 35.
+    ceiling: Option<u32>,
+    /// Reports left in which only severe loss may cut again. Loss reported
+    /// right after a cut is mostly the queue we already filled draining;
+    /// cutting for it again stacked halvings (40 -> 2.5 Mbps in 12 s).
+    hold: u8,
 }
 
 impl BitrateController {
@@ -97,6 +106,12 @@ impl BitrateController {
     const GROW: f64 = 0.10;
     /// Clean seconds before growth starts; avoids oscillating right after a cut.
     const GROW_AFTER: u32 = 2;
+    /// Growth per clean second within 80% of the last choke point.
+    const GROW_NEAR_CEILING: f64 = 0.02;
+    /// Clean seconds near the old choke point before we stop trusting it.
+    const CEILING_FORGET_AFTER: u32 = 30;
+    /// Reports after a cut in which only severe loss cuts again.
+    const HOLD_REPORTS: u8 = 1;
     /// Growth per clean second while probing (see `probing`).
     const PROBE_GROW: f64 = 0.5;
     /// Queueing delay that marks congestion: RTT this far above the base,
@@ -123,6 +138,8 @@ impl BitrateController {
             clean_streak: 0,
             probing: true,
             base_rtt: None,
+            ceiling: None,
+            hold: 0,
         }
     }
 
@@ -160,21 +177,32 @@ impl BitrateController {
             .base_rtt
             .is_some_and(|b| report.rtt_tenths_ms.saturating_sub(b) > Self::BLOATED_TENTHS.max(b.saturating_mul(4)));
         let lossy = lossy || bloated || (loss >= Self::HEAVY_LOSS && !heavy);
+        let held = self.hold > 0 && loss < Self::SEVERE_LOSS;
+        self.hold = self.hold.saturating_sub(1);
         let next = if self.probing && !lossy && !heavy {
             // Probing: climb fast from the very first clean report.
             (f64::from(self.current_kbps) * (1.0 + Self::PROBE_GROW)) as u32
-        } else if heavy {
+        } else if (heavy || lossy) && held {
+            // Just cut; this loss is the old queue draining.
+            self.clean_streak = 0;
+            self.current_kbps
+        } else if heavy || lossy {
             self.probing = false;
             self.clean_streak = 0;
-            (f64::from(self.current_kbps) * Self::HEAVY_CUT) as u32
-        } else if lossy {
-            self.probing = false;
-            self.clean_streak = 0;
-            (f64::from(self.current_kbps) * Self::LIGHT_CUT) as u32
+            self.ceiling = Some(self.current_kbps);
+            self.hold = Self::HOLD_REPORTS;
+            let factor = if heavy { Self::HEAVY_CUT } else { Self::LIGHT_CUT };
+            (f64::from(self.current_kbps) * factor) as u32
         } else {
             self.clean_streak += 1;
             if self.clean_streak > Self::GROW_AFTER {
-                let step = (f64::from(self.current_kbps) * Self::GROW).max(250.0);
+                let near_wall = self.ceiling.is_some_and(|c| f64::from(self.current_kbps) >= f64::from(c) * 0.8);
+                if near_wall && self.clean_streak > Self::CEILING_FORGET_AFTER {
+                    // Clean for long enough near the old wall: the link got better.
+                    self.ceiling = None;
+                }
+                let grow = if near_wall { Self::GROW_NEAR_CEILING } else { Self::GROW };
+                let step = (f64::from(self.current_kbps) * grow).max(250.0);
                 (f64::from(self.current_kbps) + step) as u32
             } else {
                 self.current_kbps
@@ -231,6 +259,42 @@ mod tests {
         assert_eq!(c.on_report(&noisy(30.0, 0)), Some(8_500));
     }
 
+    /// A Wi-Fi link that carries `cap` kbps: above it the queue fills (RTT
+    /// climbs) and then packets drop, like the other-room log.
+    fn wifi(kbps: u32, cap: u32) -> ReceiverReport {
+        let over = f64::from(kbps) / f64::from(cap);
+        let (loss, rtt) = if over <= 1.0 {
+            (0.0, 50)
+        } else if over < 1.3 {
+            (0.0, (50.0 + (over - 1.0) * 3000.0) as u16)
+        } else {
+            (30.0, 2500)
+        };
+        ReceiverReport {
+            loss_per_10k: (loss * 100.0) as u16,
+            frames_abandoned: if loss > 0.0 { 9 } else { 0 },
+            frames_received: 60,
+            rtt_tenths_ms: rtt,
+        }
+    }
+
+    #[test]
+    fn a_35_mbps_wifi_link_settles_near_its_capacity_without_a_deep_sawtooth() {
+        let mut c = BitrateController::new(6_000, 2_000, 80_000);
+        c.on_report(&wifi(6_000, 35_000)); // learn the quiet RTT
+        let mut seen = Vec::new();
+        for _ in 0..180 {
+            let r = wifi(c.current_kbps(), 35_000);
+            c.on_report(&r);
+            seen.push(c.current_kbps());
+        }
+        let tail = &seen[60..];
+        let avg = tail.iter().map(|&k| u64::from(k)).sum::<u64>() / tail.len() as u64;
+        let low = *tail.iter().min().unwrap();
+        assert!(avg >= 22_000, "average {avg}");
+        assert!(low >= 15_000, "lowest {low}");
+    }
+
     #[test]
     fn a_big_delay_jump_trims_even_without_loss() {
         let mut c = settled(40_000, 2_000, 80_000);
@@ -270,7 +334,12 @@ mod tests {
     fn heavy_loss_halves() {
         let mut c = settled(20_000, 2_000, 60_000);
         assert_eq!(c.on_report(&report(20.0, 10)), Some(10_000));
+        // The next report is mostly the old queue draining: hold.
+        assert_eq!(c.on_report(&report(20.0, 10)), None);
+        // Still losing after that: cut again.
         assert_eq!(c.on_report(&report(20.0, 10)), Some(5_000));
+        // Severe loss cuts even straight after a cut.
+        assert_eq!(c.on_report(&report(40.0, 10)), Some(2_500));
     }
 
     #[test]
