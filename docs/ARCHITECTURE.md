@@ -369,15 +369,38 @@ setting to switch on. Test switches on the host: `AA_SIMULATE_FIREWALL`
 
 ## 7. Connectivity (stage 3)
 
-- Each machine has a device key. Pairing = typing a short code once;
-  the host keeps an allow-list. No accounts.
-- A small signalling server (one cheap VPS, India first) brokers:
-  device lookup, ICE-style hole-punching (STUN), and a relay for the
-  minority of connections that cannot punch through.
-- Direct path is the default. Relay is the exception and the only thing
-  that costs bandwidth money.
-- Encryption: Noise-style handshake with the device keys, then AEAD on
-  every datagram. No plaintext ever leaves the machine, even on LAN.
+Built 2026-10-08 (0.4.0), Tailscale first; our own server later.
+
+- **Device keys.** Each computer has an X25519 key for connecting
+  (`viewer.key`) and one for sharing (`host.key`). No accounts.
+- **Pairing once.** The sharing computer shows a six-digit code. SPAKE2
+  (password-authenticated key exchange) turns it into a shared secret only
+  if both typed the same code; a listener can't test guesses offline, and
+  the host takes one new attempt per 2 s and changes the code after five
+  wrong ones or one success. Inside that secret the two swap and remember
+  each other's public keys.
+- **Every connection.** `INIT` (viewer static + one-time key) → `RESP`
+  (host static + one-time key + proof). Keys = HKDF over three
+  Diffie-Hellmans (one-time×one-time, viewer one-time×host static, viewer
+  static×host one-time) and all four public keys. Each side rejects a
+  partner it never paired with. Then every datagram is
+  `[0xAE][counter u64][ChaCha20-Poly1305]`, 25 bytes extra (1225 still fits
+  Tailscale's 1280 MTU), with a 2048-packet replay window. Only `Discover`
+  travels in clear, so computers can still be listed by name.
+- **Far away.** Tailscale (free, WireGuard underneath) makes every computer
+  reachable at a 100.x address through any router. Anywhere asks
+  `tailscale status --json` for online peers and asks each `Discover`;
+  `Here` carries the host key and all its addresses so a pairing made at
+  home also knows the Tailscale address. The viewer finds a lost host
+  again by key, wherever it now answers, and keeps trying while its
+  window is open.
+- **Later, our own server** (signalling, hole-punching, relay) for friends
+  without Tailscale. The handshake and sealing above stay as they are.
+- **After a power cut (Mac).** A launch agent limited to the Aqua and
+  LoginWindow sessions runs `aa-host --service` at the login screen (as
+  root) and in the logged-in session; `pmset autorestart 1` turns the Mac
+  on when power returns. FileVault's pre-boot screen can't be reached by
+  any app.
 
 ## 8. Stages and their pass/fail tests
 

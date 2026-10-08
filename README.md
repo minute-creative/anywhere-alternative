@@ -21,10 +21,22 @@ Download the latest version from the
   click **More info → Run anyway**. The installer also opens the firewall
   for Anywhere so other computers can reach it.
 
-Open **Anywhere**: computers that are sharing show up by name; click
-Connect. To let others in, click **Start sharing**. The "Optional extras"
-list shows the free drivers for controllers and microphone, with a button
-to get each.
+Open **Anywhere**: computers that are sharing show up by name. The first
+time, click **Pair** and type the six-digit code shown on the other
+computer's Share page; after that, **Connect** is one click, and the two
+computers find each other again even if their addresses change.
+Everything sent between them is encrypted.
+
+- **From anywhere:** install [Tailscale](https://tailscale.com/download)
+  (free) on both computers and sign in to the same account. Your computers
+  then show up in Anywhere from any network.
+- **After a power cut (Mac):** Settings → "Share this Mac at all times".
+  The Mac turns itself back on and you can log in from your other
+  computer. Needs FileVault off.
+- **Windows:** Settings → "Start Anywhere when I sign in".
+
+The Extras page shows the free add-ons for controllers, microphone and
+Tailscale, with a button to get each.
 
 ### Making a new release
 

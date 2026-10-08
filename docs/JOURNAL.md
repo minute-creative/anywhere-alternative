@@ -267,6 +267,30 @@ Measured idle CPU under Xvfb/llvmpipe: an egui Spinner forced endless
 redraws (~160%); replaced by a 1 Hz blink (~7%). Found by running the
 viewer window under Xvfb: the overlay never cleared egui texture deltas.
 
+## Day 5, evening — pairing, encryption, Tailscale, always-on (v0.4.0)
+
+Owner: "confirm it works for every combination, far away, stays connected;
+a Mac that lost power should be reachable without a password if it was
+paired before." Honest answer first: only Windows host → Mac viewer had
+run on hardware; nothing worked off the home network; and there was no
+lock at all (anyone on the Wi-Fi could connect, nothing encrypted).
+
+Asked before building. Choices: Tailscale now (they asked the cost
+difference: Tailscale $0 for up to 6 people; own server $0 on Oracle's free
+tier or ~$5/month, plus upkeep), login screen reached through Anywhere,
+code once then remembered.
+
+Built: SPAKE2 pairing + 3-DH handshake + ChaCha20-Poly1305 per datagram
+(`aa_core::secure`, tamper/replay/garbage tests), trust files, Tailscale
+peer discovery, endless reconnect by host key, `RESET` for a restarted
+host, Mac launch agent for login screen + `pmset autorestart`, Windows
+start-at-sign-in, app UI (pair card, code on Share, paired lists).
+
+Found while testing: a repeated `INIT` must get the *same* answer, or the
+two sides end up with different keys (the host must not make a new
+one-time key for a retransmit); same for the pairing confirm (keep it
+answerable after success, or a lost OK strands the viewer).
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.

@@ -37,16 +37,48 @@ viewer now discovers the host by broadcast so no address is needed.
 - System audio PC → Mac ("audio is working").
 - Firewall, DPI scaling, stuck-modifier and colour-range issues all fixed.
 
-## Blocker as of 2026-10-08
+## Pairing, encryption, Tailscale, always-on (0.4.0, 2026-10-08)
 
-**GitHub Actions is not running**: jobs are refused with "recent account
-payments have failed or your spending limit needs to be increased". The
-owner was asked to fix billing (org minute-creative → Settings → Billing
-and plans). Until it runs, the Mac/Windows-only code from these commits is
-**uncompiled**: audio devices + mic (viewer/host parts; aa-platform parts
-did compile), controllers (`windows/gamepad.rs`, viewer `pads.rs`),
-auto-reconnect. First job once CI is back: push an empty commit or re-run,
-read the error comments, fix.
+Owner asked: every combination (Mac/PC either way, Mac-Mac, PC-PC) easy to
+connect, working from far away and staying connected, and a Mac that lost
+power should come back reachable, with no code for computers paired before.
+Decisions they made: **Tailscale now, own server later**; after a power
+cut the Mac **waits at its login screen and you type the Mac password
+through Anywhere**; **code once, then remembered**.
+
+- `aa_core::secure`: SPAKE2 pairing with a six-digit code, then per
+  connection a 3-DH (X25519) handshake and ChaCha20-Poly1305 on every
+  datagram with a replay window. Only `Discover` may arrive in clear.
+  `aa-host/src/net.rs` and `aa-viewer/src/net.rs` wrap the sockets; the
+  session code is unchanged above them. Protocol version 2 (0.3 and 0.4
+  don't talk).
+- `aa_platform::trust`: keys and pairings as files (`viewer.key`,
+  `host.key`, `paired-hosts.json`, `paired-viewers.json`, `pair-code`);
+  `AA_DATA_DIR` moves them (tests). On a Mac with always-on sharing, the
+  host side lives in `/Library/Application Support/AnywhereAlternative`
+  (root:admin 0770) so the login-screen copy is the same computer.
+- Far away: `Here` carries the host key and every address (incl. its
+  Tailscale 100.x). Discovery also asks every remembered address of paired
+  hosts and every online Tailscale peer (`tailscale status --json`). The
+  viewer reconnects until its window closes (headless: 2 min), finding the
+  same host by key; a restarted host answers stale sealed packets with
+  `RESET` so the viewer reconnects in ~1 s.
+- Mac always-on (`aa-app/src/service.rs`): `/Library/LaunchAgents/
+  com.minutecreative.anywhere.host.plist` with `LimitLoadToSessionType`
+  Aqua + LoginWindow runs `aa-host --service`; `pmset autorestart 1`,
+  `sleep 0`. Logs `service.log` / `service-login.log` in the system folder.
+  **Unknown until tested on the Mac:** whether ScreenCaptureKit and
+  CGEvent work for the root copy at the login window, and the TCC prompts
+  for `aa-host` itself (launchd starts it, not the app). FileVault on =
+  impossible (pre-boot screen); the app warns. Tailscale's App Store and
+  Standalone apps start only after login; for far-away access to the
+  login screen the Mac needs the open-source `tailscaled` (Homebrew).
+- Windows: "Start Anywhere when I sign in" (HKCU Run, `--background`).
+  Windows login screen sharing is not built.
+- Verified here (Linux, mock): pairing with right/wrong code, connect
+  without code afterwards, unpaired refused, host restart → reconnect
+  (1.3 s fast path, 8 s slow path), all unit tests incl. tamper/replay.
+  Not verified on real hardware yet.
 
 ## Shipped but NOT yet confirmed by the owner (ask for results first)
 
@@ -105,7 +137,9 @@ with Xvfb + `WGPU_BACKEND=gl` (`AA_SHOW_SELF=1`, `AA_HOST_MOCK=1`).
 
 ## Agreed next steps, in order
 
-1. CI back → fix whatever the uncompiled code trips on.
+1. Owner test of 0.4.0: pair PC↔Mac with the code, reconnect without it,
+   Tailscale from another network (phone hotspot), Mac always-on: switch
+   on, restart the Mac, reach the login screen from the PC.
 2. Owner retest of items above; collect `refresh_hz`, `--bench`, `stream
    colour`, `encoder colour path` lines.
 3. Owner test of DualSense pass-through: install usbip-win2 on the PC,
