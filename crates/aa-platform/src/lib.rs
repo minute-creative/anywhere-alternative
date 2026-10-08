@@ -50,7 +50,7 @@ pub mod windows;
 /// Where a captured picture lives. The fast path keeps it on the GPU and
 /// hands a handle straight to the encoder; the CPU variant exists for the
 /// mock backend and for debugging.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FrameBuffer {
     /// Tightly packed rows of `PixelFormat`.
     Cpu(Bytes),
@@ -68,7 +68,7 @@ pub enum GpuApi {
 }
 
 /// One captured picture.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CapturedFrame {
     pub buffer: FrameBuffer,
     pub format: PixelFormat,

@@ -162,6 +162,7 @@ pub async fn find_hosts(port: u16) -> anyhow::Result<Vec<Found>> {
                             let mut all = vec![from.to_string()];
                             all.extend(addrs.iter().filter(|a| a.parse::<SocketAddr>().is_ok_and(|a| !a.ip().is_loopback())).cloned());
                             crate::trust::note_host_addrs(&k, &all);
+                            crate::trust::set_host_name(&k, &name);
                         }
                     }
                     add(&mut found, &mut deadline, name, from, key, "answered");

@@ -119,10 +119,29 @@ pub fn host_identity() -> Identity {
     load_identity(&host_dir().join("host.key"))
 }
 
-/// A short name for this computer ("Maitrik's Mac mini").
+/// A short name for this computer ("Maitrik's Mac mini"): the name shown in
+/// System Settings / Windows, not the network name (which a router can turn
+/// into something like "192.168.1.2").
 pub fn computer_name() -> String {
-    let n = gethostname::gethostname().to_string_lossy().into_owned();
-    n.trim_end_matches(".local").to_owned()
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        if let Ok(out) = std::process::Command::new("/usr/sbin/scutil").args(["--get", "ComputerName"]).output() {
+            let n = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if out.status.success() && !n.is_empty() {
+                return n;
+            }
+        }
+        #[cfg(target_os = "windows")]
+        if let Ok(n) = std::env::var("COMPUTERNAME") {
+            if !n.is_empty() {
+                return n;
+            }
+        }
+        let n = gethostname::gethostname().to_string_lossy().into_owned();
+        n.trim_end_matches(".local").to_owned()
+    })
+    .clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +207,16 @@ pub fn note_host_addrs(key: &PublicKeyBytes, addrs: &[String]) {
     }
     h.addrs.truncate(8);
     if h.addrs != before {
+        save_hosts(&list);
+    }
+}
+
+/// A paired computer announced a (new) name: show that one.
+pub fn set_host_name(key: &PublicKeyBytes, name: &str) {
+    let hex = secure::to_hex(key);
+    let mut list = paired_hosts();
+    if let Some(h) = list.iter_mut().find(|h| h.key == hex && h.name != name && !name.is_empty()) {
+        name.clone_into(&mut h.name);
         save_hosts(&list);
     }
 }

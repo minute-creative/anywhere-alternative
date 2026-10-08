@@ -1,7 +1,7 @@
 //! The capture → encode thread and the input-injection thread.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aa_core::video::Codec;
 
@@ -99,6 +99,14 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
     // counts from 0, so we number frames here instead. (Forgetting this made
     // the viewer discard every frame after the first encoder rebuild.)
     let mut next_frame_id: u32 = 0;
+    // Sharpening a still screen. Frames come only when something changes, so
+    // after movement the last, rushed (soft, blocky) picture would stay on
+    // the viewer for as long as nothing moves. Encoding that same picture
+    // again lets the encoder add the detail it skipped: twice as a cheap
+    // update, then once as a full fresh picture.
+    let mut last_frame: Option<aa_platform::CapturedFrame> = None;
+    let mut still_since = Instant::now();
+    let mut refined = 0u8;
 
     while !ctl.shutdown.load(Ordering::Relaxed) {
         let streaming = ctl.streaming.load(Ordering::Relaxed);
@@ -157,9 +165,29 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
         let frame = match capture.next_frame(frame_timeout) {
             Ok(Some(f)) => {
                 capture_failures = 0;
+                still_since = Instant::now();
+                refined = 0;
+                last_frame = Some(f.clone());
                 f
             }
-            Ok(None) => continue, // nothing changed on screen
+            Ok(None) => {
+                // Nothing changed on screen. Time to sharpen the last picture?
+                let still = still_since.elapsed();
+                let due = match refined {
+                    0 => still > Duration::from_millis(150),
+                    1 => still > Duration::from_millis(400),
+                    2 => still > Duration::from_millis(900),
+                    _ => false,
+                };
+                let Some(mut f) = last_frame.clone().filter(|_| due) else { continue };
+                // Encoders insist on time moving forward between frames.
+                f.capture_ts_us += still.as_micros() as u64;
+                refined += 1;
+                if refined == 3 {
+                    ctl.force_keyframe.store(true, Ordering::Relaxed);
+                }
+                f
+            }
             Err(PlatformError::DeviceLost(why)) => {
                 tracing::warn!("capture device lost ({why}); rebuilding the video pipeline");
                 rebuild_pipeline(&mut capture, &mut factory, &mut encoder, &mut rebuild, ctl);

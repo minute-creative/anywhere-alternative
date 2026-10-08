@@ -191,9 +191,10 @@ impl Overlay {
                     ui.checkbox(&mut settings.show_stats, "Show stats");
                     ui.add_space(8.0);
                     ui.heading("Audio");
-                    ui.checkbox(&mut settings.mute_host, "Mute PC speakers (sound plays here only)");
+                    let other = if crate::link::host_is_mac() { "Mac" } else { "PC" };
+                    ui.checkbox(&mut settings.mute_host, format!("Mute {other} speakers (sound plays here only)"));
                     ui.add(egui::Slider::new(&mut settings.volume_boost_db, 0.0..=18.0).text("Volume boost (dB)"));
-                    ui.checkbox(&mut settings.send_mic, "Send my microphone to the PC");
+                    ui.checkbox(&mut settings.send_mic, format!("Send my microphone to the {other}"));
                     ui.add_space(8.0);
                     ui.monospace(format!(
                         "{} fps  {:.1} Mbps  {:.0} ms RTT  {:.1}% loss",
