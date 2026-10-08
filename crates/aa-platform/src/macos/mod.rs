@@ -58,8 +58,8 @@ fn vt_factory() -> crate::EncoderFactory {
     })
 }
 
-/// This Mac as the computer being watched: ScreenCaptureKit picture and
-/// sound, VideoToolbox encoding, Quartz events for mouse and keyboard.
+/// This Mac as the computer being watched: `ScreenCaptureKit` picture and
+/// sound, `VideoToolbox` encoding, Quartz events for mouse and keyboard.
 pub fn host_backends() -> Result<HostBackends> {
     let cap = capture::SckCapture::new()?;
     let res = crate::ScreenCapture::resolution(&cap);
