@@ -20,6 +20,7 @@
 mod checks;
 mod procs;
 mod service;
+mod update;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -202,13 +203,17 @@ fn toggle(ui: &mut Ui, on: &mut bool) -> bool {
 }
 
 /// A settings row: label and help text on the left, a switch on the right.
+/// The text gets the width minus the switch, so long help wraps before it
+/// instead of running underneath.
 fn switch_row(ui: &mut Ui, label: &str, help: &str, on: &mut bool) -> bool {
     let mut changed = false;
+    let text_w = (ui.available_width() - 64.0).max(120.0);
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.label(RichText::new(label).color(TEXT));
+            ui.set_width(text_w);
+            ui.add(egui::Label::new(RichText::new(label).color(TEXT)).wrap());
             if !help.is_empty() {
-                ui.label(RichText::new(help).small().color(MUTED));
+                ui.add(egui::Label::new(RichText::new(help).small().color(MUTED)).wrap());
             }
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| changed = toggle(ui, on));
@@ -243,6 +248,10 @@ struct Settings {
     /// Mac only: run sharing as administrator so controllers work.
     mac_controllers: bool,
     manual_address: String,
+    /// Install new versions by themselves when nobody is connected.
+    auto_update: bool,
+    /// The "finish setting up" card was answered.
+    addons_offered: bool,
 }
 
 impl Default for Settings {
@@ -258,6 +267,8 @@ impl Default for Settings {
             share_on_launch: false,
             mac_controllers: false,
             manual_address: String::new(),
+            auto_update: true,
+            addons_offered: false,
         }
     }
 }
@@ -335,6 +346,8 @@ enum Bg {
     Probed(String, Result<Found, String>),
     Paired(String, Result<String, String>),
     Service(Result<(), String>),
+    Updated(Result<update::Applied, String>),
+    Addons(Result<(), String>),
 }
 
 /// "Type the code shown on <name>".
@@ -347,6 +360,7 @@ struct PairPrompt {
     error: Option<String>,
 }
 
+#[allow(clippy::struct_excessive_bools)] // independent on/off states
 struct App {
     page: Page,
     bg: Arc<Mutex<Vec<Bg>>>,
@@ -363,6 +377,15 @@ struct App {
     /// Windows: Anywhere starts when you sign in.
     sign_in: bool,
     lists_at: Instant,
+    updater: Arc<update::Updater>,
+    /// "Updating to 0.5.0…" while an update is under way.
+    updating: Option<String>,
+    /// A version that failed (or was declined) this session: don't retry it.
+    update_skip: Option<String>,
+    update_error: Option<String>,
+    addons_busy: bool,
+    addons_note: Option<(String, bool)>,
+    viewing_note_at: Instant,
     icon: Option<egui::TextureHandle>,
     settings: Settings,
     found: Arc<Mutex<Vec<Found>>>,
@@ -409,6 +432,13 @@ impl App {
             filevault: service::filevault_on(),
             sign_in: service::starts_at_sign_in(),
             lists_at: Instant::now(),
+            updater: Arc::default(),
+            updating: None,
+            update_skip: None,
+            update_error: None,
+            addons_busy: false,
+            addons_note: None,
+            viewing_note_at: Instant::now(),
             icon,
             settings: Settings::load(),
             found,
@@ -423,14 +453,50 @@ impl App {
             last_poll: Instant::now(),
             copied: None,
         };
+        update::spawn_checker(Arc::clone(&app.updater), cc.egui_ctx.clone());
         let background = std::env::args().any(|a| a == "--background");
-        if (app.settings.share_on_launch || background) && !app.service_on {
+        // Reopened by an update: as it was (sharing or not), minimised.
+        let after_update = std::env::args().any(|a| a == "--after-update");
+        let resume_sharing = after_update && update::take_resume().is_some_and(|r| r.sharing);
+        if (app.settings.share_on_launch || background || resume_sharing) && !app.service_on {
             app.start_sharing();
         }
-        if background {
+        if background || after_update {
             cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
         app
+    }
+
+    /// Nobody connected either way, nothing half done: safe to update.
+    fn idle(&self) -> bool {
+        self.viewer.is_none()
+            && self.status.viewer.is_none()
+            && self.pair.is_none()
+            && !self.service_busy
+            && !self.addons_busy
+            && !aa_platform::update::someone_connected()
+    }
+
+    /// Install a newer version when it's safe.
+    fn maybe_update(&mut self) {
+        if !self.settings.auto_update || self.updating.is_some() || !self.idle() {
+            return;
+        }
+        let Some(rel) = self.updater.available() else { return };
+        if self.update_skip.as_deref() == Some(rel.version.as_str()) {
+            return;
+        }
+        self.updating = Some(format!("Updating to {}…", rel.version));
+        self.update_error = None;
+        let service_on = self.service_on;
+        self.spawn(move |_| Bg::Updated(update::apply(rel, service_on).map_err(|e| e.to_string())));
+    }
+
+    /// Close for the update; it reopens the app afterwards.
+    fn quit_for_update(&mut self) {
+        update::save_resume(&update::Resume { sharing: self.host.is_some() });
+        self.settings.save();
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     /// Run `work` on its own thread; its result arrives in `poll`.
@@ -491,6 +557,55 @@ impl App {
         });
     }
 
+    fn install_addons(&mut self) {
+        self.addons_busy = true;
+        self.addons_note = Some(("Installing… (your computer asks to allow it once)".to_owned(), false));
+        self.settings.addons_offered = true;
+        self.settings.save();
+        self.spawn(|_| Bg::Addons(service::install_addons().map_err(|e| e.to_string())));
+    }
+
+    /// Add-ons that can be installed for you and aren't yet.
+    fn missing_addons(&self) -> usize {
+        self.checks.iter().filter(|c| !c.ok && !c.name.starts_with("HEVC")).count()
+    }
+
+    fn addons_card(&mut self, ui: &mut Ui, first_run: bool) {
+        let mut install = false;
+        let mut later = false;
+        card(ui, |ui| {
+            if first_run {
+                section(
+                    ui,
+                    "Finish setting up",
+                    "Free add-ons for controllers, the microphone and connecting from anywhere. Downloaded from \
+                     their makers.",
+                );
+            } else {
+                section(ui, "Install what's missing", "One click; your computer asks to allow it once.");
+            }
+            ui.horizontal(|ui| {
+                let label = if self.addons_busy { "Installing…" } else { "Install add-ons" };
+                if ui.add_enabled_ui(!self.addons_busy, |ui| button(ui, label, Kind::Primary)).inner.clicked() {
+                    install = true;
+                }
+                if first_run && button(ui, "Not now", Kind::Secondary).clicked() {
+                    later = true;
+                }
+            });
+            if let Some((t, bad)) = &self.addons_note {
+                ui.label(RichText::new(t).small().color(if *bad { DANGER } else { MUTED }));
+            }
+        });
+        if install {
+            self.install_addons();
+        }
+        if later {
+            self.settings.addons_offered = true;
+            self.settings.save();
+        }
+    }
+
     fn set_service(&mut self, on: bool) {
         self.service_busy = true;
         self.service_error = None;
@@ -533,6 +648,26 @@ impl App {
                         p.busy = false;
                         p.error = Some(e);
                     }
+                }
+                Bg::Updated(Ok(update::Applied::Quit)) => self.quit_for_update(),
+                Bg::Updated(Ok(update::Applied::Requested)) => {
+                    self.updating = Some("Installing the update…".to_owned());
+                }
+                Bg::Updated(Err(e)) => {
+                    self.update_skip = self.updater.available().map(|r| r.version);
+                    self.updating = None;
+                    if e != "cancelled" {
+                        self.update_error = Some(format!("The update didn't install: {e}"));
+                    }
+                }
+                Bg::Addons(r) => {
+                    self.addons_busy = false;
+                    self.checks = checks::run();
+                    self.addons_note = Some(match r {
+                        Ok(()) => ("Add-ons installed.".to_owned(), false),
+                        Err(e) if e == "cancelled" => ("Cancelled.".to_owned(), false),
+                        Err(e) => (format!("Some add-ons didn't install: {e}"), true),
+                    });
                 }
                 Bg::Service(r) => {
                     self.service_busy = false;
@@ -587,6 +722,18 @@ impl App {
         }
         self.last_poll = Instant::now();
         self.handle_bg();
+        // Windows service installing an update: close; it reopens us.
+        if cfg!(target_os = "windows") && self.service_on && aa_platform::update::marker::running().exists() {
+            aa_platform::update::note(&aa_platform::update::marker::relaunch(), true);
+            self.quit_for_update();
+            return;
+        }
+        // Tell the service we're watching another computer (no updates now).
+        if self.service_on && self.viewing_note_at.elapsed() > Duration::from_secs(30) {
+            self.viewing_note_at = Instant::now();
+            aa_platform::update::note(&aa_platform::update::marker::viewing(), self.viewer.is_some());
+        }
+        self.maybe_update();
         if self.lists_at.elapsed() > Duration::from_secs(2) {
             self.refresh_lists();
         }
@@ -772,6 +919,11 @@ impl App {
 
         if self.pair.is_some() {
             self.pair_card(ui);
+            ui.add_space(12.0);
+        }
+
+        if !self.settings.addons_offered && self.missing_addons() > 0 {
+            self.addons_card(ui, true);
             ui.add_space(12.0);
         }
 
@@ -1268,13 +1420,43 @@ impl App {
         }
         let s = &mut self.settings;
         ui.add_space(12.0);
+        let mut check_now = false;
+        let status = {
+            let st = self.updater.state.lock();
+            let (latest, err) = st.as_ref().map_or((None, None), |st| (st.latest.clone(), st.error.clone()));
+            match (&self.updating, &self.update_error, latest) {
+                (Some(u), _, _) => u.clone(),
+                (None, Some(e), _) => e.clone(),
+                (None, None, Some(r)) if aa_platform::update::is_newer(&r.version, aa_platform::update::current()) => {
+                    format!("Version {} is ready; it installs when nobody is connected.", r.version)
+                }
+                (None, None, Some(_)) => "You have the newest version.".to_owned(),
+                (None, None, None) if err.is_some() => "Couldn't check for updates (no internet?).".to_owned(),
+                (None, None, None) => "Checking for updates…".to_owned(),
+            }
+        };
+        card(ui, |ui| {
+            section(ui, "Updates", &format!("Version {}", aa_platform::update::current()));
+            ui.label(RichText::new(&status).color(TEXT));
+            ui.add_space(4.0);
+            changed |= switch_row(
+                ui,
+                "Install updates automatically",
+                "Only when nobody is connected. Anywhere reopens by itself afterwards.",
+                &mut s.auto_update,
+            );
+            if button(ui, "Check now", Kind::Secondary).clicked() {
+                check_now = true;
+            }
+        });
+        ui.add_space(12.0);
         card(ui, |ui| {
             section(ui, "Help", "");
             ui.horizontal_wrapped(|ui| {
                 if button(ui, "Open log folder", Kind::Secondary).clicked() {
                     checks::open_url(&procs::data_dir().display().to_string());
                 }
-                if button(ui, "Check for updates", Kind::Secondary).clicked() {
+                if button(ui, "Releases page", Kind::Secondary).clicked() {
                     checks::open_url("https://github.com/minute-creative/anywhere-alternative/releases/latest");
                 }
                 if button(ui, "Reset settings", Kind::Secondary).clicked() {
@@ -1283,6 +1465,11 @@ impl App {
                 }
             });
         });
+        if check_now {
+            self.update_skip = None;
+            self.update_error = None;
+            self.updater.check_now.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         if changed {
             s.save();
         }
@@ -1292,7 +1479,7 @@ impl App {
         Self::page_header(
             ui,
             "Extras",
-            "Free add-ons for controllers and the microphone. Everything else works without them.",
+            "Free add-ons for controllers, the microphone and connecting from anywhere. Everything else works without them.",
         );
         if cfg!(target_os = "macos") {
             card(ui, |ui| {
@@ -1324,6 +1511,10 @@ impl App {
                     divider(ui);
                 }
             });
+            ui.add_space(12.0);
+        }
+        if self.missing_addons() > 0 || self.addons_busy {
+            self.addons_card(ui, false);
             ui.add_space(12.0);
         }
         card(ui, |ui| {
@@ -1390,7 +1581,12 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(BG).inner_margin(Margin::symmetric(28, 24))).show(
             ui,
             |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                // AA_SCROLL=<px>: start scrolled down (screenshots in testing).
+                if let Some(y) = std::env::var("AA_SCROLL").ok().and_then(|v| v.parse::<f32>().ok()) {
+                    area = area.vertical_scroll_offset(y);
+                }
+                area.show(ui, |ui| {
                     // Leave room for the scroll bar; cap the reading width.
                     ui.set_max_width((ui.available_width() - 16.0).min(660.0));
                     match self.page {

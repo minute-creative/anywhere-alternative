@@ -42,6 +42,12 @@ jobs:
 
       - name: Mac disk image
         if: runner.os == 'macOS'
+        env:
+          # Optional: a fixed signing certificate (see packaging/macos/
+          # make-signing-cert.sh). With it, macOS keeps the Screen Recording
+          # and Accessibility permissions across updates.
+          MAC_SIGN_P12: ${{ secrets.MAC_SIGN_P12 }}
+          MAC_SIGN_PASSWORD: ${{ secrets.MAC_SIGN_PASSWORD }}
         run: packaging/macos/build-dmg.sh "$VERSION" 2>&1 | tee build.log; exit ${PIPESTATUS[0]}
 
       - name: Windows installer

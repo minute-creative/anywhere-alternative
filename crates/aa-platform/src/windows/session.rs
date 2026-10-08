@@ -28,7 +28,8 @@ use windows::Win32::Security::{
     DuplicateTokenEx, SecurityIdentification, SetTokenInformation, TokenPrimary, TokenSessionId, TOKEN_ACCESS_MASK,
     TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ALL_ACCESS, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY,
 };
-use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
+use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
+use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Services::{
     RegisterServiceCtrlHandlerExW, SetServiceStatus, StartServiceCtrlDispatcherW, SERVICE_ACCEPT_SHUTDOWN,
     SERVICE_ACCEPT_STOP, SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_RUNNING,
@@ -175,10 +176,41 @@ fn supervise() {
     let exe = std::env::current_exe().unwrap_or_default();
     let mut child: Option<Child> = None;
     let mut last_fail: Option<Instant> = None;
-    tracing::info!("sharing service running");
+    let started = Instant::now();
+    let mut last_update_check: Option<Instant> = None;
+    // A finished update: the installer restarted us.
+    let _ = std::fs::remove_file(crate::update::marker::running());
+    tracing::info!(version = crate::update::current(), "sharing service running");
     while !STOP.load(Ordering::Relaxed) {
         // SAFETY: no arguments.
         let session = unsafe { WTSGetActiveConsoleSessionId() };
+
+        // The app was open before an update: open it again for the person
+        // signed in (waits until someone is).
+        if crate::update::marker::relaunch().exists() && session != u32::MAX {
+            match launch_app_for_user(&exe, session) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(crate::update::marker::relaunch());
+                    tracing::info!("reopened the app after the update");
+                }
+                Err(e) => tracing::debug!("can't reopen the app yet: {e}"),
+            }
+        }
+
+        // Updates: when the app asks, and by ourselves every six hours
+        // (first ten minutes after start), never while someone is connected.
+        let asked = crate::update::marker::request().exists();
+        let due = last_update_check
+            .map_or(started.elapsed() > Duration::from_secs(600), |t| t.elapsed() > Duration::from_secs(6 * 3600));
+        if (asked || due) && !crate::update::someone_connected() {
+            let _ = std::fs::remove_file(crate::update::marker::request());
+            last_update_check = Some(Instant::now());
+            match update_now(&mut child, &stop_file) {
+                Ok(true) => tracing::info!("installer started; it will restart this service"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("update failed: {e:#}"),
+            }
+        }
         if let Some(c) = child.take() {
             if alive(&c) && c.session == session {
                 child = Some(c);
@@ -222,6 +254,74 @@ fn supervise() {
         let _ = unsafe { CloseHandle(c.process) };
     }
     tracing::info!("sharing service stopped");
+}
+
+/// Download and start the newest installer, silently. `Ok(false)`: already
+/// up to date. The installer stops this service, replaces the files and
+/// starts it again.
+fn update_now(child: &mut Option<Child>, stop_file: &std::path::Path) -> anyhow::Result<bool> {
+    let latest = crate::update::latest()?;
+    if !crate::update::is_newer(&latest.version, crate::update::current()) {
+        return Ok(false);
+    }
+    let url = latest.windows_url.clone().ok_or_else(|| anyhow::anyhow!("release has no Windows installer"))?;
+    tracing::info!(from = crate::update::current(), to = latest.version, "updating");
+    // The system's own temp folder: only the system can write there, so
+    // nothing can swap the installer between download and start.
+    let setup = std::env::temp_dir().join("Anywhere-update-setup.exe");
+    crate::update::download(&url, &setup)?;
+    // Tell the app (if open) to close, then stop the host.
+    let _ = std::fs::write(crate::update::marker::running(), latest.version.as_bytes());
+    std::thread::sleep(Duration::from_secs(3));
+    if let Some(c) = child.take() {
+        end_child(&c, stop_file);
+        // SAFETY: closing our own handle once.
+        let _ = unsafe { CloseHandle(c.process) };
+    }
+    std::process::Command::new(&setup).args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"]).spawn()?;
+    Ok(true)
+}
+
+/// Start the Anywhere app for whoever is signed in to `session` (as them,
+/// not as the system), minimised.
+fn launch_app_for_user(host_exe: &std::path::Path, session: u32) -> anyhow::Result<()> {
+    let app = host_exe.with_file_name("anywhere.exe");
+    // SAFETY: the user's token and environment are freed below.
+    unsafe {
+        let mut token = HANDLE::default();
+        WTSQueryUserToken(session, &mut token)?; // fails while nobody is signed in
+        let mut env: *mut core::ffi::c_void = std::ptr::null_mut();
+        let have_env = CreateEnvironmentBlock(&mut env, Some(token), false).is_ok();
+        let mut desktop = wide("winsta0\\default");
+        let si = STARTUPINFOW {
+            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+            lpDesktop: PWSTR(desktop.as_mut_ptr()),
+            ..Default::default()
+        };
+        let mut cmd = wide(&format!("\"{}\" --after-update", app.display()));
+        let mut pi = PROCESS_INFORMATION::default();
+        let r = CreateProcessAsUserW(
+            Some(token),
+            PCWSTR::null(),
+            Some(PWSTR(cmd.as_mut_ptr())),
+            None,
+            None,
+            false,
+            CREATE_UNICODE_ENVIRONMENT,
+            have_env.then_some(env.cast_const()),
+            PCWSTR::null(),
+            &si,
+            &mut pi,
+        );
+        if have_env {
+            let _ = DestroyEnvironmentBlock(env);
+        }
+        let _ = CloseHandle(token);
+        r?;
+        let _ = CloseHandle(pi.hThread);
+        let _ = CloseHandle(pi.hProcess);
+    }
+    Ok(())
 }
 
 /// Ask the host to stop (it says goodbye and restores the speakers), and
@@ -295,6 +395,12 @@ fn launch_in_session(exe: &std::path::Path, session: u32, stop_file: &std::path:
 /// and wait for it. Returns its exit code; an error if the prompt was
 /// declined.
 pub fn run_elevated(file: &str, params: &str) -> anyhow::Result<u32> {
+    run_elevated_with(file, params, true)
+}
+
+/// [`run_elevated`], optionally without waiting (an installer that will
+/// replace the program asking for it).
+pub fn run_elevated_with(file: &str, params: &str, wait: bool) -> anyhow::Result<u32> {
     let (verb, file_w, params_w) = (wide("runas"), wide(file), wide(params));
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -315,6 +421,10 @@ pub fn run_elevated(file: &str, params: &str) -> anyhow::Result<u32> {
             return Err(e.into());
         }
         if info.hProcess.is_invalid() {
+            return Ok(0);
+        }
+        if !wait {
+            let _ = CloseHandle(info.hProcess);
             return Ok(0);
         }
         let _ = WaitForSingleObject(info.hProcess, 120_000);

@@ -136,6 +136,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     }
 
     start_beacon(listen.port(), socket.public_key_hex());
+    set_connected(false);
 
     let mut viewer: Option<Viewer> = None;
     let seq = Arc::new(SeqCounter::default());
@@ -153,6 +154,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     }
     let mut buf = vec![0u8; wire::MAX_DATAGRAM * 2];
     let mut housekeeping = tokio::time::interval(Duration::from_secs(1));
+    let mut ticks = 0u64;
 
     loop {
         tokio::select! {
@@ -255,8 +257,15 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
             }
 
             _ = housekeeping.tick() => {
+                // Keep the "someone is connected" note fresh (a stale one,
+                // left by a crash, stops counting after two minutes).
+                ticks += 1;
+                if viewer.is_some() && ticks % 30 == 0 {
+                    set_connected(true);
+                }
                 if let Some(v) = viewer.as_ref().filter(|v| v.last_heard.elapsed() > VIEWER_TIMEOUT) {
                     tracing::info!(addr = %v.addr, "viewer timed out");
+                    set_connected(false);
                     viewer = None;
                     *video_dest.lock().expect("dest") = None;
                     ctl.streaming.store(false, Ordering::Relaxed);
@@ -267,6 +276,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
 
             () = stop_requested() => {
                 tracing::info!("asked to stop");
+                set_connected(false);
                 if let Some(v) = viewer.as_ref() {
                     let _ = send_control(&socket, v.addr, &ControlMessage::Bye, &seq).await;
                 }
@@ -277,6 +287,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
 
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutting down");
+                set_connected(false);
                 if let Some(v) = viewer.as_ref() {
                     let _ = send_control(&socket, v.addr, &ControlMessage::Bye, &seq).await;
                 }
@@ -487,6 +498,7 @@ async fn handle_packet(
                             )
                             .await?;
                             *viewer = Some(Viewer { addr: from, last_heard: Instant::now(), welcomed: Instant::now() });
+                            set_connected(true);
                             *video_dest.lock().expect("dest") = Some(from);
                             *bitrate = BitrateController::new(
                                 StreamConfig::suggested_bitrate_kbps(host_caps.max_resolution, host_caps.max_fps),
@@ -505,6 +517,7 @@ async fn handle_packet(
                 }
                 ControlMessage::Bye if is_current_viewer => {
                     tracing::info!(%from, "viewer left");
+                    set_connected(false);
                     *viewer = None;
                     *video_dest.lock().expect("dest") = None;
                     ctl.streaming.store(false, Ordering::Relaxed);
@@ -662,6 +675,16 @@ async fn send_control(socket: &Net, to: SocketAddr, msg: &ControlMessage, seq: &
     out.extend_from_slice(&payload);
     socket.send_to(&out, to).await?;
     Ok(())
+}
+
+/// Leave a note while someone is connected, so automatic updates wait.
+fn set_connected(on: bool) {
+    let path = aa_platform::update::marker::connected();
+    if on {
+        let _ = std::fs::write(path, b"");
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Put the host's speakers back how we found them. Called on every way a

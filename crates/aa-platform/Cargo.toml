@@ -85,6 +85,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Services",
     "Win32_System_Registry",
     "Win32_UI_Shell",
+    "Win32_System_Environment",
 ] }
 # Virtual Xbox 360 / DualShock 4 controllers through the ViGEmBus driver
 # (installed once on the PC; see windows/gamepad.rs).

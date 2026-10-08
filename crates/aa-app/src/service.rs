@@ -142,6 +142,7 @@ mkdir -p "$D"
 for f in host.key paired-viewers.json pair-code; do
   if [ ! -e "$D/$f" ] && [ -e "$U/$f" ]; then cp "$U/$f" "$D/$f"; fi
 done
+touch "$D/always-on"
 chown -R root:admin "$D"
 chmod 0770 "$D"
 find "$D" -type f -exec chmod 0660 {{}} +
@@ -224,6 +225,7 @@ set "U={user}"
 if not exist "%D%" mkdir "%D%"
 rem Keep this PC's identity and pairings: the always-on copy is the same computer.
 for %%f in (host.key paired-viewers.json pair-code) do if not exist "%D%\%%f" if exist "%U%\%%f" copy /y "%U%\%%f" "%D%\%%f" >nul
+type nul > "%D%\always-on"
 rem Only the system, administrators and you may read the keys.
 icacls "%D%" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F *{sid}:(OI)(CI)M /T /Q >nul
 sc query {name} >nul 2>&1
@@ -261,6 +263,126 @@ pub fn uninstall() -> anyhow::Result<()> {
         "@echo off\nsc stop {name} >nul 2>&1\nping -n 4 127.0.0.1 >nul\nsc delete {name} >nul 2>&1\nexit /b 0\n"
     );
     run_script_as_admin("remove-sharing.cmd", &script)
+}
+
+/// The `Anywhere.app` folder we are running from (`None` for a developer
+/// build run from the terminal).
+#[cfg(target_os = "macos")]
+pub fn bundle_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let app = exe.ancestors().nth(3)?.to_path_buf();
+    app.extension().is_some_and(|e| e == "app").then_some(app)
+}
+
+/// Put the app from a downloaded disk image in place of this one, restart
+/// the always-on sharing with the new files, and open the new app.
+#[cfg(target_os = "macos")]
+pub fn replace_app_bundle(dmg: &Path) -> anyhow::Result<()> {
+    let app = bundle_path().ok_or_else(|| anyhow::anyhow!("not running from an installed app"))?;
+    let script = format!(
+        r#"set -e
+APP={app}
+DMG={dmg}
+M=$(mktemp -d /tmp/anywhere-update.XXXXXX)
+hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$M" "$DMG" >/dev/null
+trap 'hdiutil detach "$M" -force >/dev/null 2>&1 || true' EXIT
+test -d "$M/Anywhere.app"
+rm -rf "$APP.new" "$APP.old"
+ditto "$M/Anywhere.app" "$APP.new"
+mv "$APP" "$APP.old"
+mv "$APP.new" "$APP"
+rm -rf "$APP.old"
+"#,
+        app = shell_quote(&app.display().to_string()),
+        dmg = shell_quote(&dmg.display().to_string()),
+    );
+    // You own the app after dragging it to Applications: no password.
+    // Otherwise (installed by another account) ask once.
+    let ok = std::process::Command::new("/bin/sh").args(["-c", &script]).status().is_ok_and(|s| s.success());
+    if !ok {
+        run_as_admin(&script)?;
+    }
+    if installed() {
+        let _ = std::process::Command::new("/bin/launchctl")
+            .args(["kickstart", "-k", &format!("gui/{}/{LABEL}", uid())])
+            .status();
+    }
+    std::process::Command::new("/usr/bin/open").arg("-n").arg(&app).args(["--args", "--after-update"]).spawn()?;
+    Ok(())
+}
+
+/// Install the Mac add-ons that are missing (`BlackHole` for the microphone,
+/// Tailscale), downloaded from their makers, with one password prompt.
+#[cfg(target_os = "macos")]
+pub fn install_addons() -> anyhow::Result<()> {
+    let dir = aa_platform::trust::user_dir().join("addons");
+    std::fs::create_dir_all(&dir)?;
+    let mut pkgs = Vec::new();
+    let mut problems = Vec::new();
+    if !Path::new("/Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver").exists() {
+        match blackhole_url().and_then(|u| {
+            let p = dir.join("BlackHole2ch.pkg");
+            aa_platform::update::download(&u, &p).map(|()| p)
+        }) {
+            Ok(p) => pkgs.push(p),
+            Err(e) => problems.push(format!("BlackHole: {e}")),
+        }
+    }
+    if !aa_platform::tailscale::installed() {
+        let p = dir.join("Tailscale.pkg");
+        match aa_platform::update::download("https://pkgs.tailscale.com/stable/Tailscale-latest-macos.pkg", &p) {
+            Ok(()) => pkgs.push(p),
+            Err(e) => problems.push(format!("Tailscale: {e}")),
+        }
+    }
+    if !pkgs.is_empty() {
+        let script: String = pkgs
+            .iter()
+            .map(|p| format!("/usr/sbin/installer -pkg {} -target / || true\n", shell_quote(&p.display().to_string())))
+            .collect();
+        run_as_admin(&script)?;
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    anyhow::ensure!(problems.is_empty(), "{}", problems.join("; "));
+    Ok(())
+}
+
+/// The newest `BlackHole` 2-channel installer on its GitHub page.
+#[cfg(target_os = "macos")]
+fn blackhole_url() -> anyhow::Result<String> {
+    let out = aa_platform::update::curl()
+        .args(["-H", "User-Agent: Anywhere"])
+        .arg("https://api.github.com/repos/ExistentialAudio/BlackHole/releases/latest")
+        .output()?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    v.get("assets")
+        .and_then(|a| a.as_array())
+        .and_then(|a| {
+            a.iter().find_map(|x| {
+                let name = x.get("name")?.as_str()?;
+                (name.starts_with("BlackHole2ch") && name.ends_with(".pkg"))
+                    .then(|| x.get("browser_download_url")?.as_str().map(str::to_owned))
+                    .flatten()
+            })
+        })
+        .ok_or_else(|| anyhow::anyhow!("no installer found; get it from existential.audio/blackhole"))
+}
+
+/// Install the Windows add-ons that are missing (controllers, microphone
+/// cable, Tailscale): the installer's own script, run once as administrator.
+#[cfg(target_os = "windows")]
+pub fn install_addons() -> anyhow::Result<()> {
+    let path = aa_platform::trust::user_dir().join("addons.ps1");
+    std::fs::write(&path, include_str!("../../../packaging/windows/addons.ps1"))?;
+    let params = format!("-NoProfile -ExecutionPolicy Bypass -File \"{}\" controllers mic tailscale", path.display());
+    let r = aa_platform::windows::session::run_elevated("powershell.exe", &params);
+    let _ = std::fs::remove_file(&path);
+    r.map(|_| ())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn install_addons() -> anyhow::Result<()> {
+    anyhow::bail!("only on a Mac or a PC")
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

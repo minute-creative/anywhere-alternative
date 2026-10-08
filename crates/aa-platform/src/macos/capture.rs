@@ -205,7 +205,10 @@ impl SckCapture {
             config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
             config.setColorMatrix(kCVImageBufferYCbCrMatrix_ITU_R_709_2);
             config.setMinimumFrameInterval(CMTime::new(1, i32::from(refresh_hz)));
-            config.setShowsCursor(true);
+            // No cursor in the picture: the viewer shows its own pointer,
+            // which never lags. A drawn-in cursor trailed it on every fast
+            // move ("I see two cursors").
+            config.setShowsCursor(false);
             config.setQueueDepth(4);
             config.setScalesToFit(true);
             SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, &config, None)

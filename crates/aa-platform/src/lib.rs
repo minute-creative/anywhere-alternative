@@ -39,6 +39,7 @@ pub mod playout;
 pub mod sw;
 pub mod tailscale;
 pub mod trust;
+pub mod update;
 pub mod usbip;
 
 #[cfg(target_os = "macos")]

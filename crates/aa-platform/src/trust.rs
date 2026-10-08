@@ -58,8 +58,12 @@ pub fn system_dir() -> PathBuf {
 /// Where the sharing side keeps its key, pairings and code.
 pub fn host_dir() -> PathBuf {
     if std::env::var_os("AA_DATA_DIR").is_none() && cfg!(any(target_os = "macos", target_os = "windows")) {
+        // The marker is written by the "share at all times" setup (0.4.1
+        // left a key there instead), so a folder that merely exists never
+        // moves this computer's identity.
         let sys = system_dir();
-        if sys.is_dir() && writable(&sys) {
+        let set_up = sys.join("always-on").exists() || sys.join("host.key").exists();
+        if set_up && writable(&sys) {
             return sys;
         }
     }
