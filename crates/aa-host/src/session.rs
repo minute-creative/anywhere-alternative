@@ -353,7 +353,7 @@ fn start_beacon(port: u16) {
             std::thread::sleep(Duration::from_secs(1));
         }
     });
-    tracing::info!("announcing this PC on the local network");
+    tracing::info!("announcing this computer on the local network");
 }
 
 /// Send what was copied on this PC (if a viewer is connected; otherwise the
