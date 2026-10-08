@@ -248,6 +248,23 @@ resent. If the receiver is silent the whole transfer repeats (0.6/1/2/4 s).
 4 MB: ~1 s direct; arrives whole at 1% loss. Only copies made *after* connecting are shared. Limit 32 MB.
 Unencrypted on the LAN until stage 3 adds encryption.
 
+### Mac host (2026-10-08)
+
+`aa-platform/src/macos/`: `capture.rs` (ScreenCaptureKit `SCStream` on the
+main display, NV12 video range BT.709, cursor shown, frames only on
+change, ≤3840 wide unless `AA_MAC_MAX_WIDTH`), `encoder.rs`
+(`VTCompressionSession`, low-latency rate control when available,
+real-time, no reordering, keyframes on request, AVCC → Annex-B with
+parameter sets before keyframes), `audio.rs` (second, audio-only SCStream,
+48 kHz stereo float → 10 ms i16 frames, own process excluded), `input.rs`
+(CGEvent with modifier flags on every event, click counting via
+`hid_mac::ClickCounter`, drag events, line vs pixel scrolling;
+`hid_mac.rs` key table is portable and tested). Keep-awake spawns
+`/usr/bin/caffeinate -d -i -u -w <pid>`. The Welcome message now carries
+`host_os`; the viewer maps Ctrl↔Cmd by (viewer OS, host OS).
+Permissions: Screen Recording (capture + sound) and Accessibility (input)
+for whichever app runs `aa-host`.
+
 ### Controllers
 
 Viewer (`pads.rs`): `gilrs` reads every controller (DualSense, DualShock,

@@ -235,6 +235,17 @@ only sees buttons, so we went raw:
   `matches!`); `is_none_or` is newer than our MSRV 1.80.
 - Simulated end to end, chaos suite 12/12.
 
+## Day 5, later — Mac as host (2026-10-08)
+
+Commit history rewritten so every commit shows only the owner; CLAUDE.md
+now says so for future sessions.
+Built the Mac host from the objc2 bindings' sources (read locally, since
+nothing Mac compiles here): ScreenCaptureKit capture and sound,
+VideoToolbox encode, Quartz input, caffeinate. CI caught two things:
+an Objective-C object sent through a channel needs a Send wrapper, and
+framework names in docs need backticks. Green on all three systems on
+the third push. Real-Mac test pending.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.

@@ -110,9 +110,14 @@ grey"; want all accessories (mic, headphones, controllers, other USB).
    - Drives/files → file transfer/shared folder, not USB.
    - Drawing tablets → pen events (pressure/tilt) over the input channel.
    - Anything else: ask which devices they actually mean first.
-5. Mac as host (their stated primary use case): ScreenCaptureKit capture
-   (+ system audio), VideoToolbox HEVC encode, CGEvent input; Windows
-   viewer then needs hardware decode (D3D11VA) for 4K. Big stage.
+5. Mac as host: **built 2026-10-08, CI green, not yet run on the Mac.**
+   ScreenCaptureKit picture + system sound, VideoToolbox HEVC/H.264,
+   Quartz input, caffeinate. Owner test: `aa-host` on the Mac, viewer on
+   the PC (H.264, software decode for now) or another Mac. Grant Screen
+   Recording + Accessibility to Terminal. Still to do: Windows viewer
+   hardware decode (D3D11VA) for 4K, mic into the Mac (needs a virtual
+   audio device like BlackHole), controllers on a Mac host (needs a
+   DriverKit extension), lock-screen behaviour.
 6. Zero-copy Mac decode (IOSurface → Metal), multi-monitor, encryption +
    internet stage.
 
