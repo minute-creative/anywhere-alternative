@@ -308,6 +308,19 @@ itself, so the app's request file can't make it run anything else); Mac
 replaces its own bundle. Writing GitHub secrets for a fixed Mac signing
 certificate was blocked in this session; left a script for the owner.
 
+## Day 5, late night — mute on Mac host, blocky still screens (v0.4.3)
+
+Owner: muting "the PC" from the viewer didn't mute the Mac (no Mac
+SpeakerControl existed; overlay always said "PC"). Screenshot of a still
+screen showed blocky edges: frames only come when the screen changes, so
+the last rushed frame after movement stayed. Host now re-encodes the last
+picture at 150/400 ms and sends a fresh keyframe at 900 ms of stillness
+(mock: 1 real + 3 refinement frames per still second, all decode). Also
+a manual shutdown isn't a power cut (autorestart only covers power loss);
+asked for `service.log` and to check aa-host's own permissions after the
+Mac restart test failed. Disk filled up mid-build (29 GB target dir):
+`rm -rf target/debug/incremental` between rounds.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.
