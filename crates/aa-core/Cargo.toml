@@ -11,6 +11,15 @@ bytes.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Pairing and encryption (see secure.rs). All pure Rust, audited RustCrypto
+# and dalek crates, the same ones many VPNs and messengers use.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+spake2 = "0.4"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [lints]
 workspace = true

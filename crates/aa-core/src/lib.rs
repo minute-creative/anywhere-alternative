@@ -24,6 +24,7 @@ pub mod control;
 pub mod control_flow;
 pub mod ds5;
 pub mod input;
+pub mod secure;
 pub mod stats;
 pub mod video;
 pub mod wire;
@@ -31,4 +32,4 @@ pub mod wire;
 /// Protocol version. Bump on any wire-incompatible change; both peers must
 /// match, and the handshake refuses otherwise. Pre-1.0 we don't promise
 /// compatibility between versions at all.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;

@@ -15,6 +15,7 @@ mod audio;
 mod ds5;
 mod keymap;
 mod link;
+mod net;
 mod overlay;
 mod pacing;
 mod pads;
@@ -105,6 +106,11 @@ struct Args {
     /// the host's game sends back to it.
     #[arg(long)]
     test_ds5: bool,
+
+    /// Pair with the host first, using the six-digit code from its Share
+    /// page (only needed once per pair of computers).
+    #[arg(long)]
+    pair: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -120,6 +126,10 @@ fn main() -> anyhow::Result<()> {
     }
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
     let host: SocketAddr = runtime.block_on(aa_platform::discover::resolve(args.host.as_deref()))?;
+    if let Some(code) = &args.pair {
+        let p = runtime.block_on(aa_platform::pairing::pair(host, code))?;
+        tracing::info!(name = p.name, "paired; from now on this computer connects without a code");
+    }
     let (cmd_tx, cmd_rx) = link::command_channel();
     if args.test_gamepad {
         pads::spawn_test(cmd_tx.clone());
@@ -191,8 +201,11 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// How long we keep trying to get back to a host that went quiet.
-const RECONNECT_FOR: std::time::Duration = std::time::Duration::from_secs(120);
+/// Without a window (tests), how long we keep trying to get back to a host
+/// that went quiet. With a window we keep trying until it is closed: the
+/// other computer may be restarting after a power cut, or the Wi-Fi coming
+/// back, and the person expects the picture to return by itself.
+const RECONNECT_HEADLESS: std::time::Duration = std::time::Duration::from_secs(120);
 
 fn backends(args: &Args) -> anyhow::Result<aa_platform::ViewerBackends> {
     if args.mock {
@@ -235,6 +248,8 @@ async fn run_reconnecting(
 ) -> anyhow::Result<()> {
     let mut host = first_host;
     let mut lost_since: Option<std::time::Instant> = None;
+    let host_key: std::sync::Arc<std::sync::Mutex<Option<aa_core::secure::PublicKeyBytes>>> = std::sync::Arc::default();
+    let mut attempt = 0usize;
     loop {
         let on_connected: Option<Box<dyn Fn() + Send>> =
             status.clone().map(|s| Box::new(move || s(window::Wake::Connected)) as Box<dyn Fn() + Send>);
@@ -250,6 +265,7 @@ async fn run_reconnecting(
             on_status: status.clone().map(|s| {
                 Box::new(move |m: Option<String>| s(window::Wake::HostStatus(m))) as Box<dyn Fn(Option<String>) + Send>
             }),
+            host_key_out: Some(std::sync::Arc::clone(&host_key)),
         };
         let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = std::sync::Arc::clone(&connected);
@@ -276,21 +292,54 @@ async fn run_reconnecting(
         if !lost && !retrying {
             return Err(e);
         }
+        if e.downcast_ref::<net::NotPaired>().is_some() {
+            return Err(e);
+        }
         if lost_since.is_none() {
             lost_since = Some(std::time::Instant::now());
-            tracing::warn!("lost the host; reconnecting for up to {RECONNECT_FOR:?}");
+            tracing::warn!("lost the host; reconnecting");
         }
-        if lost_since.is_some_and(|t| t.elapsed() > RECONNECT_FOR) {
+        if frames.is_none() && lost_since.is_some_and(|t| t.elapsed() > RECONNECT_HEADLESS) {
             return Err(e.context("gave up reconnecting"));
         }
         if let Some(s) = &status {
             s(window::Wake::Reconnecting);
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        // It may be back under a new address; fall back to the old one.
-        if let Ok(found) = aa_platform::discover::resolve(args.host.as_deref()).await {
-            host = found;
+        // Back off gently (1 s, then 2 s, at most 5 s) so a long outage
+        // doesn't flood the network, but a blip is over in a second.
+        attempt += 1;
+        tokio::time::sleep(std::time::Duration::from_secs(attempt.min(5) as u64)).await;
+        let key = *host_key.lock().expect("key");
+        host = next_address(args, host, key, attempt).await;
+    }
+}
+
+/// Where to try next: the same computer wherever it answers now (found by
+/// its key: new home address, or through Tailscale), else each address it
+/// was ever seen at in turn, else the one we had.
+async fn next_address(
+    args: &Args,
+    current: SocketAddr,
+    key: Option<aa_core::secure::PublicKeyBytes>,
+    attempt: usize,
+) -> SocketAddr {
+    let Some(key) = key else {
+        // Never connected yet: the old behaviour (name or discovery).
+        return aa_platform::discover::resolve(args.host.as_deref()).await.unwrap_or(current);
+    };
+    if let Some(found) = aa_platform::discover::locate(&key).await {
+        if found != current {
+            tracing::info!(addr = %found, "found it again at a new address");
         }
+        return found;
+    }
+    let known: Vec<SocketAddr> = aa_platform::trust::paired_host(&key)
+        .map(|h| h.addrs.iter().filter_map(|a| a.parse().ok()).collect())
+        .unwrap_or_default();
+    if known.is_empty() {
+        current
+    } else {
+        known[attempt % known.len()]
     }
 }
 

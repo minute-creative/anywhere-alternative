@@ -48,6 +48,12 @@ pub fn run() -> Vec<Check> {
             url: "ms-windows-store://pdp/?ProductId=9NMZLZ57R3T7",
         });
     }
+    v.push(Check {
+        name: "Tailscale",
+        why: "Reach your computers from anywhere, not only on the same Wi-Fi (free)",
+        ok: aa_platform::tailscale::installed(),
+        url: "https://tailscale.com/download",
+    });
     if cfg!(target_os = "macos") {
         v.push(Check {
             name: "BlackHole 2ch",

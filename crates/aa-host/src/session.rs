@@ -14,9 +14,9 @@ use aa_core::wire::{self, Header, Kind, Packet, SeqCounter};
 use aa_core::PROTOCOL_VERSION;
 use aa_platform::{EncodedFrame, HostBackends};
 use bytes::{Buf, Bytes, BytesMut};
-use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use crate::net::Net;
 use crate::pipeline::{self, PipelineControl};
 
 static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -52,7 +52,7 @@ const TAKEOVER_AFTER_SILENCE: Duration = Duration::from_millis(1500);
 
 #[allow(clippy::too_many_lines)] // one select! loop; splitting it would hide the flow
 pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<()> {
-    let socket = Arc::new(crate::udp::bind(listen)?);
+    let socket = Arc::new(crate::net::Net::bind(listen)?);
     tracing::info!("listening on {}", socket.local_addr()?);
     // The addresses to type on the viewer if automatic discovery is blocked.
     let port = socket.local_addr()?.port();
@@ -135,7 +135,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
         drop(audio_tx);
     }
 
-    start_beacon(listen.port());
+    start_beacon(listen.port(), socket.public_key_hex());
 
     let mut viewer: Option<Viewer> = None;
     let seq = Arc::new(SeqCounter::default());
@@ -356,13 +356,13 @@ impl MicSink {
 
 /// Announce this PC on every network adapter once a second so viewers can
 /// find it without anyone typing an address (see `aa_platform::lan`).
-fn start_beacon(port: u16) {
+fn start_beacon(port: u16, key: String) {
     // AA_SIMULATE_NO_BEACON: test switch, as if the router filtered them.
     if std::env::var_os("AA_SIMULATE_NO_BEACON").is_some() {
         return;
     }
-    let name = gethostname::gethostname().to_string_lossy().into_owned();
-    let payload = ControlMessage::Beacon { name, port }.encode();
+    let name = aa_platform::trust::computer_name();
+    let payload = ControlMessage::Beacon { name, port, key }.encode();
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN + payload.len());
     Header { kind: Kind::Control, flags: 0, seq: 0, frame_id: 0, slice_index: 0, slice_count: 1 }.write(&mut out);
     out.extend_from_slice(&payload);
@@ -383,7 +383,7 @@ fn start_beacon(port: u16) {
 /// Send what was copied on this PC (if a viewer is connected; otherwise the
 /// copy just stays here) and repeat any unacknowledged transfer.
 async fn clip_pump(
-    socket: &UdpSocket,
+    socket: &Net,
     link: Option<&aa_platform::clipboard::ClipboardLink>,
     clip: &mut aa_core::clipboard::ClipSync,
     dest: Option<SocketAddr>,
@@ -406,7 +406,7 @@ async fn clip_pump(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one dispatch per packet kind
 async fn handle_packet(
-    socket: &UdpSocket,
+    socket: &Net,
     packet: &Packet,
     from: SocketAddr,
     viewer: &mut Option<Viewer>,
@@ -472,7 +472,8 @@ async fn handle_packet(
                     }
                     match negotiate(host_caps, &capabilities) {
                         Ok(negotiated) => {
-                            tracing::info!(%from, ?negotiated, "viewer connected");
+                            let name = socket.peer_name(from).unwrap_or_default();
+                            tracing::info!(%from, name, ?negotiated, "viewer connected");
                             let codec = negotiated.codec;
                             send_control(
                                 socket,
@@ -526,8 +527,17 @@ async fn handle_packet(
                 // questions like a PC firewall would (beacons still go out).
                 ControlMessage::Discover if std::env::var_os("AA_SIMULATE_FIREWALL").is_some() => {}
                 ControlMessage::Discover => {
-                    let name = gethostname::gethostname().to_string_lossy().into_owned();
-                    send_control(socket, from, &ControlMessage::Here { name }, seq).await?;
+                    let name = aa_platform::trust::computer_name();
+                    let port = socket.local_addr().map_or(aa_platform::discover::DEFAULT_PORT, |a| a.port());
+                    let addrs =
+                        aa_platform::lan::ipv4_interfaces().iter().map(|i| format!("{}:{port}", i.ip)).collect();
+                    send_control(
+                        socket,
+                        from,
+                        &ControlMessage::Here { name, key: socket.public_key_hex(), addrs },
+                        seq,
+                    )
+                    .await?;
                 }
                 ControlMessage::SetMaxBitrate { kbps } if is_current_viewer => {
                     bitrate.set_max_kbps(kbps);
@@ -590,7 +600,7 @@ async fn handle_packet(
 /// Pulls encoded frames and sends them to the current viewer, paced across
 /// the frame interval. Runs independently of the receive loop.
 async fn sender_task(
-    socket: Arc<UdpSocket>,
+    socket: Arc<Net>,
     mut frame_rx: mpsc::Receiver<EncodedFrame>,
     mut audio_rx: mpsc::Receiver<pipeline::AudioPacket>,
     video_dest: Arc<std::sync::Mutex<Option<SocketAddr>>>,
@@ -644,12 +654,7 @@ async fn sender_task(
     tracing::info!("sender task exiting");
 }
 
-async fn send_control(
-    socket: &UdpSocket,
-    to: SocketAddr,
-    msg: &ControlMessage,
-    seq: &SeqCounter,
-) -> anyhow::Result<()> {
+async fn send_control(socket: &Net, to: SocketAddr, msg: &ControlMessage, seq: &SeqCounter) -> anyhow::Result<()> {
     let payload = msg.encode();
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN + payload.len());
     Header { kind: Kind::Control, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }

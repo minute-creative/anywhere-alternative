@@ -13,6 +13,10 @@ thiserror.workspace = true
 bytes.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+# Pairing files (who this computer trusts) are small JSON files.
+serde.workspace = true
+serde_json.workspace = true
+gethostname.workspace = true
 # Software H.264 (Cisco OpenH264, built from source). The universal fallback
 # codec and the encoder the mock host uses so the stream is real video.
 openh264.workspace = true

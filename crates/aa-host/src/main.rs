@@ -1,12 +1,8 @@
 //! `aa-host`: run on the machine you want to reach.
 //!
-//! Stage 1 scope: one viewer at a time, LAN, no encryption, no discovery.
-//! You tell the viewer the host's IP. Everything beyond that is a later stage
-//! and slots in without changing this crate's shape:
-//!
-//! * stage 3 wraps the UDP socket in an encrypted transport and swaps the
-//!   "listen on a port" for "register with the signalling server";
-//! * stage 4 adds audio/clipboard/file channels as more packet kinds.
+//! One viewer at a time. Viewers find it on the local network (or through
+//! Tailscale), must have paired once with the code it shows, and talk to
+//! it over an encrypted link (`net.rs`).
 //!
 //! Threads:
 //!
@@ -18,6 +14,7 @@
 //! Capture/encode and input injection are blocking OS calls, so each gets a
 //! dedicated OS thread; the network loop is async on tokio.
 
+mod net;
 mod pipeline;
 mod session;
 mod udp;
@@ -70,6 +67,13 @@ struct Args {
     /// a host it started, even one running as administrator).
     #[arg(long)]
     stop_file: Option<std::path::PathBuf>,
+
+    /// Run as the always-on background service (macOS: started by the
+    /// system at the login screen and in the logged-in session, see the
+    /// app's "share after a restart"). Logs to a file, waits for the port
+    /// if the other session's copy still holds it, never gives up.
+    #[arg(long)]
+    service: bool,
 }
 
 fn parse_resolution(s: &str) -> Result<Resolution, String> {
@@ -141,14 +145,58 @@ fn real_host_backends(_encoder: &str) -> anyhow::Result<aa_platform::HostBackend
     Ok(aa_platform::host_backends()?)
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Is this the copy running at the login screen (as the system)?
+fn at_login_screen() -> bool {
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        // SAFETY: geteuid has no arguments and cannot fail.
+        unsafe { geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    false
+}
+
+fn init_logging(args: &Args) {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    if args.service {
+        let name = if at_login_screen() { "service-login.log" } else { "service.log" };
+        let path = aa_platform::trust::host_dir().join(name);
+        if let Ok(file) = std::fs::File::create(&path) {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+            return;
+        }
+    }
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(filter)
         // Colours only in a terminal; log files (the Anywhere app) stay plain.
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    init_logging(&args);
+    if args.service {
+        tracing::info!(login_screen = at_login_screen(), "sharing service starting");
+        // Logging in or out: the other session's copy may still hold the
+        // port for a moment. Wait for it rather than failing.
+        let mut waited = 0;
+        while std::net::UdpSocket::bind(args.listen).is_err() {
+            if waited == 0 {
+                tracing::info!("port {} is busy; waiting for it", args.listen.port());
+            }
+            waited += 1;
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
 
     if args.bench {
         return bench();
@@ -161,7 +209,17 @@ async fn main() -> anyhow::Result<()> {
         }
         aa_platform::mock::host_backends(args.mock_res, args.mock_fps, args.mock_raw)?
     } else {
-        real_host_backends(&args.encoder).context("real host backends unavailable; try --mock")?
+        match real_host_backends(&args.encoder) {
+            Ok(b) => b,
+            Err(e) if args.service => {
+                // Not allowed to see the screen yet (permissions), or nothing
+                // to show: try again in a while rather than spinning.
+                tracing::error!("cannot share the screen yet: {e:#}; retrying in 30 s");
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                return Err(e).context("real host backends unavailable");
+            }
+            Err(e) => return Err(e).context("real host backends unavailable; try --mock"),
+        }
     };
 
     if let Some(path) = args.stop_file.clone() {

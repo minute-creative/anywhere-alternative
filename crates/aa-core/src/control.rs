@@ -38,11 +38,26 @@ pub enum ControlMessage {
     /// Viewer → every host on the LAN (broadcast): who is out there?
     Discover,
     /// Host → viewer: I am, and this is my name. Sent to whoever asked.
-    Here { name: String },
+    Here {
+        name: String,
+        /// The host's public key (hex): tells the app whether it is a
+        /// computer we already paired with, before connecting.
+        #[serde(default)]
+        key: String,
+        /// Every address the host has (home network, Tailscale…), so a
+        /// computer paired at home can still be reached from elsewhere.
+        #[serde(default)]
+        addrs: Vec<String>,
+    },
     /// Host → whole LAN, every second, unasked: "I'm here, connect on
     /// `port`". The viewer only listens, so this works even when the PC's
     /// firewall drops incoming broadcasts (outgoing ones are allowed).
-    Beacon { name: String, port: u16 },
+    Beacon {
+        name: String,
+        port: u16,
+        #[serde(default)]
+        key: String,
+    },
     /// Host → viewer: why the picture is paused ("the PC is locked…"), or
     /// `None` when it is back. Repeated every few seconds while set.
     HostStatus { message: Option<String> },

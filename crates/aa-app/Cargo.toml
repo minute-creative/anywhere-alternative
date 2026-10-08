@@ -11,6 +11,7 @@ name = "anywhere"
 path = "src/main.rs"
 
 [dependencies]
+aa-core.workspace = true
 aa-platform.workspace = true
 anyhow.workspace = true
 serde.workspace = true

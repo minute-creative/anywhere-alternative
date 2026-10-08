@@ -9,15 +9,7 @@ use std::time::{Duration, Instant};
 
 /// Where the app keeps its logs and settings.
 pub fn data_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    let base = std::env::var_os("APPDATA").map(PathBuf::from);
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"));
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let base = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"));
-    let dir = base.unwrap_or_else(std::env::temp_dir).join("AnywhereAlternative");
-    let _ = std::fs::create_dir_all(&dir);
-    dir
+    aa_platform::trust::user_dir()
 }
 
 /// A program shipped next to this one (same folder in the installed app).
@@ -141,6 +133,8 @@ impl Drop for Host {
 pub struct Viewer {
     pub child: Child,
     pub target: String,
+    /// The computer's name, for the window.
+    pub label: String,
     pub log: PathBuf,
 }
 
@@ -164,7 +158,7 @@ pub struct ViewerPrefs {
 }
 
 impl Viewer {
-    pub fn start(target: &str, p: ViewerPrefs) -> anyhow::Result<Self> {
+    pub fn start(target: &str, label: &str, p: ViewerPrefs) -> anyhow::Result<Self> {
         let log = data_dir().join("viewer.log");
         let (out, err) = log_file(&log)?;
         let exe = sibling("aa-viewer");
@@ -183,7 +177,7 @@ impl Viewer {
             }
         }
         let child = quiet(&mut cmd).spawn().map_err(|e| anyhow::anyhow!("could not start {}: {e}", exe.display()))?;
-        Ok(Self { child, target: target.to_owned(), log })
+        Ok(Self { child, target: target.to_owned(), label: label.to_owned(), log })
     }
 
     pub fn running(&mut self) -> bool {

@@ -1,10 +1,11 @@
 //! Anywhere: the app people actually open.
 //!
 //! Four pages in one light, calm window:
-//! - **Connect**: computers that are sharing appear by name; one click
-//!   opens the viewer. The last computer used is remembered.
-//! - **Share**: one button lets others connect to this computer, with live
-//!   status, the address to type, and plain-words fixes for anything missing.
+//! - **Connect**: computers that are sharing appear by name, at home or
+//!   through Tailscale. The first time, you type the code the other one
+//!   shows; after that one click connects.
+//! - **Share**: one button lets your paired computers connect, with the
+//!   pairing code for new ones, live status, and plain-words fixes.
 //! - **Settings**: how the viewer starts (quality, sound, microphone,
 //!   full screen…) and how sharing behaves.
 //! - **Extras**: optional drivers and permissions, each with a button.
@@ -18,11 +19,13 @@
 
 mod checks;
 mod procs;
+mod service;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aa_platform::discover::{find_hosts, Found, DEFAULT_PORT};
+use aa_platform::trust;
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Layout, Margin, RichText, Sense,
     Shadow, Stroke, TextStyle, Ui,
@@ -299,7 +302,11 @@ fn read_status(lines: &[String]) -> HostStatus {
             s.addresses = a.split("  or  ").map(|x| x.trim().to_owned()).filter(|x| !x.is_empty()).collect();
         } else if l.contains("viewer connected") || l.contains("viewer reconnected") {
             let from = l.split("from=").nth(1).or_else(|| l.split("new=").nth(1));
-            s.viewer = Some(from.and_then(|r| r.split_whitespace().next()).unwrap_or("someone").to_owned());
+            let name = l.split("name=\"").nth(1).and_then(|r| r.split('"').next()).filter(|n| !n.is_empty());
+            let who = name.or_else(|| from.and_then(|r| r.split_whitespace().next())).unwrap_or("someone");
+            if l.contains("viewer connected") || s.viewer.is_none() {
+                s.viewer = Some(who.to_owned());
+            }
         } else if l.contains("viewer left") || l.contains("viewer timed out") {
             s.viewer = None;
         }
@@ -323,12 +330,42 @@ enum Page {
     Extras,
 }
 
+/// Results of work done in the background (so the window never freezes).
+enum Bg {
+    Probed(String, Result<Found, String>),
+    Paired(String, Result<String, String>),
+    Service(Result<(), String>),
+}
+
+/// "Type the code shown on <name>".
+#[derive(Debug, Clone)]
+struct PairPrompt {
+    target: String,
+    name: String,
+    code: String,
+    busy: bool,
+    error: Option<String>,
+}
+
 struct App {
     page: Page,
+    bg: Arc<Mutex<Vec<Bg>>>,
+    ctx: egui::Context,
+    pair: Option<PairPrompt>,
+    paired_hosts: Vec<trust::PairedHost>,
+    paired_viewers: Vec<trust::PairedViewer>,
+    pair_code: String,
+    /// Mac: sharing is always on (login screen, after a restart).
+    service_on: bool,
+    service_busy: bool,
+    service_error: Option<String>,
+    filevault: Option<bool>,
+    /// Windows: Anywhere starts when you sign in.
+    sign_in: bool,
+    lists_at: Instant,
     icon: Option<egui::TextureHandle>,
     settings: Settings,
     found: Arc<Mutex<Vec<Found>>>,
-    recent: Option<String>,
     host: Option<procs::Host>,
     host_error: Option<String>,
     host_lines: Vec<String>,
@@ -360,10 +397,21 @@ impl App {
         };
         let mut app = Self {
             page,
+            bg: Arc::default(),
+            ctx: cc.egui_ctx.clone(),
+            pair: None,
+            paired_hosts: trust::paired_hosts(),
+            paired_viewers: trust::paired_viewers(),
+            pair_code: trust::pair_code(),
+            service_on: service::installed(),
+            service_busy: false,
+            service_error: None,
+            filevault: service::filevault_on(),
+            sign_in: service::starts_at_sign_in(),
+            lists_at: Instant::now(),
             icon,
             settings: Settings::load(),
             found,
-            recent: aa_platform::discover::remembered().map(|a| a.to_string()),
             host: None,
             host_error: None,
             host_lines: Vec::new(),
@@ -375,10 +423,137 @@ impl App {
             last_poll: Instant::now(),
             copied: None,
         };
-        if app.settings.share_on_launch {
+        let background = std::env::args().any(|a| a == "--background");
+        if (app.settings.share_on_launch || background) && !app.service_on {
             app.start_sharing();
         }
+        if background {
+            cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
         app
+    }
+
+    /// Run `work` on its own thread; its result arrives in `poll`.
+    fn spawn(&self, work: impl FnOnce(&tokio::runtime::Runtime) -> Bg + Send + 'static) {
+        let (bg, ctx) = (Arc::clone(&self.bg), self.ctx.clone());
+        let _ = std::thread::Builder::new().name("app-task".into()).spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
+            let r = work(&rt);
+            if let Ok(mut q) = bg.lock() {
+                q.push(r);
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Connect to a computer: straight away if paired, else ask for its code.
+    fn request_connect(&mut self, target: &str, label: &str, found: Option<&Found>) {
+        match found.and_then(|f| f.key) {
+            Some(k) if trust::paired_host(&k).is_some() => self.connect(target, label),
+            Some(_) => self.ask_code(target, label),
+            None => {
+                // Typed address, or an older Anywhere: ask it who it is first.
+                self.viewer_note = Some((format!("Checking {label}…"), false));
+                let t = target.to_owned();
+                self.spawn(move |rt| {
+                    let r = match parse_target(&t) {
+                        Some(addr) => rt.block_on(aa_platform::pairing::probe(addr)).map_err(|e| e.to_string()),
+                        None => Err(format!("\"{t}\" isn't an address (for example 192.168.1.20)")),
+                    };
+                    Bg::Probed(t, r)
+                });
+            }
+        }
+    }
+
+    fn ask_code(&mut self, target: &str, name: &str) {
+        self.pair = Some(PairPrompt {
+            target: target.to_owned(),
+            name: name.to_owned(),
+            code: String::new(),
+            busy: false,
+            error: None,
+        });
+        self.page = Page::Connect;
+    }
+
+    fn submit_code(&mut self) {
+        let Some(p) = self.pair.as_mut() else { return };
+        let Some(addr) = parse_target(&p.target) else { return };
+        p.busy = true;
+        p.error = None;
+        let (t, code) = (p.target.clone(), p.code.clone());
+        self.spawn(move |rt| {
+            Bg::Paired(
+                t,
+                rt.block_on(aa_platform::pairing::pair(addr, &code)).map(|w| w.name).map_err(|e| e.to_string()),
+            )
+        });
+    }
+
+    fn set_service(&mut self, on: bool) {
+        self.service_busy = true;
+        self.service_error = None;
+        if on {
+            // The always-on copy needs the port this window's copy holds.
+            if let Some(h) = self.host.as_mut() {
+                h.stop();
+            }
+        }
+        self.spawn(move |_| {
+            Bg::Service(if on { service::install() } else { service::uninstall() }.map_err(|e| e.to_string()))
+        });
+    }
+
+    fn handle_bg(&mut self) {
+        let done: Vec<Bg> = self.bg.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+        for r in done {
+            match r {
+                Bg::Probed(t, Ok(f)) => {
+                    self.viewer_note = None;
+                    match f.key {
+                        Some(k) if trust::paired_host(&k).is_some() => self.connect(&t, &f.name),
+                        Some(_) => self.ask_code(&t, &f.name),
+                        None => {
+                            self.viewer_note = Some((
+                                format!("{} runs an older Anywhere. Update it from the Releases page first.", f.name),
+                                true,
+                            ));
+                        }
+                    }
+                }
+                Bg::Probed(_, Err(e)) => self.viewer_note = Some((e, true)),
+                Bg::Paired(t, Ok(name)) => {
+                    self.pair = None;
+                    self.refresh_lists();
+                    self.connect(&t, &name);
+                }
+                Bg::Paired(_, Err(e)) => {
+                    if let Some(p) = self.pair.as_mut() {
+                        p.busy = false;
+                        p.error = Some(e);
+                    }
+                }
+                Bg::Service(r) => {
+                    self.service_busy = false;
+                    self.service_on = service::installed();
+                    match r {
+                        Err(e) if e != "cancelled" => self.service_error = Some(e),
+                        _ => {}
+                    }
+                    if !self.service_on && self.settings.share_on_launch && self.host.is_none() {
+                        self.start_sharing();
+                    }
+                }
+            }
+        }
+    }
+
+    fn refresh_lists(&mut self) {
+        self.paired_hosts = trust::paired_hosts();
+        self.paired_viewers = trust::paired_viewers();
+        self.pair_code = trust::pair_code();
+        self.lists_at = Instant::now();
     }
 
     fn start_sharing(&mut self) {
@@ -396,10 +571,9 @@ impl App {
         }
         self.viewer = None;
         self.settings.save();
-        match procs::Viewer::start(target, self.settings.viewer_prefs()) {
+        match procs::Viewer::start(target, label, self.settings.viewer_prefs()) {
             Ok(v) => {
                 self.viewer_note = Some((format!("Opening {label}…"), false));
-                self.recent = Some(target.to_owned());
                 self.viewer = Some(v);
             }
             Err(e) => self.viewer_note = Some((e.to_string(), true)),
@@ -412,6 +586,21 @@ impl App {
             return;
         }
         self.last_poll = Instant::now();
+        self.handle_bg();
+        if self.lists_at.elapsed() > Duration::from_secs(2) {
+            self.refresh_lists();
+        }
+        if self.service_on && self.host.is_none() {
+            let log = service::log_path();
+            let mut lines = procs::head(&log, 40);
+            if lines.len() >= 40 {
+                lines.extend(procs::tail(&log, 300));
+            } else {
+                lines = procs::tail(&log, 300);
+            }
+            self.host_lines = lines;
+            self.status = read_status(&self.host_lines);
+        }
         if let Some(h) = self.host.as_mut() {
             let mut lines = procs::head(&h.log, 40);
             let tail = procs::tail(&h.log, 300);
@@ -446,9 +635,14 @@ impl App {
                     .rev()
                     .find(|l| l.contains("Error") || l.contains(" ERROR ") || l.contains("failed"))
                     .map(|l| procs::plain(l));
+                let target = v.target.clone();
                 self.viewer_note =
-                    Some(problem.map_or_else(|| ("The viewer was closed.".to_owned(), false), |p| (p, true)));
+                    Some(problem.clone().map_or_else(|| ("The viewer was closed.".to_owned(), false), |p| (p, true)));
                 self.viewer = None;
+                if problem.is_some_and(|p| p.contains("not paired")) {
+                    self.viewer_note = None;
+                    self.ask_code(&target, &target);
+                }
             }
         }
         if self.checks_at.elapsed() > Duration::from_secs(10) {
@@ -477,7 +671,7 @@ impl App {
         let missing = self.checks.iter().filter(|c| !c.ok).count();
         for (page, label, badge) in [
             (Page::Connect, "Connect", None),
-            (Page::Share, "Share", self.host.is_some().then_some(("ON", GOOD))),
+            (Page::Share, "Share", (self.host.is_some() || self.service_on).then_some(("ON", GOOD))),
             (Page::Settings, "Settings", None),
             (Page::Extras, "Extras", (missing > 0).then_some(("", WARN))),
         ] {
@@ -519,11 +713,12 @@ impl App {
             ui.add_space(2.0);
         }
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            let (text, fg) = match (&self.host, &self.status.viewer, &self.viewer) {
-                (_, _, Some(v)) => (format!("Viewing {}", v.target.split(':').next().unwrap_or("")), GOOD),
-                (Some(_), Some(_), None) => ("Someone is connected here".to_owned(), GOOD),
-                (Some(_), None, None) => ("Sharing is on".to_owned(), ACCENT),
-                (None, _, None) => ("Not connected".to_owned(), FAINT),
+            let sharing = self.host.is_some() || self.service_on;
+            let (text, fg) = match (sharing, &self.status.viewer, &self.viewer) {
+                (_, _, Some(v)) => (format!("Viewing {}", v.label), GOOD),
+                (true, Some(_), None) => ("Someone is connected here".to_owned(), GOOD),
+                (true, None, None) => ("Sharing is on".to_owned(), ACCENT),
+                (false, _, None) => ("Not connected".to_owned(), FAINT),
             };
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
@@ -546,14 +741,14 @@ impl App {
     #[allow(clippy::too_many_lines)] // one page, top to bottom
     fn connect_page(&mut self, ui: &mut Ui) {
         Self::page_header(ui, "Connect", "Use another computer as if you were sitting at it.");
-        let mut go: Option<(String, String)> = None;
+        let mut go: Option<(String, String, Option<Found>)> = None;
 
         if let Some(v) = self.viewer.as_mut() {
-            let target = v.target.clone();
+            let label = v.label.clone();
             card(ui, |ui| {
                 ui.horizontal(|ui| {
                     pill(ui, "Connected", GOOD, GOOD_SOFT);
-                    ui.label(RichText::new(format!("Showing {target} in its own window")).color(TEXT));
+                    ui.label(RichText::new(format!("{label} is open in its own window")).color(TEXT));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if button(ui, "Disconnect", Kind::Danger).clicked() {
                             v.close();
@@ -575,9 +770,18 @@ impl App {
             ui.add_space(12.0);
         }
 
+        if self.pair.is_some() {
+            self.pair_card(ui);
+            ui.add_space(12.0);
+        }
+
+        let found = self.found.lock().map(|f| f.clone()).unwrap_or_default();
         card(ui, |ui| {
-            section(ui, "Computers on your network", "Computers appear here when Anywhere is sharing on them.");
-            let found = self.found.lock().map(|f| f.clone()).unwrap_or_default();
+            section(
+                ui,
+                "Your computers",
+                "Computers sharing with Anywhere, at home or through Tailscale. The first time, you type a code.",
+            );
             if found.is_empty() {
                 ui.horizontal(|ui| {
                     // A slow blink, not a spinner: spinners redraw the
@@ -594,15 +798,52 @@ impl App {
                 if i > 0 {
                     divider(ui);
                 }
+                let paired = h.paired();
                 ui.horizontal(|ui| {
                     computer_glyph(ui, ACCENT);
                     ui.vertical(|ui| {
-                        ui.label(RichText::new(&h.name).family(semibold()).color(TEXT));
-                        ui.label(RichText::new(h.addr.ip().to_string()).small().color(MUTED));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&h.name).family(semibold()).color(TEXT));
+                            if paired {
+                                ui.label(RichText::new("Paired").small().color(GOOD));
+                            }
+                        });
+                        let how = if h.via_tailscale() { "Through Tailscale" } else { "On this network" };
+                        ui.label(RichText::new(format!("{how} · {}", h.addr.ip())).small().color(MUTED));
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if button(ui, "Connect", Kind::Primary).clicked() {
-                            go = Some((h.addr.to_string(), h.name.clone()));
+                        let (text, kind) = if paired { ("Connect", Kind::Primary) } else { ("Pair", Kind::Secondary) };
+                        if button(ui, text, kind).clicked() {
+                            go = Some((h.addr.to_string(), h.name.clone(), Some(h.clone())));
+                        }
+                    });
+                });
+            }
+            // Paired computers not answering right now (switched off, or
+            // away without Tailscale): still offered, the viewer keeps trying.
+            let away: Vec<trust::PairedHost> = self
+                .paired_hosts
+                .iter()
+                .filter(|p| !found.iter().any(|f| f.key.is_some_and(|k| aa_core::secure::to_hex(&k) == p.key)))
+                .cloned()
+                .collect();
+            for p in away {
+                divider(ui);
+                ui.horizontal(|ui| {
+                    computer_glyph(ui, FAINT);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&p.name).family(semibold()).color(MUTED));
+                        ui.label(RichText::new("Paired · not answering right now").small().color(FAINT));
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.link(RichText::new("Forget").small().color(MUTED)).clicked() {
+                            trust::forget_host(&p.key);
+                            self.paired_hosts.retain(|x| x.key != p.key);
+                        }
+                        if let Some(a) = p.addrs.first() {
+                            if button(ui, "Try", Kind::Secondary).clicked() {
+                                go = Some((a.clone(), p.name.clone(), None));
+                            }
                         }
                     });
                 });
@@ -614,7 +855,7 @@ impl App {
             section(ui, "Connect by address", "If a computer doesn't show up, type the address its Share page shows.");
             ui.horizontal(|ui| {
                 let edit = egui::TextEdit::singleline(&mut self.settings.manual_address)
-                    .hint_text("e.g. 192.168.1.20")
+                    .hint_text("e.g. 192.168.1.20 or 100.101.2.3")
                     .margin(Margin::symmetric(10, 7))
                     .desired_width((ui.available_width() - 120.0).max(140.0));
                 let r = ui.add(edit);
@@ -623,18 +864,9 @@ impl App {
                     && !self.settings.manual_address.trim().is_empty()
                 {
                     let a = self.settings.manual_address.trim().to_owned();
-                    go = Some((a.clone(), a));
+                    go = Some((a.clone(), a, None));
                 }
             });
-            if let Some(r) = self.recent.clone() {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Last used").small().color(MUTED));
-                    if ui.link(RichText::new(&r).small()).clicked() {
-                        go = Some((r.clone(), r.clone()));
-                    }
-                });
-            }
         });
         ui.add_space(12.0);
 
@@ -663,15 +895,78 @@ impl App {
             );
         });
 
-        if let Some((target, label)) = go {
-            self.connect(&target, &label);
+        if let Some((target, label, found)) = go {
+            // A remembered, paired computer: connect directly.
+            let known = found.is_none() && self.paired_hosts.iter().any(|p| p.addrs.first() == Some(&target));
+            if known {
+                self.connect(&target, &label);
+            } else {
+                self.request_connect(&target, &label, found.as_ref());
+            }
+        }
+    }
+
+    fn pair_card(&mut self, ui: &mut Ui) {
+        let mut submit = false;
+        let mut cancel = false;
+        let Some(p) = self.pair.as_mut() else { return };
+        egui::Frame::NONE
+            .fill(CARD)
+            .stroke(Stroke::new(1.5, ACCENT))
+            .corner_radius(CornerRadius::same(14))
+            .inner_margin(Margin::same(18))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(title(&format!("Pair with {}", p.name), 16.0));
+                ui.label(
+                    RichText::new(format!(
+                        "On {}, open Anywhere and go to Share. Type the six-digit code shown there. You only do this once.",
+                        p.name
+                    ))
+                    .color(MUTED),
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut p.code)
+                            .hint_text("123 456")
+                            .font(FontId::new(20.0, semibold()))
+                            .margin(Margin::symmetric(12, 8))
+                            .desired_width(150.0)
+                            .char_limit(7),
+                    );
+                    if !p.busy && p.code.is_empty() {
+                        r.request_focus();
+                    }
+                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let ready = aa_core::secure::normalize_code(&p.code).len() == 6 && !p.busy;
+                    if (ui.add_enabled_ui(ready, |ui| button(ui, if p.busy { "Pairing…" } else { "Pair" }, Kind::Primary)).inner.clicked()
+                        || enter)
+                        && ready
+                    {
+                        submit = true;
+                    }
+                    if button(ui, "Cancel", Kind::Secondary).clicked() {
+                        cancel = true;
+                    }
+                });
+                if let Some(e) = &p.error {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(e).color(DANGER));
+                }
+            });
+        if submit {
+            self.submit_code();
+        }
+        if cancel {
+            self.pair = None;
         }
     }
 
     #[allow(clippy::too_many_lines)] // one page, top to bottom
     fn share_page(&mut self, ui: &mut Ui) {
         Self::page_header(ui, "Share this computer", "Let your other computers see and control this one.");
-        let sharing = self.host.is_some();
+        let sharing = self.host.is_some() || self.service_on;
         card(ui, |ui| {
             ui.horizontal(|ui| {
                 let (text, fg, bg) = match (sharing, &self.status.viewer) {
@@ -681,7 +976,9 @@ impl App {
                 };
                 pill(ui, text, fg, bg);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if sharing {
+                    if self.service_on {
+                        ui.label(RichText::new("Always on").small().family(semibold()).color(GOOD));
+                    } else if sharing {
                         if button(ui, "Stop sharing", Kind::Danger).clicked() {
                             if let Some(h) = self.host.as_mut() {
                                 h.stop();
@@ -696,10 +993,20 @@ impl App {
             ui.add_space(10.0);
             let line = match (sharing, &self.status.viewer) {
                 (false, _) => "Nobody can connect to this computer.".to_owned(),
-                (true, Some(v)) => format!("Connected from {}.", v.split(':').next().unwrap_or(v)),
+                (true, Some(v)) => format!("{} is connected.", v.split(':').next().unwrap_or(v)),
                 (true, None) => "Open Anywhere on your other computer and pick this one.".to_owned(),
             };
             ui.label(RichText::new(line).color(TEXT));
+            if self.service_on {
+                ui.label(
+                    RichText::new(
+                        "This Mac shares itself all the time, also at the login screen and after a restart. \
+                         Change that in Settings.",
+                    )
+                    .small()
+                    .color(MUTED),
+                );
+            }
 
             if sharing && !self.status.addresses.is_empty() {
                 ui.add_space(10.0);
@@ -724,6 +1031,52 @@ impl App {
                         ui.label(RichText::new("Copied").small().color(GOOD));
                     }
                 });
+            }
+        });
+
+        ui.add_space(12.0);
+        card(ui, |ui| {
+            section(
+                ui,
+                "Pairing code",
+                "The first time another computer connects, type this code there. It changes after each use.",
+            );
+            ui.horizontal(|ui| {
+                egui::Frame::NONE
+                    .fill(ACCENT_SOFT)
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(Margin::symmetric(16, 8))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(trust::spaced(&self.pair_code)).family(semibold()).size(26.0).color(ACCENT),
+                        );
+                    });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if button(ui, "New code", Kind::Secondary).clicked() {
+                        self.pair_code = trust::new_pair_code();
+                    }
+                });
+            });
+            if !sharing {
+                ui.add_space(4.0);
+                ui.label(RichText::new("Sharing must be on for the code to work.").small().color(FAINT));
+            }
+            if !self.paired_viewers.is_empty() {
+                ui.add_space(12.0);
+                ui.label(RichText::new("Computers that can connect without a code").small().color(MUTED));
+                ui.add_space(4.0);
+                for v in self.paired_viewers.clone() {
+                    ui.horizontal(|ui| {
+                        computer_glyph(ui, ACCENT);
+                        ui.label(RichText::new(if v.name.is_empty() { "A computer" } else { &v.name }).color(TEXT));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.link(RichText::new("Remove").small().color(DANGER)).clicked() {
+                                trust::forget_viewer(&v.key);
+                                self.paired_viewers.retain(|x| x.key != v.key);
+                            }
+                        });
+                    });
+                }
             }
         });
 
@@ -786,6 +1139,7 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // one page, top to bottom
     fn settings_page(&mut self, ui: &mut Ui) {
         Self::page_header(ui, "Settings", "How connections start. You can change most of these while connected too.");
         let s = &mut self.settings;
@@ -841,6 +1195,73 @@ impl App {
                 );
             }
         });
+        ui.add_space(12.0);
+        let mut want: Option<bool> = None;
+        card(ui, |ui| {
+            if cfg!(target_os = "macos") {
+                section(ui, "After a restart or power cut", "");
+                let mut on = self.service_on;
+                let flipped = switch_row(
+                    ui,
+                    "Share this Mac at all times",
+                    "Turns the Mac back on when power returns and shares it from the login screen, so you can \
+                     log in from your other computer. Asks for your Mac password once.",
+                    &mut on,
+                );
+                if flipped && !self.service_busy {
+                    want = Some(on);
+                }
+                if self.service_busy {
+                    ui.label(RichText::new("Waiting for your Mac password…").small().color(MUTED));
+                }
+                if let Some(e) = &self.service_error {
+                    ui.label(RichText::new(e).small().color(DANGER));
+                }
+                if self.filevault == Some(true) {
+                    ui.add_space(6.0);
+                    egui::Frame::NONE
+                        .fill(WARN_SOFT)
+                        .corner_radius(CornerRadius::same(10))
+                        .inner_margin(Margin::same(12))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                RichText::new(
+                                    "FileVault is on. After a restart this Mac waits for its password before macOS \
+                                     starts, and no app can show that screen. Turn FileVault off in System Settings \
+                                     → Privacy & Security if you need to reach the Mac after a power cut.",
+                                )
+                                .small()
+                                .color(WARN),
+                            );
+                            if button(ui, "Open FileVault settings", Kind::Secondary).clicked() {
+                                checks::open_privacy("FileVault");
+                            }
+                        });
+                }
+            } else {
+                section(ui, "Starting up", "");
+                let mut on = self.sign_in;
+                if switch_row(
+                    ui,
+                    "Start Anywhere when I sign in",
+                    "Opens minimised and shares this PC, so it is ready after a restart.",
+                    &mut on,
+                ) {
+                    match service::set_start_at_sign_in(on) {
+                        Ok(()) => self.sign_in = on,
+                        Err(e) => self.service_error = Some(e.to_string()),
+                    }
+                }
+                if let Some(e) = &self.service_error {
+                    ui.label(RichText::new(e).small().color(DANGER));
+                }
+            }
+        });
+        if let Some(on) = want {
+            self.set_service(on);
+        }
+        let s = &mut self.settings;
         ui.add_space(12.0);
         card(ui, |ui| {
             section(ui, "Help", "");
@@ -926,6 +1347,12 @@ impl App {
             }
         });
     }
+}
+
+/// "host:port", or a bare IP (default port).
+fn parse_target(t: &str) -> Option<std::net::SocketAddr> {
+    let t = t.trim();
+    t.parse().ok().or_else(|| t.parse::<std::net::IpAddr>().ok().map(|ip| std::net::SocketAddr::new(ip, DEFAULT_PORT)))
 }
 
 /// A small monitor drawn with shapes (crisp at any scale, no icon font).

@@ -10,6 +10,9 @@
 //! 2. **Ask**: broadcast `Discover` on every adapter's own subnet (from its
 //!    real netmask) plus the all-ones broadcast; hosts answer `Here`.
 //! 3. **Ask the last host directly** at the address that worked last time.
+//! 4. **Ask every paired computer** at every address it was ever seen at,
+//!    and every computer Tailscale says is online: that is how a computer
+//!    on another network (office, phone hotspot) is found.
 //!
 //! The first version only did (2) on one guessed subnet, and on the owner's
 //! network nothing answered.
@@ -33,7 +36,24 @@ const AFTER_FIRST: Duration = Duration::from_millis(300);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     pub name: String,
+    /// The best address to use (home network before Tailscale).
     pub addr: SocketAddr,
+    /// The host's public key, if it said (every host since 0.4 does).
+    pub key: Option<aa_core::secure::PublicKeyBytes>,
+    /// Every address it answered at.
+    pub addrs: Vec<SocketAddr>,
+}
+
+impl Found {
+    /// Paired with this computer already (connects without a code)?
+    pub fn paired(&self) -> bool {
+        self.key.is_some_and(|k| crate::trust::paired_host(&k).is_some())
+    }
+
+    /// Reached through Tailscale (another network) rather than directly.
+    pub fn via_tailscale(&self) -> bool {
+        crate::tailscale::is_tailscale_ip(self.addr.ip())
+    }
 }
 
 /// Where the last good host address is kept.
@@ -104,6 +124,9 @@ pub async fn find_hosts(port: u16) -> anyhow::Result<Vec<Found>> {
     if let Some(last) = remembered() {
         targets.push(last);
     }
+    targets.extend(far_targets(port));
+    targets.sort();
+    targets.dedup();
 
     let mut found: Vec<Found> = Vec::new();
     let mut blocked = false;
@@ -123,15 +146,32 @@ pub async fn find_hosts(port: u16) -> anyhow::Result<Vec<Found>> {
                 }
             }
             recv = socket.recv_from(&mut buf) => {
-                let (n, from) = recv?;
-                if let Some(ControlMessage::Here { name }) = parse(&buf[..n]) {
-                    add(&mut found, &mut deadline, name, from, "answered");
+                let (n, from) = match recv {
+                    Ok(x) => x,
+                    // A paired computer that is switched off: Windows reports
+                    // the bounce as an error on the next receive. Not fatal.
+                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                if let Some(ControlMessage::Here { name, key, addrs }) = parse(&buf[..n]) {
+                    let key = aa_core::secure::from_hex(&key);
+                    if let Some(k) = key {
+                        // Learn its other addresses (its Tailscale one, say)
+                        // while we can see it, for when we can't.
+                        if crate::trust::paired_host(&k).is_some() {
+                            let mut all = vec![from.to_string()];
+                            all.extend(addrs.iter().filter(|a| a.parse::<SocketAddr>().is_ok_and(|a| !a.ip().is_loopback())).cloned());
+                            crate::trust::note_host_addrs(&k, &all);
+                        }
+                    }
+                    add(&mut found, &mut deadline, name, from, key, "answered");
                 }
             }
             recv = async { beacons.as_ref().expect("guarded").recv_from(&mut beacon_buf).await }, if beacons.is_some() => {
                 if let Ok((n, from)) = recv {
-                    if let Some(ControlMessage::Beacon { name, port }) = parse(&beacon_buf[..n]) {
-                        add(&mut found, &mut deadline, name, SocketAddr::new(from.ip(), port), "announced");
+                    if let Some(ControlMessage::Beacon { name, port, key }) = parse(&beacon_buf[..n]) {
+                        let key = aa_core::secure::from_hex(&key);
+                        add(&mut found, &mut deadline, name, SocketAddr::new(from.ip(), port), key, "announced");
                     }
                 }
             }
@@ -152,15 +192,57 @@ fn parse(datagram: &[u8]) -> Option<ControlMessage> {
     (packet.header.kind == Kind::Control).then(|| ControlMessage::decode(&packet.payload).ok()).flatten()
 }
 
-fn add(found: &mut Vec<Found>, deadline: &mut tokio::time::Instant, name: String, addr: SocketAddr, how: &str) {
-    if found.iter().any(|f| f.addr == addr) {
+/// Paired computers' remembered addresses and online Tailscale computers.
+fn far_targets(port: u16) -> Vec<SocketAddr> {
+    let mut t: Vec<SocketAddr> = crate::trust::paired_hosts()
+        .iter()
+        .flat_map(|h| h.addrs.iter().filter_map(|a| a.parse::<SocketAddr>().ok()))
+        .filter(SocketAddr::is_ipv4)
+        .collect();
+    for p in crate::tailscale::peers().into_iter().filter(|p| p.online) {
+        t.extend(p.ips.into_iter().filter(IpAddr::is_ipv4).map(|ip| SocketAddr::new(ip, port)));
+    }
+    t
+}
+
+/// Prefer a direct home-network address over a Tailscale one (one less hop).
+fn better(new: SocketAddr, old: SocketAddr) -> bool {
+    crate::tailscale::is_tailscale_ip(old.ip()) && !crate::tailscale::is_tailscale_ip(new.ip())
+}
+
+fn add(
+    found: &mut Vec<Found>,
+    deadline: &mut tokio::time::Instant,
+    name: String,
+    addr: SocketAddr,
+    key: Option<aa_core::secure::PublicKeyBytes>,
+    how: &str,
+) {
+    // The same computer at another address (Wi-Fi and Tailscale): one entry.
+    if let Some(f) = found.iter_mut().find(|f| f.addr == addr || (key.is_some() && f.key == key)) {
+        if !f.addrs.contains(&addr) {
+            f.addrs.push(addr);
+        }
+        if better(addr, f.addr) {
+            f.addr = addr;
+        }
+        if f.key.is_none() {
+            f.key = key;
+        }
         return;
     }
     tracing::info!(%addr, name, how, "found host");
     if found.is_empty() {
         *deadline = (*deadline).min(tokio::time::Instant::now() + AFTER_FIRST);
     }
-    found.push(Found { name, addr });
+    found.push(Found { name, addr, key, addrs: vec![addr] });
+}
+
+/// Find one particular computer (by its key) wherever it is now: home
+/// network, new address, Tailscale. Used to reconnect.
+pub async fn locate(key: &aa_core::secure::PublicKeyBytes) -> Option<SocketAddr> {
+    let found = find_hosts(DEFAULT_PORT).await.ok()?;
+    found.into_iter().find(|f| f.key.as_ref() == Some(key)).map(|f| f.addr)
 }
 
 /// Turn whatever the user typed into an address: a full `ip:port`, a bare

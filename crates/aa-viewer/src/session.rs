@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::net::Link;
 use aa_core::control::ControlMessage;
 use aa_core::control_flow::ReceiverReport;
 use aa_core::input::InputEvent;
@@ -12,7 +13,6 @@ use aa_core::stats::StreamStats;
 use aa_core::wire::{self, CompleteFrame, Header, Kind, Packet, Reassembler, Reassembly, SeqCounter};
 use aa_platform::{VideoDecoder, ViewerBackends};
 use bytes::{Bytes, BytesMut};
-use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use crate::link::{FrameSlot, ViewerCommand};
@@ -67,6 +67,9 @@ pub struct Options {
     /// Called with the host's explanation when the picture pauses (PC
     /// locked, screen off), and `None` when it is back.
     pub on_status: Option<Box<dyn Fn(Option<String>) + Send>>,
+    /// Filled in with the host's key once the secure handshake succeeds
+    /// (lets a reconnect find the same computer at a new address).
+    pub host_key_out: Option<Arc<std::sync::Mutex<Option<aa_core::secure::PublicKeyBytes>>>>,
 }
 
 /// Runs the whole session. `commands` carries input and settings from the
@@ -77,11 +80,27 @@ pub async fn run(
     backends: ViewerBackends,
     commands: &mut mpsc::Receiver<ViewerCommand>,
 ) -> anyhow::Result<()> {
-    let Options { host, bind, frames, test_input, stats_tx, mic: start_mic, pad_out, on_connected, on_status } = opts;
+    let Options {
+        host,
+        bind,
+        frames,
+        test_input,
+        stats_tx,
+        mic: start_mic,
+        pad_out,
+        on_connected,
+        on_status,
+        host_key_out,
+    } = opts;
     let mut last_status: Option<String> = None;
-    let socket = crate::udp::bind(bind)?;
-    socket.connect(host).await?;
-    tracing::info!("connecting to {host} from {}", socket.local_addr()?);
+    tracing::info!("connecting to {host}");
+    let (socket, host_key) = Link::connect(bind, host).await?;
+    tracing::info!("connected to {host} from {}", socket.local_addr()?);
+    if let Some(out) = &host_key_out {
+        if let Ok(mut k) = out.lock() {
+            *k = Some(host_key);
+        }
+    }
 
     let ViewerBackends { decoder: mut decoder_factory, clipboard, capabilities } = backends;
     let clip_link = clipboard.and_then(|c| aa_platform::clipboard::spawn_worker(c).ok());
@@ -133,6 +152,8 @@ pub async fn run(
     let negotiated = handshake.context_timeout()??;
     tracing::info!(?negotiated, "connected");
     aa_platform::discover::remember(host);
+    aa_platform::trust::note_host_addrs(&host_key, &[host.to_string()]);
+    aa_platform::trust::mark_host_used(&host_key);
     if let Some(cb) = &on_connected {
         cb();
     }
@@ -463,7 +484,7 @@ fn monotonic_us() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
-async fn send_control(socket: &UdpSocket, msg: &ControlMessage, seq: &SeqCounter) -> anyhow::Result<()> {
+async fn send_control(socket: &Link, msg: &ControlMessage, seq: &SeqCounter) -> anyhow::Result<()> {
     let payload = msg.encode();
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN + payload.len());
     Header { kind: Kind::Control, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }
@@ -474,7 +495,7 @@ async fn send_control(socket: &UdpSocket, msg: &ControlMessage, seq: &SeqCounter
 }
 
 /// One `DualSense` pass-through message, in its own datagram.
-async fn send_pad(socket: &UdpSocket, m: &aa_core::ds5::PadMsg, seq: &SeqCounter) -> anyhow::Result<()> {
+async fn send_pad(socket: &Link, m: &aa_core::ds5::PadMsg, seq: &SeqCounter) -> anyhow::Result<()> {
     let body = m.encode();
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN + body.len());
     Header { kind: Kind::Pad, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }.write(&mut out);
@@ -485,7 +506,7 @@ async fn send_pad(socket: &UdpSocket, m: &aa_core::ds5::PadMsg, seq: &SeqCounter
 
 /// `pads_ok`: the host has virtual controllers. Without them controller
 /// events are dropped here rather than sent for nothing.
-async fn send_input(socket: &UdpSocket, events: &[InputEvent], seq: &SeqCounter, pads_ok: bool) -> anyhow::Result<()> {
+async fn send_input(socket: &Link, events: &[InputEvent], seq: &SeqCounter, pads_ok: bool) -> anyhow::Result<()> {
     let is_pad = |e: &&InputEvent| {
         matches!(e, InputEvent::Gamepad { .. } | InputEvent::GamepadAttach { .. } | InputEvent::GamepadDetach { .. })
     };
@@ -502,7 +523,7 @@ async fn send_input(socket: &UdpSocket, events: &[InputEvent], seq: &SeqCounter,
     Ok(())
 }
 
-async fn send_report(socket: &UdpSocket, rep: &ReceiverReport, seq: &SeqCounter) -> anyhow::Result<()> {
+async fn send_report(socket: &Link, rep: &ReceiverReport, seq: &SeqCounter) -> anyhow::Result<()> {
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN + ReceiverReport::ENCODED_LEN);
     Header { kind: Kind::Ack, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }.write(&mut out);
     rep.encode(&mut out);
@@ -510,7 +531,7 @@ async fn send_report(socket: &UdpSocket, rep: &ReceiverReport, seq: &SeqCounter)
     Ok(())
 }
 
-async fn send_nack(socket: &UdpSocket, frame_id: u32, seq: &SeqCounter) -> anyhow::Result<()> {
+async fn send_nack(socket: &Link, frame_id: u32, seq: &SeqCounter) -> anyhow::Result<()> {
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN);
     Header { kind: Kind::Nack, flags: 0, seq: seq.take(), frame_id, slice_index: 0, slice_count: 1 }.write(&mut out);
     socket.send(&out).await?;

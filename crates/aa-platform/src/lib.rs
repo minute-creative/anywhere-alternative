@@ -34,8 +34,11 @@ pub mod lan;
 pub mod mock;
 pub mod padhub;
 pub mod padmap;
+pub mod pairing;
 pub mod playout;
 pub mod sw;
+pub mod tailscale;
+pub mod trust;
 pub mod usbip;
 
 #[cfg(target_os = "macos")]
