@@ -57,7 +57,8 @@ pub fn remember(addr: SocketAddr) {
     }
 }
 
-fn remembered() -> Option<SocketAddr> {
+/// The host that accepted us last time, if any.
+pub fn remembered() -> Option<SocketAddr> {
     std::fs::read_to_string(memory_file()?).ok()?.trim().parse().ok()
 }
 

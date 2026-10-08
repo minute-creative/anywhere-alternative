@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "aa-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aa-platform",
  "anyhow",
@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aa-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "serde",
@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "aa-host"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aa-core",
  "aa-platform",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "aa-platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aa-core",
  "anyhow",
@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "aa-viewer"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aa-core",
  "aa-platform",

@@ -150,18 +150,37 @@ impl std::fmt::Debug for Viewer {
     }
 }
 
+/// How a viewer window should start.
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)] // switches
+pub struct ViewerPrefs {
+    pub fullscreen: bool,
+    pub stretch: bool,
+    pub mic: bool,
+    pub mute_host: bool,
+    pub show_stats: bool,
+    pub max_mbps: f32,
+    pub volume_boost: f32,
+}
+
 impl Viewer {
-    pub fn start(target: &str, fullscreen: bool, mic: bool) -> anyhow::Result<Self> {
+    pub fn start(target: &str, p: ViewerPrefs) -> anyhow::Result<Self> {
         let log = data_dir().join("viewer.log");
         let (out, err) = log_file(&log)?;
         let exe = sibling("aa-viewer");
         let mut cmd = Command::new(&exe);
         cmd.arg(target).stdout(out).stderr(err).stdin(Stdio::null());
-        if fullscreen {
-            cmd.arg("--fullscreen");
-        }
-        if mic {
-            cmd.arg("--mic");
+        cmd.args(["--max-mbps", &format!("{:.0}", p.max_mbps), "--volume-boost", &format!("{:.1}", p.volume_boost)]);
+        for (on, flag) in [
+            (p.fullscreen, "--fullscreen"),
+            (p.stretch, "--stretch"),
+            (p.mic, "--mic"),
+            (p.mute_host, "--mute-host"),
+            (!p.show_stats, "--hide-stats"),
+        ] {
+            if on {
+                cmd.arg(flag);
+            }
         }
         let child = quiet(&mut cmd).spawn().map_err(|e| anyhow::anyhow!("could not start {}: {e}", exe.display()))?;
         Ok(Self { child, target: target.to_owned(), log })
@@ -177,11 +196,33 @@ impl Viewer {
     }
 }
 
-/// The last `max` lines of a log file (cheap: logs are small).
+/// The last `max` lines of a log file. Reads only the end of the file, so a
+/// host that has been sharing all day costs the same as one just started.
 pub fn tail(path: &Path, max: usize) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
-    let lines: Vec<&str> = text.lines().collect();
+    use std::io::{Read, Seek, SeekFrom};
+    const WINDOW: u64 = 64 * 1024;
+    let Ok(mut f) = std::fs::File::open(path) else { return Vec::new() };
+    let len = f.metadata().map_or(0, |m| m.len());
+    let start = len.saturating_sub(WINDOW);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    let _ = f.take(WINDOW).read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if start > 0 && !lines.is_empty() {
+        lines.remove(0); // probably cut in half
+    }
     lines[lines.len().saturating_sub(max)..].iter().map(|l| (*l).to_owned()).collect()
+}
+
+/// The host's first lines (where startup problems and its addresses are),
+/// which `tail` may no longer reach after hours of sharing.
+pub fn head(path: &Path, max: usize) -> Vec<String> {
+    use std::io::{BufRead, BufReader};
+    let Ok(f) = std::fs::File::open(path) else { return Vec::new() };
+    BufReader::new(f).lines().map_while(Result::ok).take(max).collect()
 }
 
 /// A log line without its timestamp and module path, for people.
@@ -204,6 +245,22 @@ pub fn plain(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tail_reads_only_the_end() {
+        let p = std::env::temp_dir().join(format!("aa-tail-{}", std::process::id()));
+        let body: String = (0..20_000).fold(String::new(), |mut b, i| {
+            b.push_str("line ");
+            b.push_str(&i.to_string());
+            b.push('\n');
+            b
+        });
+        std::fs::write(&p, body).unwrap();
+        let t = tail(&p, 3);
+        assert_eq!(t, vec!["line 19997", "line 19998", "line 19999"]);
+        assert_eq!(head(&p, 2), vec!["line 0", "line 1"]);
+        let _ = std::fs::remove_file(&p);
+    }
 
     #[test]
     fn log_lines_read_like_sentences() {

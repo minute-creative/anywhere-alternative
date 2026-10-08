@@ -468,6 +468,20 @@ impl std::fmt::Debug for App {
 }
 
 impl App {
+    /// Starting choices from the Anywhere app. Applied (sent to the host)
+    /// on the first frame, like a change made in the settings panel.
+    pub fn set_preferences(&mut self, max_mbps: Option<f32>, boost_db: Option<f32>, mute_host: bool, show_stats: bool) {
+        if let Some(m) = max_mbps {
+            self.settings.max_mbps = m.clamp(2.0, 150.0);
+        }
+        if let Some(b) = boost_db {
+            self.settings.volume_boost_db = b.clamp(0.0, 18.0);
+        }
+        self.settings.mute_host = mute_host;
+        self.settings.show_stats = show_stats;
+        self.applied.show_stats = show_stats;
+    }
+
     /// The session was started with the mic on: show the box ticked.
     pub fn set_mic_shown(&mut self, on: bool) {
         self.settings.send_mic = on;

@@ -85,6 +85,22 @@ struct Args {
     #[arg(long)]
     test_gamepad: bool,
 
+    /// Highest bitrate the host may use, in Mbps (also in the settings panel).
+    #[arg(long)]
+    max_mbps: Option<f32>,
+
+    /// Extra loudness for the other computer's sound, in dB (0-18).
+    #[arg(long)]
+    volume_boost: Option<f32>,
+
+    /// Silence the other computer's own speakers while connected.
+    #[arg(long)]
+    mute_host: bool,
+
+    /// Hide the small statistics line in the corner.
+    #[arg(long)]
+    hide_stats: bool,
+
     /// With --mock: a pretend `DualSense` (raw pass-through) that logs what
     /// the host's game sends back to it.
     #[arg(long)]
@@ -169,6 +185,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut app = window::App::new(format!("Anywhere — {host}"), args.fullscreen, args.stretch, frames, cmd_tx);
     app.set_mic_shown(args.mic);
+    app.set_preferences(args.max_mbps, args.volume_boost, args.mute_host, !args.hide_stats);
     app.set_stats_receiver(stats_rx);
     event_loop.run_app(&mut app)?;
     Ok(())

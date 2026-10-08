@@ -69,8 +69,21 @@ impl std::fmt::Debug for Overlay {
 impl Overlay {
     pub fn new(window: &Arc<Window>, device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let ctx = egui::Context::default();
-        // Dark, slightly translucent panel so the video stays visible behind it.
-        ctx.set_visuals(egui::Visuals::dark());
+        // Light panels matching the Anywhere app (white, hairline border,
+        // indigo accent), slightly translucent so the video shows through.
+        let mut v = egui::Visuals::light();
+        let accent = egui::Color32::from_rgb(79, 70, 229);
+        v.window_fill = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 244);
+        v.panel_fill = v.window_fill;
+        v.window_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(226, 229, 239));
+        v.window_corner_radius = egui::CornerRadius::same(14);
+        v.selection.bg_fill = egui::Color32::from_rgb(165, 160, 245);
+        v.selection.stroke = egui::Stroke::new(1.0, accent);
+        v.slider_trailing_fill = true;
+        v.widgets.inactive.bg_fill = egui::Color32::from_rgb(226, 229, 239);
+        v.hyperlink_color = accent;
+        ctx.set_theme(egui::Theme::Light);
+        ctx.set_visuals_of(egui::Theme::Light, v);
         let state = egui_winit::State::new(
             ctx.clone(),
             egui::ViewportId::ROOT,
@@ -149,6 +162,8 @@ impl Overlay {
                 &self.ctx,
                 |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        // One line, never wrapped next to the screen edge.
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                         ui.monospace(format!(
                             "{} fps  {:.1} Mbps  {:.0} ms  {:.1}% loss",
                             stats.fps, stats.mbps, stats.rtt_ms, stats.loss_pct
@@ -194,7 +209,7 @@ impl Overlay {
             }
         }
 
-        let out = self.ctx.end_pass();
+        let mut out = self.ctx.end_pass();
         self.state.handle_platform_output(window, out.platform_output);
         let ppp = self.ctx.pixels_per_point();
         let jobs = self.ctx.tessellate(out.shapes, ppp);
@@ -225,6 +240,8 @@ impl Overlay {
         for id in &out.textures_delta.free {
             self.renderer.free_texture(id);
         }
+        // Handled above; egui checks (in debug builds) that nothing was lost.
+        out.textures_delta.clear();
     }
 
     fn hotkey_label() -> &'static str {
