@@ -291,6 +291,12 @@ two sides end up with different keys (the host must not make a new
 one-time key for a retransmit); same for the pairing confirm (keep it
 answerable after success, or a lost OK strands the viewer).
 
+Then "same applies to windows": a SYSTEM service that starts the host in
+the session on the screen and follows the input desktop, so the Windows
+sign-in screen can be seen and typed into from afar (0.4.1). CI green on
+the first try (API signatures checked against the windows-rs source
+first, since Windows code can't be compiled here).
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.

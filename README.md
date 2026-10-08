@@ -30,10 +30,11 @@ Everything sent between them is encrypted.
 - **From anywhere:** install [Tailscale](https://tailscale.com/download)
   (free) on both computers and sign in to the same account. Your computers
   then show up in Anywhere from any network.
-- **After a power cut (Mac):** Settings → "Share this Mac at all times".
-  The Mac turns itself back on and you can log in from your other
-  computer. Needs FileVault off.
-- **Windows:** Settings → "Start Anywhere when I sign in".
+- **After a restart or power cut:** Settings → "Share this Mac/PC at all
+  times". The computer shares its login (sign-in) screen, so you can log
+  in from your other computer. Mac: needs FileVault off; it also turns
+  itself back on when power returns. PC: turning on after the battery ran
+  out is a BIOS setting on most laptops.
 
 The Extras page shows the free add-ons for controllers, microphone and
 Tailscale, with a button to get each.

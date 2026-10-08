@@ -401,6 +401,12 @@ Built 2026-10-08 (0.4.0), Tailscale first; our own server later.
   root) and in the logged-in session; `pmset autorestart 1` turns the Mac
   on when power returns. FileVault's pre-boot screen can't be reached by
   any app.
+- **After a restart (Windows).** A service (`AnywhereHost`, SYSTEM, from
+  boot) starts `aa-host --service` as SYSTEM in the session on the screen
+  and replaces it when the session changes; the host moves its capture and
+  input threads onto whichever desktop is showing (sign-in, lock, UAC), the
+  way commercial remote-desktop tools do. BitLocker with a startup PIN
+  would block like FileVault; the usual TPM-only setup doesn't.
 
 ## 8. Stages and their pass/fail tests
 

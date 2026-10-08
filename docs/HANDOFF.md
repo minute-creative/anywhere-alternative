@@ -73,8 +73,23 @@ through Anywhere**; **code once, then remembered**.
   impossible (pre-boot screen); the app warns. Tailscale's App Store and
   Standalone apps start only after login; for far-away access to the
   login screen the Mac needs the open-source `tailscaled` (Homebrew).
-- Windows: "Start Anywhere when I sign in" (HKCU Run, `--background`).
-  Windows login screen sharing is not built.
+- Windows always-on (0.4.1, owner: "same applies to windows"):
+  service `AnywhereHost` = `aa-host --windows-service` (SYSTEM, from boot,
+  `windows/session.rs`) keeps one `aa-host --service` running as SYSTEM in
+  the active console session (`CreateProcessAsUserW`, token session id);
+  capture and input call `follow_input_desktop()` (`OpenInputDesktop` +
+  `SetThreadDesktop`) so the sign-in/lock/UAC desktops are captured and
+  typed into. Shared folder `%ProgramData%\AnywhereAlternative` (ACL:
+  SYSTEM, Administrators, the user's SID). Setup via one UAC prompt
+  (`run_elevated` + a .cmd: icacls, `sc create/config`, failure restart,
+  `powercfg` no sleep/hibernate/lid action on AC). Installer stops the
+  service before replacing files and restarts it. Logs:
+  `service-supervisor.log`, `service.log`. Untested on hardware: whether
+  DXGI duplication and SendInput really work on Winlogon from this
+  SYSTEM child (the standard approach of remote-desktop tools).
+  Laptop power-on after the battery dies is a BIOS setting (not ours).
+  Tailscale on Windows needs "Run unattended" to be up before sign-in.
+  Also "Open Anywhere when I sign in" (HKCU Run, `--background`).
 - Verified here (Linux, mock): pairing with right/wrong code, connect
   without code afterwards, unpaired refused, host restart → reconnect
   (1.3 s fast path, 8 s slow path), all unit tests incl. tamper/replay.
@@ -138,8 +153,8 @@ with Xvfb + `WGPU_BACKEND=gl` (`AA_SHOW_SELF=1`, `AA_HOST_MOCK=1`).
 ## Agreed next steps, in order
 
 1. Owner test of 0.4.0: pair PC↔Mac with the code, reconnect without it,
-   Tailscale from another network (phone hotspot), Mac always-on: switch
-   on, restart the Mac, reach the login screen from the PC.
+   Tailscale from another network (phone hotspot), always-on on both:
+   switch on, restart, reach the login/sign-in screen from the other one.
 2. Owner retest of items above; collect `refresh_hz`, `--bench`, `stream
    colour`, `encoder colour path` lines.
 3. Owner test of DualSense pass-through: install usbip-win2 on the PC,
