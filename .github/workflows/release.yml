@@ -49,8 +49,11 @@ jobs:
         run: |
           set -o pipefail
           cargo build --release -p aa-app -p aa-host -p aa-viewer 2>&1 | tee build.log
-          choco install innosetup -y --no-progress
-          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" "/DAppVersion=$VERSION" packaging/windows/installer.iss 2>&1 | tee -a build.log
+          # Inno Setup is preinstalled on GitHub's Windows machines; install
+          # it only if it is missing.
+          ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          if [ ! -f "$ISCC" ]; then choco install innosetup -y --no-progress 2>&1 | tee -a build.log; fi
+          "$ISCC" "/DAppVersion=$VERSION" packaging/windows/installer.iss 2>&1 | tee -a build.log
 
       - uses: actions/upload-artifact@v4
         with:
@@ -65,7 +68,9 @@ jobs:
           {
             echo "### Release build failed on \`${{ matrix.os }}\`"
             echo '```'
-            grep -nE "^(error|warning)(\[|:)|^\s+-->|Error|error" build.log | head -80 || true
+            grep -nE "^(error|warning)(\[|:)|^\s+-->" build.log | head -40 || true
+            echo "--- last lines ---"
+            tail -40 build.log || true
             echo '```'
           } > comment.md
           gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@comment.md >/dev/null
