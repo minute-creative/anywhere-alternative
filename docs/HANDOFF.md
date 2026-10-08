@@ -88,6 +88,21 @@ Everything else (all simulated end to end, see ARCHITECTURE §10):
 Their answers so far: PC refresh supports 120 Hz+; colours "washed out /
 grey"; want all accessories (mic, headphones, controllers, other USB).
 
+## The app and releases (2026-10-08)
+
+People now install **Anywhere** instead of running cargo: `crates/aa-app`
+(binary `anywhere`, egui/eframe) drives `aa-host`/`aa-viewer` as child
+processes (logs in the app-data folder `AnywhereAlternative/`, host
+stopped via `--stop-file`). Releases: `.github/workflows/release.yml`
+builds `Anywhere-x.y.z-mac.dmg` (ad-hoc signed .app) and
+`Anywhere-x.y.z-windows-setup.exe` (Inno Setup, adds firewall rules) and
+publishes them on GitHub Releases. Trigger by a `v*` tag or the REST
+dispatch (`gh api -X POST .../actions/workflows/release.yml/dispatches -f
+ref=main -f 'inputs[version]=x.y.z'`); tag pushes are blocked from Claude
+sessions. v0.2.0 is the first release. Unsigned: Mac needs "Open Anyway"
+once, Windows SmartScreen "Run anyway". App UI can be screenshotted here
+with Xvfb + `WGPU_BACKEND=gl` (`AA_SHOW_SELF=1`, `AA_HOST_MOCK=1`).
+
 ## Agreed next steps, in order
 
 1. CI back → fix whatever the uncompiled code trips on.

@@ -246,6 +246,17 @@ an Objective-C object sent through a channel needs a Send wrapper, and
 framework names in docs need backticks. Green on all three systems on
 the third push. Real-Mac test pending.
 
+## Day 5, evening — the app, installers, first release (2026-10-08)
+
+Owner asked for the whole thing as an installable app with free hosting.
+Chose native installers over a browser viewer (a browser adds latency and
+can't do controllers, mic or hardware decode the same way). Built the
+Anywhere app (connect list + share button + plain-words status + extras
+checklist), icon, .dmg and Windows installer, and a release workflow.
+Release CI lessons: Git Bash rewrites `/DName=value` arguments into paths
+(MSYS_NO_PATHCONV=1), and Inno Setup is already on GitHub's Windows
+machines. v0.2.0 published on GitHub Releases.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.

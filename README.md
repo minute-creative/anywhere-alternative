@@ -34,8 +34,9 @@ Bump `version` in `Cargo.toml`, then push a tag:
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-GitHub builds the Mac disk image and the Windows installer (about 20
-minutes) and publishes them on the Releases page
+Or, without a tag: on GitHub open **Actions → Release → Run workflow** and
+type the version. GitHub builds the Mac disk image and the Windows
+installer (about 15 minutes) and publishes them on the Releases page
 (`.github/workflows/release.yml`).
 
 ## Status
