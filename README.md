@@ -6,6 +6,38 @@ both directions, built from scratch in Rust. Personal project.
 Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) first; it is the
 reference for every design decision and the stage plan.
 
+## Install (no building needed)
+
+Download the latest version from the
+[Releases page](https://github.com/minute-creative/anywhere-alternative/releases/latest):
+
+- **Mac (Apple Silicon):** `Anywhere-x.y.z-mac.dmg`. Open it and drag
+  Anywhere to Applications. The app isn't signed with a paid Apple
+  certificate, so the first time macOS refuses to open it: open System
+  Settings → Privacy & Security, scroll down and click **Open Anyway**.
+  When you start sharing, allow **Screen & System Audio Recording** and
+  **Accessibility** for Anywhere when asked.
+- **Windows:** `Anywhere-x.y.z-windows-setup.exe`. If SmartScreen warns,
+  click **More info → Run anyway**. The installer also opens the firewall
+  for Anywhere so other computers can reach it.
+
+Open **Anywhere**: computers that are sharing show up by name; click
+Connect. To let others in, click **Start sharing**. The "Optional extras"
+list shows the free drivers for controllers and microphone, with a button
+to get each.
+
+### Making a new release
+
+Bump `version` in `Cargo.toml`, then push a tag:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+GitHub builds the Mac disk image and the Windows installer (about 20
+minutes) and publishes them on the Releases page
+(`.github/workflows/release.yml`).
+
 ## Status
 
 **Stage 2 in progress.** Windows hosts its real screen (DXGI Desktop

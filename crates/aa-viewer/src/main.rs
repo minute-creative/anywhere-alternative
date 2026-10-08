@@ -12,7 +12,6 @@
 //! and quick network checks use that.
 
 mod audio;
-mod discover;
 mod ds5;
 mod keymap;
 mod link;
@@ -95,6 +94,8 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        // Colours only in a terminal; log files (the Anywhere app) stay plain.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
     let args = Args::parse();
 
@@ -102,7 +103,7 @@ fn main() -> anyhow::Result<()> {
         start_test_clipboard("viewer");
     }
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
-    let host: SocketAddr = runtime.block_on(discover::resolve(args.host.as_deref()))?;
+    let host: SocketAddr = runtime.block_on(aa_platform::discover::resolve(args.host.as_deref()))?;
     let (cmd_tx, cmd_rx) = link::command_channel();
     if args.test_gamepad {
         pads::spawn_test(cmd_tx.clone());
@@ -270,7 +271,7 @@ async fn run_reconnecting(
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         // It may be back under a new address; fall back to the old one.
-        if let Ok(found) = discover::resolve(args.host.as_deref()).await {
+        if let Ok(found) = aa_platform::discover::resolve(args.host.as_deref()).await {
             host = found;
         }
     }

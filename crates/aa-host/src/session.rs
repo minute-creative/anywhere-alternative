@@ -19,6 +19,20 @@ use tokio::sync::mpsc;
 
 use crate::pipeline::{self, PipelineControl};
 
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ask the running session to end cleanly (says goodbye to the viewer,
+/// restores the speakers).
+pub fn request_stop() {
+    STOP.store(true, Ordering::Relaxed);
+}
+
+async fn stop_requested() {
+    while !STOP.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// A viewer is considered gone if we hear nothing for this long.
 const VIEWER_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -249,6 +263,16 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                     let _ = input_tx.try_send(InputEvent::ReleaseAll);
                     restore_speakers(&mut speaker);
                 }
+            }
+
+            () = stop_requested() => {
+                tracing::info!("asked to stop");
+                if let Some(v) = viewer.as_ref() {
+                    let _ = send_control(&socket, v.addr, &ControlMessage::Bye, &seq).await;
+                }
+                restore_speakers(&mut speaker);
+                ctl.shutdown.store(true, Ordering::Relaxed);
+                return Ok(());
             }
 
             _ = tokio::signal::ctrl_c() => {

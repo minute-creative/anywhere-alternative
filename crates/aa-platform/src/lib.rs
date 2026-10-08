@@ -26,6 +26,7 @@ use bytes::Bytes;
 
 pub mod audio;
 pub mod clipboard;
+pub mod discover;
 pub mod ds5dev;
 pub mod hid_mac;
 pub mod hid_scancode;

@@ -132,7 +132,7 @@ pub async fn run(
     }
     let negotiated = handshake.context_timeout()??;
     tracing::info!(?negotiated, "connected");
-    crate::discover::remember(host);
+    aa_platform::discover::remember(host);
     if let Some(cb) = &on_connected {
         cb();
     }

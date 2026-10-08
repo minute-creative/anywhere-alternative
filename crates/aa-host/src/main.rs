@@ -65,6 +65,11 @@ struct Args {
     /// hardware, or software.
     #[arg(long, default_value = "auto")]
     encoder: String,
+
+    /// Stop cleanly as soon as this file exists (how the Anywhere app stops
+    /// a host it started, even one running as administrator).
+    #[arg(long)]
+    stop_file: Option<std::path::PathBuf>,
 }
 
 fn parse_resolution(s: &str) -> Result<Resolution, String> {
@@ -140,6 +145,8 @@ fn real_host_backends(_encoder: &str) -> anyhow::Result<aa_platform::HostBackend
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        // Colours only in a terminal; log files (the Anywhere app) stay plain.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
     let args = Args::parse();
 
@@ -157,6 +164,17 @@ async fn main() -> anyhow::Result<()> {
         real_host_backends(&args.encoder).context("real host backends unavailable; try --mock")?
     };
 
+    if let Some(path) = args.stop_file.clone() {
+        let _ = std::fs::remove_file(&path); // a leftover from last time must not stop us
+        std::thread::spawn(move || loop {
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+                session::request_stop();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+    }
     session::run(args.listen, backends).await
 }
 

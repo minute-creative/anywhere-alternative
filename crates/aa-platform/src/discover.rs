@@ -88,7 +88,7 @@ fn looks_like_local_network_block(e: &std::io::Error) -> bool {
 pub async fn find_hosts(port: u16) -> anyhow::Result<Vec<Found>> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
-    let beacons = match aa_platform::lan::beacon_listener().and_then(UdpSocket::from_std) {
+    let beacons = match crate::lan::beacon_listener().and_then(UdpSocket::from_std) {
         Ok(s) => Some(s),
         Err(e) => {
             tracing::debug!("not listening for beacons ({e}); asking only");
@@ -98,7 +98,7 @@ pub async fn find_hosts(port: u16) -> anyhow::Result<Vec<Found>> {
 
     let ask = control_datagram(&ControlMessage::Discover);
     let mut targets: Vec<SocketAddr> =
-        aa_platform::lan::ipv4_interfaces().iter().map(|i| SocketAddr::new(IpAddr::V4(i.broadcast), port)).collect();
+        crate::lan::ipv4_interfaces().iter().map(|i| SocketAddr::new(IpAddr::V4(i.broadcast), port)).collect();
     targets.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), port));
     if let Some(last) = remembered() {
         targets.push(last);
