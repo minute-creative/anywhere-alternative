@@ -232,6 +232,52 @@ pub fn usb_input_to_state(r: &[u8; USB_INPUT_LEN]) -> GamepadState {
     }
 }
 
+/// The reverse of [`usb_input_to_state`]: a USB input report for a pad
+/// state, so any controller can drive a virtual DualSense (the Mac host
+/// presents one for every controller). `seq` is the report counter.
+#[allow(clippy::many_single_char_names)] // r = report, s = state, as elsewhere here
+pub fn state_to_usb_input(s: &GamepadState, seq: u8) -> [u8; USB_INPUT_LEN] {
+    use crate::input::gamepad_buttons as b;
+    let axis = |v: i16, invert: bool| -> u8 {
+        let v = i32::from(v);
+        let v = if invert { -v - 1 } else { v };
+        u8::try_from(((v + 32_768) >> 8).clamp(0, 255)).unwrap_or(128)
+    };
+    let mut r = neutral_input();
+    r[1] = axis(s.left_x, false);
+    r[2] = axis(s.left_y, true);
+    r[3] = axis(s.right_x, false);
+    r[4] = axis(s.right_y, true);
+    r[5] = s.left_trigger;
+    r[6] = s.right_trigger;
+    r[7] = seq;
+    let on = |bit: u32| s.buttons & bit != 0;
+    let (u, d, l, rt) = (on(b::DPAD_UP), on(b::DPAD_DOWN), on(b::DPAD_LEFT), on(b::DPAD_RIGHT));
+    let hat = match (u && !d, d && !u, l && !rt, rt && !l) {
+        (true, _, false, false) => 0,
+        (true, _, false, true) => 1,
+        (false, false, false, true) => 2,
+        (_, true, false, true) => 3,
+        (_, true, false, false) => 4,
+        (_, true, true, false) => 5,
+        (false, false, true, false) => 6,
+        (true, _, true, false) => 7,
+        _ => 8,
+    };
+    let bits = |pairs: &[(u32, u8)]| pairs.iter().filter(|(ours, _)| on(*ours)).fold(0u8, |a, (_, m)| a | m);
+    r[8] = hat | bits(&[(b::SQUARE, 0x10), (b::CROSS, 0x20), (b::CIRCLE, 0x40), (b::TRIANGLE, 0x80)]);
+    r[9] = bits(&[(b::L1, 0x01), (b::R1, 0x02), (b::SHARE, 0x10), (b::OPTIONS, 0x20), (b::L3, 0x40), (b::R3, 0x80)]);
+    // L2/R2 digital bits, set like the real pad once the trigger moves.
+    if s.left_trigger > 30 {
+        r[9] |= 0x04;
+    }
+    if s.right_trigger > 30 {
+        r[9] |= 0x08;
+    }
+    r[10] = bits(&[(b::PS, 0x01), (b::TOUCHPAD, 0x02)]);
+    r
+}
+
 /// An output report that only sets the two rumble motors (classic
 /// "compatible vibration"), for games that rumble a generic pad.
 pub fn rumble_output(low_freq: u8, high_freq: u8) -> [u8; USB_OUTPUT_LEN] {
@@ -296,6 +342,33 @@ mod tests {
         assert_eq!(PadMsg::decode(&[9, 0]), None, "unknown type");
         assert_eq!(PadMsg::decode(&[]), None);
         assert_eq!(PadMsg::decode(&[5, 0, 0, 1, 0, 9, 1, 2]), None, "speaker length past the end");
+    }
+
+    #[test]
+    fn pad_state_round_trips_through_a_report() {
+        use crate::input::gamepad_buttons as b;
+        for s in [
+            GamepadState::default(),
+            GamepadState {
+                buttons: b::CROSS | b::TRIANGLE | b::L1 | b::R3 | b::PS | b::DPAD_UP | b::DPAD_LEFT,
+                left_x: -32_768,
+                left_y: 32_767,
+                right_x: 12_000,
+                right_y: -20_000,
+                left_trigger: 0,
+                right_trigger: 255,
+            },
+        ] {
+            let back = usb_input_to_state(&state_to_usb_input(&s, 7));
+            assert_eq!(back.buttons, s.buttons);
+            assert_eq!((back.left_trigger, back.right_trigger), (s.left_trigger, s.right_trigger));
+            for (a, b) in
+                [(back.left_x, s.left_x), (back.left_y, s.left_y), (back.right_x, s.right_x), (back.right_y, s.right_y)]
+            {
+                assert!((i32::from(a) - i32::from(b)).abs() <= 256, "{a} vs {b}");
+            }
+        }
+        assert_eq!(state_to_usb_input(&GamepadState::default(), 0)[8] & 0x0F, 8, "no d-pad");
     }
 
     #[test]

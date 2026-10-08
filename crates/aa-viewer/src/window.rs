@@ -91,12 +91,27 @@ struct Gpu {
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     bind_layout: wgpu::BindGroupLayout,
+    /// YUV frames: two planes, converted to RGB in the shader.
+    nv12_pipeline: wgpu::RenderPipeline,
+    nv12_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    /// Current frame texture and its bind group; rebuilt on resolution change.
-    frame: Option<(wgpu::Texture, wgpu::BindGroup, Resolution)>,
+    /// Current frame textures and bind group; rebuilt on size/format change.
+    frame: Option<FrameTex>,
+}
+
+/// The textures of the frame on screen.
+struct FrameTex {
+    /// RGB(A) texture, or the luma plane for NV12.
+    main: wgpu::Texture,
+    /// Interleaved chroma plane (NV12 only).
+    chroma: Option<wgpu::Texture>,
+    bind: wgpu::BindGroup,
+    res: Resolution,
+    format: PixelFormat,
 }
 
 impl Gpu {
+    #[allow(clippy::too_many_lines)] // GPU setup reads best as one sequence
     fn new(window: &Arc<Window>) -> anyhow::Result<Self> {
         // On X11/Wayland wgpu wants the display handle; harmless elsewhere.
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone())));
@@ -188,7 +203,73 @@ impl Gpu {
             ..Default::default()
         });
 
-        Ok(Self { surface, device, queue, config, pipeline, bind_layout, sampler, frame: None })
+        let nv12_shader = device.create_shader_module(wgpu::include_wgsl!("nv12.wgsl"));
+        let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let nv12_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("nv12"),
+            entries: &[
+                tex_entry(0),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                tex_entry(2),
+            ],
+        });
+        let nv12_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("nv12"),
+            bind_group_layouts: &[Some(&nv12_layout)],
+            immediate_size: 0,
+        });
+        let nv12_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("nv12"),
+            layout: Some(&nv12_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &nv12_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &nv12_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        Ok(Self {
+            surface,
+            device,
+            queue,
+            config,
+            pipeline,
+            bind_layout,
+            nv12_pipeline,
+            nv12_layout,
+            sampler,
+            frame: None,
+        })
     }
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -200,45 +281,20 @@ impl Gpu {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Upload a decoded CPU frame into the frame texture.
-    fn upload(&mut self, frame: &DecodedFrame) {
-        let FrameBuffer::Cpu(px) = &frame.buffer else {
-            tracing::warn!("GPU frame buffers not wired to the presenter yet");
-            return;
-        };
-        let tex_format = match frame.format {
-            PixelFormat::Bgra8 => wgpu::TextureFormat::Bgra8UnormSrgb,
-            PixelFormat::Rgba8 => wgpu::TextureFormat::Rgba8UnormSrgb,
-            other => {
-                tracing::warn!(?other, "presenter only handles 8-bit RGBA/BGRA CPU frames for now");
-                return;
-            }
-        };
-        let res = frame.resolution;
-        if !self.frame.as_ref().is_some_and(|(t, _, r)| *r == res && t.format() == tex_format) {
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("frame"),
-                size: wgpu::Extent3d { width: res.width, height: res.height, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: tex_format,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("frame"),
-                layout: &self.bind_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                ],
-            });
-            tracing::info!(?res, "frame texture created");
-            self.frame = Some((texture, bind, res));
-        }
-        let (texture, _, _) = self.frame.as_ref().expect("just ensured");
+    fn texture(&self, label: &str, w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    }
+
+    fn write(&self, texture: &wgpu::Texture, data: &[u8], w: u32, h: u32, bytes_per_px: u32) {
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture,
@@ -246,14 +302,75 @@ impl Gpu {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            px,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(res.width * 4),
-                rows_per_image: Some(res.height),
-            },
-            wgpu::Extent3d { width: res.width, height: res.height, depth_or_array_layers: 1 },
+            data,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * bytes_per_px), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
+    }
+
+    /// Upload a decoded CPU frame (RGBA/BGRA, or NV12 planes).
+    fn upload(&mut self, frame: &DecodedFrame) {
+        let FrameBuffer::Cpu(px) = &frame.buffer else {
+            tracing::warn!("GPU frame buffers not wired to the presenter yet");
+            return;
+        };
+        let res = frame.resolution;
+        let (w, h) = (res.width, res.height);
+        let rgb_format = match frame.format {
+            PixelFormat::Bgra8 => Some(wgpu::TextureFormat::Bgra8UnormSrgb),
+            PixelFormat::Rgba8 => Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            PixelFormat::Nv12 => None,
+            PixelFormat::P010 => {
+                tracing::warn!("presenter can't show 10-bit frames yet");
+                return;
+            }
+        };
+        let needed = if rgb_format.is_some() { (w * h * 4) as usize } else { (w * h * 3 / 2) as usize };
+        if px.len() < needed || (rgb_format.is_none() && (w % 2 == 1 || h % 2 == 1)) {
+            tracing::warn!(len = px.len(), needed, ?res, "frame buffer has the wrong size; skipped");
+            return;
+        }
+        if !self.frame.as_ref().is_some_and(|f| f.res == res && f.format == frame.format) {
+            let new = if let Some(fmt) = rgb_format {
+                let main = self.texture("frame", w, h, fmt);
+                let view = main.create_view(&wgpu::TextureViewDescriptor::default());
+                let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("frame"),
+                    layout: &self.bind_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    ],
+                });
+                FrameTex { main, chroma: None, bind, res, format: frame.format }
+            } else {
+                let luma = self.texture("luma", w, h, wgpu::TextureFormat::R8Unorm);
+                let chroma = self.texture("chroma", w / 2, h / 2, wgpu::TextureFormat::Rg8Unorm);
+                let lv = luma.create_view(&wgpu::TextureViewDescriptor::default());
+                let cv = chroma.create_view(&wgpu::TextureViewDescriptor::default());
+                let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("nv12"),
+                    layout: &self.nv12_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&lv) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&cv) },
+                    ],
+                });
+                FrameTex { main: luma, chroma: Some(chroma), bind, res, format: frame.format }
+            };
+            tracing::info!(?res, format = ?frame.format, "frame texture created");
+            self.frame = Some(new);
+        }
+        let f = self.frame.as_ref().expect("just ensured");
+        match &f.chroma {
+            None => self.write(&f.main, px, w, h, 4),
+            Some(chroma) => {
+                let luma_len = (w * h) as usize;
+                self.write(&f.main, &px[..luma_len], w, h, 1);
+                self.write(chroma, &px[luma_len..needed], w / 2, h / 2, 2);
+            }
+        }
     }
 
     fn render(
@@ -295,10 +412,10 @@ impl Gpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let Some((_, bind, _)) = &self.frame {
+            if let Some(f) = &self.frame {
                 pass.set_viewport(rect.x, rect.y, rect.w.max(1.0), rect.h.max(1.0), 0.0, 1.0);
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, bind, &[]);
+                pass.set_pipeline(if f.chroma.is_some() { &self.nv12_pipeline } else { &self.pipeline });
+                pass.set_bind_group(0, &f.bind, &[]);
                 pass.draw(0..3, 0..1);
             }
         }
@@ -728,6 +845,22 @@ fn shortcut_key(hid: u16, mac_viewer: bool, mac_host: bool) -> u16 {
         (false, true, 0xE0) => 0xE3, // Left Ctrl -> Left Cmd
         (false, true, 0xE4) => 0xE7, // Right Ctrl -> Right Cmd
         _ => hid,
+    }
+}
+
+#[cfg(test)]
+mod shader_tests {
+    /// The shaders are compiled by the graphics driver at run time; check
+    /// them here so a typo can't ship a black window.
+    #[test]
+    fn shaders_parse_and_validate() {
+        use wgpu::naga;
+        for (name, src) in [("shader.wgsl", include_str!("shader.wgsl")), ("nv12.wgsl", include_str!("nv12.wgsl"))] {
+            let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name}: {e}"));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        }
     }
 }
 

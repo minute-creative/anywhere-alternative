@@ -106,7 +106,7 @@ pub fn report_descriptor() -> Vec<u8> {
 }
 
 /// Defaults until the real controller's reports arrive.
-fn default_feature(id: u8, slot: u8) -> Option<Vec<u8>> {
+pub fn default_feature(id: u8, slot: u8) -> Option<Vec<u8>> {
     let mut r = vec![0u8; feature_size(id)?];
     r[0] = id;
     match id {

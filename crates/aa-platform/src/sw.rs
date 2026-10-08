@@ -142,7 +142,7 @@ impl VideoEncoder for SwEncoder {
 
 pub struct SwDecoder {
     decoder: openh264::decoder::Decoder,
-    rgba: Vec<u8>,
+    nv12: Vec<u8>,
 }
 
 impl std::fmt::Debug for SwDecoder {
@@ -155,7 +155,7 @@ impl SwDecoder {
     pub fn new() -> Result<Self> {
         let decoder = openh264::decoder::Decoder::new()
             .map_err(|e| PlatformError::Backend(anyhow::anyhow!("openh264 decoder: {e}")))?;
-        Ok(Self { decoder, rgba: Vec::new() })
+        Ok(Self { decoder, nv12: Vec::new() })
     }
 }
 
@@ -166,15 +166,36 @@ impl VideoDecoder for SwDecoder {
         else {
             return Ok(None);
         };
+        // NV12 out: the window turns YUV into RGB on the graphics card. The
+        // old per-pixel RGB conversion here cost more CPU than decoding.
         let (w, h) = yuv.dimensions();
-        self.rgba.resize(w * h * 4, 0);
-        yuv.write_rgba8(&mut self.rgba);
+        let (w, h) = (w & !1, h & !1);
+        let (ys, us, vs) = yuv.strides();
+        i420_to_nv12(&mut self.nv12, (yuv.y(), ys), (yuv.u(), us), (yuv.v(), vs), w, h);
         Ok(Some(DecodedFrame {
-            buffer: FrameBuffer::Cpu(Bytes::copy_from_slice(&self.rgba)),
-            format: PixelFormat::Rgba8,
+            buffer: FrameBuffer::Cpu(Bytes::copy_from_slice(&self.nv12)),
+            format: PixelFormat::Nv12,
             resolution: Resolution::new(w as u32, h as u32),
             frame_id,
         }))
+    }
+}
+
+/// Planar 4:2:0 (separate U and V planes) → NV12 (one interleaved UV
+/// plane), tightly packed `w` × `h`. Pure data shuffling, no maths.
+#[allow(clippy::many_single_char_names)] // the planes are called y, u, v
+pub fn i420_to_nv12(out: &mut Vec<u8>, y: (&[u8], usize), u: (&[u8], usize), v: (&[u8], usize), w: usize, h: usize) {
+    out.clear();
+    out.reserve(w * h * 3 / 2);
+    for r in 0..h {
+        out.extend_from_slice(&y.0[r * y.1..r * y.1 + w]);
+    }
+    for r in 0..h / 2 {
+        let (ur, vr) = (&u.0[r * u.1..r * u.1 + w / 2], &v.0[r * v.1..r * v.1 + w / 2]);
+        for (a, b) in ur.iter().zip(vr) {
+            out.push(*a);
+            out.push(*b);
+        }
     }
 }
 
@@ -219,7 +240,8 @@ mod tests {
             assert!(e.data.len() < res.pixels() as usize * 4, "compressed must beat raw");
             if let Some(d) = dec.decode(e.meta.frame_id, &e.data).unwrap() {
                 assert_eq!(d.resolution, res);
-                assert_eq!(d.format, PixelFormat::Rgba8);
+                assert_eq!(d.format, PixelFormat::Nv12);
+                assert_eq!(d.buffer_len(), (res.pixels() * 3 / 2) as usize);
                 decoded += 1;
             }
         }
@@ -240,6 +262,17 @@ mod tests {
         let f2 = cap.next_frame(Duration::from_secs(1)).unwrap().unwrap();
         let k = enc.encode(&f2, true).unwrap();
         assert!(k.meta.is_keyframe);
+    }
+
+    #[test]
+    fn planar_to_nv12_interleaves_chroma() {
+        // 4x2 picture, strides wider than the picture (as decoders pad).
+        let y = [1, 2, 3, 4, 99, 99, 5, 6, 7, 8, 99, 99];
+        let u = [10, 11, 99];
+        let v = [20, 21, 99];
+        let mut out = Vec::new();
+        i420_to_nv12(&mut out, (&y, 6), (&u, 3), (&v, 3), 4, 2);
+        assert_eq!(out, [1, 2, 3, 4, 5, 6, 7, 8, 10, 20, 11, 21]);
     }
 
     #[test]

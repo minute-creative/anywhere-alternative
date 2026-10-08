@@ -81,12 +81,24 @@ pub struct EncodedFrame {
 }
 
 /// One decoded picture ready to present. Same storage story as capture.
+/// CPU `Nv12` is tightly packed: `w*h` luma bytes, then `w*h/2` of
+/// interleaved U,V.
 #[derive(Debug)]
 pub struct DecodedFrame {
     pub buffer: FrameBuffer,
     pub format: PixelFormat,
     pub resolution: Resolution,
     pub frame_id: u32,
+}
+
+impl DecodedFrame {
+    /// Bytes in a CPU frame (0 for GPU frames).
+    pub fn buffer_len(&self) -> usize {
+        match &self.buffer {
+            FrameBuffer::Cpu(b) => b.len(),
+            FrameBuffer::Gpu { .. } => 0,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

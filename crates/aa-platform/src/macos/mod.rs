@@ -31,9 +31,7 @@ pub mod decoder;
 pub mod encoder;
 pub mod input;
 
-pub mod gamepad {
-    //! Virtual HID gamepad spike.
-}
+pub mod gamepad;
 
 /// Query what this Mac can do. Until the backends exist this reports what a
 /// current Apple Silicon machine supports so negotiation code can be tested.
@@ -96,9 +94,8 @@ pub fn host_backends() -> Result<HostBackends> {
             Ok((Box::new(capture::SckCapture::new()?) as Box<dyn crate::ScreenCapture>, vt_factory()))
         })),
         input: Box::new(input::MacInput::new()?),
-        // No virtual controllers on a Mac host yet: macOS needs a signed
-        // driver extension for that.
-        gamepad: None,
+        // Virtual DualSenses (needs aa-host run with sudo; see gamepad.rs).
+        gamepad: Some(Box::new(gamepad::MacPads::new())),
         audio,
         speaker: None,
         clipboard: crate::clipboard::system(),
@@ -109,7 +106,7 @@ pub fn host_backends() -> Result<HostBackends> {
             max_fps: fps,
             color_ranges: vec![ColorRange::Sdr],
             has_gamepad: false,
-            can_emulate_gamepad: false,
+            can_emulate_gamepad: true,
         },
     })
 }

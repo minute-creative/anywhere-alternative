@@ -18,6 +18,7 @@
 pub mod audio;
 pub mod capture;
 pub mod convert;
+pub mod decoder;
 pub mod encoder;
 pub mod gamepad;
 pub mod input;
@@ -251,11 +252,28 @@ pub fn keep_awake(on: bool) {
 }
 
 pub fn viewer_backends() -> Result<ViewerBackends> {
+    // Graphics-card decoding through Media Foundation; OpenH264 on the
+    // processor only if Windows has no decoder at all.
+    let mut codecs = decoder::available_codecs();
+    if !codecs.contains(&Codec::H264) {
+        codecs.push(Codec::H264);
+    }
+    tracing::info!(?codecs, "viewer decoders");
+    let decoder: crate::DecoderFactory = Box::new(|codec| -> Result<Box<dyn crate::VideoDecoder>> {
+        match decoder::MfDecoder::new(codec, true) {
+            Ok(d) => Ok(Box::new(d)),
+            Err(e) if codec == Codec::H264 => {
+                tracing::warn!("Windows video decoder unavailable ({e}); using software decode");
+                Ok(Box::new(crate::sw::SwDecoder::new()?))
+            }
+            Err(e) => Err(e),
+        }
+    });
     Ok(ViewerBackends {
-        decoder: Box::new(|_codec| Ok(Box::new(crate::sw::SwDecoder::new()?) as Box<dyn crate::VideoDecoder>)),
+        decoder,
         clipboard: crate::clipboard::system(),
         capabilities: Capabilities {
-            codecs: vec![Codec::H264],
+            codecs,
             max_resolution: Resolution::new(3840, 2160),
             max_fps: aa_core::capability::MAX_FPS,
             color_ranges: vec![ColorRange::Sdr],
