@@ -336,10 +336,12 @@ pub fn install_addons() -> anyhow::Result<()> {
         }
     }
     if !pkgs.is_empty() {
-        let script: String = pkgs
-            .iter()
-            .map(|p| format!("/usr/sbin/installer -pkg {} -target / || true\n", shell_quote(&p.display().to_string())))
-            .collect();
+        let mut script = String::new();
+        for p in &pkgs {
+            script.push_str("/usr/sbin/installer -pkg ");
+            script.push_str(&shell_quote(&p.display().to_string()));
+            script.push_str(" -target / || true\n");
+        }
         run_as_admin(&script)?;
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -360,9 +362,10 @@ fn blackhole_url() -> anyhow::Result<String> {
         .and_then(|a| {
             a.iter().find_map(|x| {
                 let name = x.get("name")?.as_str()?;
-                (name.starts_with("BlackHole2ch") && name.ends_with(".pkg"))
-                    .then(|| x.get("browser_download_url")?.as_str().map(str::to_owned))
-                    .flatten()
+                (name.starts_with("BlackHole2ch")
+                    && Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("pkg")))
+                .then(|| x.get("browser_download_url")?.as_str().map(str::to_owned))
+                .flatten()
             })
         })
         .ok_or_else(|| anyhow::anyhow!("no installer found; get it from existential.audio/blackhole"))

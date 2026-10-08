@@ -91,7 +91,7 @@ pub fn take_resume() -> Option<Resume> {
 
 /// What happened when we tried.
 #[derive(Debug)]
-#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // `Requested` is Windows only
 pub enum Applied {
     /// The new version is in place / installing: the app should quit now.
     Quit,
