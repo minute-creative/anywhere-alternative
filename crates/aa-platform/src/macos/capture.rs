@@ -187,6 +187,12 @@ impl SckCapture {
         let display = main_display()?;
 
         let (mut w, mut h, refresh_hz) = main_display_mode();
+        // Fast gaming monitors report 144 or 200 Hz. Encoding that many
+        // frames gives each one a sliver of the bitrate (the encoder then
+        // dropped frames: blur and freezes) and squeezes each frame's packets
+        // into a few ms (bursts the Wi-Fi lost). 60 is plenty for a desktop.
+        let max_fps: u16 = std::env::var("AA_MAC_MAX_FPS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+        let refresh_hz = refresh_hz.min(max_fps.max(1));
         let max_w = std::env::var("AA_MAC_MAX_WIDTH").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_MAX_WIDTH);
         if w > max_w {
             h = h * max_w / w;

@@ -111,6 +111,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
     let mut last_frame: Option<aa_platform::CapturedFrame> = None;
     let mut still_since = Instant::now();
     let mut refined = 0u8;
+    let mut skipped_in_row = 0u32;
 
     while !ctl.shutdown.load(Ordering::Relaxed) {
         let streaming = ctl.streaming.load(Ordering::Relaxed);
@@ -259,6 +260,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
         match enc.encode(&frame, force_key) {
             Ok(mut packet) => {
                 encode_failures = 0;
+                skipped_in_row = 0;
                 packet.meta.frame_id = next_frame_id;
                 next_frame_id = next_frame_id.wrapping_add(1);
                 if tx.try_send(packet).is_err() {
@@ -266,7 +268,10 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
                 }
             }
             Err(PlatformError::FrameSkipped) => {
-                tracing::debug!("encoder skipped a frame");
+                skipped_in_row += 1;
+                if skipped_in_row % 60 == 0 {
+                    tracing::warn!(skipped_in_row, kbps = kbps_now, "encoder keeps skipping frames (picture frozen)");
+                }
             }
             Err(e) => {
                 encode_failures += 1;

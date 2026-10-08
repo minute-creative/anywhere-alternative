@@ -82,6 +82,8 @@ pub struct BitrateController {
 impl BitrateController {
     /// Loss above this is "the link is hurting": cut hard.
     const HEAVY_LOSS: f64 = 0.05;
+    /// Loss this high halves the bitrate even when delay is flat.
+    const SEVERE_LOSS: f64 = 0.25;
     /// Loss above this is "a little congested": cut gently.
     const LIGHT_LOSS: f64 = 0.01;
     /// Multiplicative decrease factors.
@@ -139,7 +141,15 @@ impl BitrateController {
         // Light loss only counts when delay says a queue is filling; with
         // flat delay it is Wi-Fi noise, and cutting would only blur the picture.
         let lossy = (loss >= Self::LIGHT_LOSS || report.frames_abandoned > 0) && congested;
-        let heavy = loss >= Self::HEAVY_LOSS || (report.frames_abandoned > 2 && congested);
+        // Heavy loss with flat delay is usually a burst the Wi-Fi or a socket
+        // buffer swallowed, not a link that is full. Halving for it every
+        // second walked a LAN session from 45 down to 2 Mbps and back, over
+        // and over (Mac host, 0.4.4): blurry most of the time and frozen at
+        // the bottom. So without rising delay, only severe loss halves;
+        // anything less trims like light loss.
+        let heavy = (loss >= Self::HEAVY_LOSS && (congested || loss >= Self::SEVERE_LOSS))
+            || (report.frames_abandoned > 2 && congested);
+        let lossy = lossy || (loss >= Self::HEAVY_LOSS && !heavy);
         let next = if self.probing && !lossy && !heavy {
             // Probing: climb fast from the very first clean report.
             (f64::from(self.current_kbps) * (1.0 + Self::PROBE_GROW)) as u32
@@ -205,9 +215,23 @@ mod tests {
     }
 
     #[test]
-    fn heavy_loss_cuts_even_at_flat_rtt() {
+    fn heavy_loss_at_flat_rtt_trims_and_severe_loss_halves() {
         let mut c = settled(20_000, 2_000, 60_000);
-        assert_eq!(c.on_report(&noisy(8.0, 0)), Some(10_000));
+        assert_eq!(c.on_report(&noisy(8.0, 0)), Some(17_000));
+        assert_eq!(c.on_report(&noisy(30.0, 0)), Some(8_500));
+    }
+
+    #[test]
+    fn repeated_bursts_at_flat_rtt_do_not_collapse_to_the_floor() {
+        // The 0.4.4 Mac log: ~14% loss bursts with flat RTT every few seconds.
+        let mut c = settled(45_000, 2_000, 45_000);
+        for _ in 0..6 {
+            c.on_report(&noisy(14.0, 0));
+            for _ in 0..4 {
+                c.on_report(&noisy(0.0, 0));
+            }
+        }
+        assert!(c.current_kbps() >= 15_000, "{}", c.current_kbps());
     }
 
     #[test]
