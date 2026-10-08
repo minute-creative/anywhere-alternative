@@ -371,6 +371,23 @@ gui/$(id -u)/com.minutecreative.anywhere.host` brought it back. Should
 not recur now that the signature is stable. TODO: app should notice
 "always on, but no service running" and say so with a Login Items button.
 
+## Day 6, 01:00 — Mac virtual controller refused even as root (stage 1b answered)
+
+Owner ran `sudo aa-host --service` (euid 0, logs to service-login.log),
+connected from the PC with a DualSense: padhub saw the pad, then
+`IOHIDUserDeviceCreateWithProperties` returned NULL → "permission
+denied"; `hidutil list` shows no 054c device. So on this macOS, root is
+NOT enough. Per Apple DTS on the developer forums (threads 840311,
+822647, 845599): virtual HID devices need CoreHID `HIDVirtualDevice` +
+the `com.apple.developer.hid.virtual.device` entitlement, requested via
+Capability Requests (paid Apple Developer account; one report of a
+request stuck 2.5 months). A restricted entitlement needs a Developer ID
+cert + provisioning profile, not our self-signed cert. The DriverKit
+virtual-device entitlement is a dead key per Apple. Options for the
+owner: (a) Apple Developer Program + request, (b) map the pad to
+keyboard/mouse on the Mac (limited), (c) no controllers on a Mac host.
+Also: 0.4.6 holds 68-80 Mbps on the LAN (soft cuts working).
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.
