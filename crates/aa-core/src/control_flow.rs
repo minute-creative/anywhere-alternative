@@ -82,6 +82,9 @@ pub struct BitrateController {
 impl BitrateController {
     /// Loss above this is "the link is hurting": cut hard.
     const HEAVY_LOSS: f64 = 0.05;
+    /// Queueing delay that trims the bitrate even with no loss (30 ms), or
+    /// four times the quiet RTT, whichever is larger.
+    const BLOATED_TENTHS: u16 = 300;
     /// Loss this high halves the bitrate even when delay is flat.
     const SEVERE_LOSS: f64 = 0.25;
     /// Loss above this is "a little congested": cut gently.
@@ -149,7 +152,14 @@ impl BitrateController {
         // anything less trims like light loss.
         let heavy = (loss >= Self::HEAVY_LOSS && (congested || loss >= Self::SEVERE_LOSS))
             || (report.frames_abandoned > 2 && congested);
-        let lossy = lossy || (loss >= Self::HEAVY_LOSS && !heavy);
+        // Delay far above the quiet RTT means a queue is full even when
+        // nothing is lost yet: Wi-Fi in another room showed RTT jumping from
+        // 5 to 100-700 ms with ~0% loss, then a burst of 30-75% loss a few
+        // seconds later. Trimming on the delay alone gets ahead of that.
+        let bloated = self
+            .base_rtt
+            .is_some_and(|b| report.rtt_tenths_ms.saturating_sub(b) > Self::BLOATED_TENTHS.max(b.saturating_mul(4)));
+        let lossy = lossy || bloated || (loss >= Self::HEAVY_LOSS && !heavy);
         let next = if self.probing && !lossy && !heavy {
             // Probing: climb fast from the very first clean report.
             (f64::from(self.current_kbps) * (1.0 + Self::PROBE_GROW)) as u32
@@ -219,6 +229,18 @@ mod tests {
         let mut c = settled(20_000, 2_000, 60_000);
         assert_eq!(c.on_report(&noisy(8.0, 0)), Some(17_000));
         assert_eq!(c.on_report(&noisy(30.0, 0)), Some(8_500));
+    }
+
+    #[test]
+    fn a_big_delay_jump_trims_even_without_loss() {
+        let mut c = settled(40_000, 2_000, 80_000);
+        // 5 ms quiet RTT, then 120 ms with no loss (the other-room Wi-Fi log).
+        let r = ReceiverReport { loss_per_10k: 0, frames_abandoned: 0, frames_received: 60, rtt_tenths_ms: 1200 };
+        assert_eq!(c.on_report(&r), Some(34_000));
+        // A small wobble (12 ms) is left alone.
+        let mut c = settled(40_000, 2_000, 80_000);
+        let r = ReceiverReport { rtt_tenths_ms: 120, ..r };
+        assert_eq!(c.on_report(&r), None);
     }
 
     #[test]
