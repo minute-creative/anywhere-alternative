@@ -164,9 +164,11 @@ silently via `update-request`/`update-running`/`relaunch-app` markers in
 the shared folder, else one UAC prompt with `/RELAUNCH=1`; Mac swaps the
 bundle and kickstarts the agent). Updates wait while `viewer-connected`
 (host) or `app-viewing` (app) notes are fresh (<2 min).
-Mac permissions reset on each ad-hoc-signed update until the owner adds
-`MAC_SIGN_P12`/`MAC_SIGN_PASSWORD` secrets (`packaging/macos/
-make-signing-cert.sh`); the session's classifier blocks writing secrets.
+Mac releases are signed with the project's own certificate from 0.4.5 on
+(owner added `MAC_SIGN_P12`/`MAC_SIGN_PASSWORD`; checked: aa-host in the
+0.4.5 dmg carries "Anywhere Alternative Code Signing" and identifier
+com.minutecreative.anywhere.aa-host). Permissions should now survive
+updates; 0.4.5 itself needs them granted once more (remove + re-add).
 
 ## Agreed next steps, in order
 

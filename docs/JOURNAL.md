@@ -335,6 +335,15 @@ six P-frame re-encodes over 1.3 s, no keyframe. Not tried yet:
 Also: BlackHole has no .pkg on GitHub; "Install add-ons" now uses the
 link from formulae.brew.sh (fallback BlackHole2ch-0.7.1.pkg).
 
+## Day 5, near midnight — permissions lost on update; signed 0.4.5
+
+After 0.4.4 the Mac lost Accessibility and Local Network ("No route to
+host", os error 65, on every beacon = macOS 15 Local Network privacy, not
+the network). Cause: ad-hoc signature changes every release. Owner ran
+make-signing-cert.sh and added the secrets; 0.4.5 is the first signed
+release (verified by unpacking the dmg with 7z). Added
+NSLocalNetworkUsageDescription to Info.plist.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.
