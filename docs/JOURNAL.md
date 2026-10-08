@@ -357,6 +357,20 @@ without rising delay halves only at 25%+, else x0.85; runs of encoder
 skips are logged as "picture frozen". Also seen: "send failed: No route
 to host" on video sends = Local Network permission missing on the Mac.
 
+## Day 6, 00:30 — Mac sharing silently not running after the signed reinstall
+
+PC couldn't reach the Mac on LAN or Tailscale. `pgrep aa-host` empty,
+nothing on :7700, firewall off; service.log ended at 00:09 with no error
+or "asked to stop". `launchctl print` after the owner toggled Login Items
+→ Allow in the Background: "submitted by smd", managed_by
+ServiceManagement, BTM uuid, runs = 1, never exited. Reading: macOS
+Background Task Management saw the new signature (first certificate-
+signed build) and disabled/killed the agent; KeepAlive can't help while
+BTM has it off. Re-enabling it + `launchctl kickstart -k
+gui/$(id -u)/com.minutecreative.anywhere.host` brought it back. Should
+not recur now that the signature is stable. TODO: app should notice
+"always on, but no service running" and say so with a Login Items button.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.
