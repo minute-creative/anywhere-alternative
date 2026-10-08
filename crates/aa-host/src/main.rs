@@ -74,6 +74,12 @@ struct Args {
     /// if the other session's copy still holds it, never gives up.
     #[arg(long)]
     service: bool,
+
+    /// Windows only: the background service Windows starts at boot. It
+    /// keeps one `--service` host running on whatever session is on the
+    /// screen, including the sign-in screen (see `windows/session.rs`).
+    #[arg(long, hide = true)]
+    windows_service: bool,
 }
 
 fn parse_resolution(s: &str) -> Result<Resolution, String> {
@@ -161,8 +167,14 @@ fn at_login_screen() -> bool {
 
 fn init_logging(args: &Args) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    if args.service {
-        let name = if at_login_screen() { "service-login.log" } else { "service.log" };
+    if args.service || args.windows_service {
+        let name = if args.windows_service {
+            "service-supervisor.log"
+        } else if at_login_screen() && cfg!(target_os = "macos") {
+            "service-login.log"
+        } else {
+            "service.log"
+        };
         let path = aa_platform::trust::host_dir().join(name);
         if let Ok(file) = std::fs::File::create(&path) {
             tracing_subscriber::fmt()
@@ -184,6 +196,10 @@ fn init_logging(args: &Args) {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     init_logging(&args);
+    #[cfg(target_os = "windows")]
+    if args.windows_service {
+        return tokio::task::spawn_blocking(aa_platform::windows::session::run_service).await?;
+    }
     if args.service {
         tracing::info!(login_screen = at_login_screen(), "sharing service starting");
         // Logging in or out: the other session's copy may still hold the

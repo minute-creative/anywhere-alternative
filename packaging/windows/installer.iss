@@ -41,12 +41,29 @@ Name: "{autodesktop}\Anywhere"; Filename: "{app}\anywhere.exe"; Tasks: desktopic
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Anywhere host"" dir=in action=allow program=""{app}\aa-host.exe"" enable=yes"; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Anywhere viewer"" dir=in action=allow program=""{app}\aa-viewer.exe"" enable=yes"; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Anywhere app"" dir=in action=allow program=""{app}\anywhere.exe"" enable=yes"; Flags: runhidden
+; If "share this PC at all times" was on, start that service again with the new files.
+Filename: "{sys}\sc.exe"; Parameters: "start AnywhereHost"; Flags: runhidden
 Filename: "{app}\anywhere.exe"; Description: "Open Anywhere"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
+Filename: "{sys}\sc.exe"; Parameters: "stop AnywhereHost"; Flags: runhidden; RunOnceId: "svcstop"
+Filename: "{sys}\sc.exe"; Parameters: "delete AnywhereHost"; Flags: runhidden; RunOnceId: "svcdelete"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Anywhere host"""; Flags: runhidden; RunOnceId: "fwhost"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Anywhere viewer"""; Flags: runhidden; RunOnceId: "fwviewer"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Anywhere app"""; Flags: runhidden; RunOnceId: "fwapp"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{userappdata}\AnywhereAlternative"
+Type: filesandordirs; Name: "{commonappdata}\AnywhereAlternative"
+
+[Code]
+// The always-on sharing service keeps aa-host.exe open; stop it so the
+// update can replace the file ([Run] starts it again afterwards).
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+begin
+  Exec(ExpandConstant('{sys}\sc.exe'), 'stop AnywhereHost', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Sleep(4000);
+  Result := '';
+end;

@@ -113,6 +113,9 @@ impl SendInputInjector {
     }
 
     fn send(inputs: &[INPUT]) -> Result<()> {
+        // Typing into the sign-in screen needs this thread on that desktop
+        // (only possible for the sharing service; harmless otherwise).
+        super::session::follow_input_desktop_throttled();
         // SAFETY: the slice is valid for its length; cbsize is the struct size.
         let n = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
         if n as usize == inputs.len() {

@@ -42,12 +42,25 @@ pub fn user_dir() -> PathBuf {
 /// The shared folder used on a Mac for sharing at the login screen.
 pub const MAC_SYSTEM_DIR: &str = "/Library/Application Support/AnywhereAlternative";
 
+/// The folder shared by the always-on sharing (system) and the app (user):
+/// `/Library/Application Support/AnywhereAlternative` on a Mac,
+/// `C:\ProgramData\AnywhereAlternative` on Windows. Created by the app's
+/// "share at all times" setup.
+pub fn system_dir() -> PathBuf {
+    if cfg!(target_os = "windows") {
+        let base = std::env::var_os("ProgramData").map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
+        base.join("AnywhereAlternative")
+    } else {
+        PathBuf::from(MAC_SYSTEM_DIR)
+    }
+}
+
 /// Where the sharing side keeps its key, pairings and code.
 pub fn host_dir() -> PathBuf {
-    if std::env::var_os("AA_DATA_DIR").is_none() && cfg!(target_os = "macos") {
-        let sys = Path::new(MAC_SYSTEM_DIR);
-        if sys.is_dir() && writable(sys) {
-            return sys.to_path_buf();
+    if std::env::var_os("AA_DATA_DIR").is_none() && cfg!(any(target_os = "macos", target_os = "windows")) {
+        let sys = system_dir();
+        if sys.is_dir() && writable(&sys) {
+            return sys;
         }
     }
     user_dir()

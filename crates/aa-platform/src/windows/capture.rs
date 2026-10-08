@@ -174,7 +174,9 @@ impl DxgiCapture {
 
             // Started while the PC is locked: carry on without a picture
             // and pick the screen up the moment it unlocks, rather than
-            // refusing to start.
+            // refusing to start. (As the sharing service, follow the
+            // screen onto the sign-in desktop first: then it isn't "locked".)
+            super::session::follow_input_desktop();
             let (dup, res, refresh_hz, locked) = match output1.DuplicateOutput(&device) {
                 Ok(dup) => {
                     let desc = dup.GetDesc();
@@ -279,6 +281,9 @@ impl DxgiCapture {
                 self.output_index = index;
             }
             let output1: IDXGIOutput1 = output.cast().map_err(|e| win(e, "IDXGIOutput1"))?;
+            // Run as the sharing service (SYSTEM), we may follow the screen
+            // onto the sign-in / lock desktop; otherwise this changes nothing.
+            super::session::follow_input_desktop();
             self.desktop_rect = output.GetDesc().map_err(|e| win(e, "output GetDesc"))?.DesktopCoordinates;
             publish_rect(self.desktop_rect);
             let dup = match output1.DuplicateOutput(&self.device) {

@@ -22,6 +22,7 @@ pub mod decoder;
 pub mod encoder;
 pub mod gamepad;
 pub mod input;
+pub mod session;
 
 use aa_core::capability::Capabilities;
 use aa_core::config::StreamConfig;

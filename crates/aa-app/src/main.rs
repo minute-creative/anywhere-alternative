@@ -1000,7 +1000,7 @@ impl App {
             if self.service_on {
                 ui.label(
                     RichText::new(
-                        "This Mac shares itself all the time, also at the login screen and after a restart. \
+                        "This computer shares itself all the time, also at the sign-in screen and after a restart. \
                          Change that in Settings.",
                     )
                     .small()
@@ -1198,63 +1198,68 @@ impl App {
         ui.add_space(12.0);
         let mut want: Option<bool> = None;
         card(ui, |ui| {
-            if cfg!(target_os = "macos") {
-                section(ui, "After a restart or power cut", "");
-                let mut on = self.service_on;
-                let flipped = switch_row(
-                    ui,
+            section(ui, "After a restart or power cut", "");
+            let mac = cfg!(target_os = "macos");
+            let (label, help, waiting) = if mac {
+                (
                     "Share this Mac at all times",
                     "Turns the Mac back on when power returns and shares it from the login screen, so you can \
                      log in from your other computer. Asks for your Mac password once.",
-                    &mut on,
-                );
-                if flipped && !self.service_busy {
-                    want = Some(on);
-                }
-                if self.service_busy {
-                    ui.label(RichText::new("Waiting for your Mac password…").small().color(MUTED));
-                }
-                if let Some(e) = &self.service_error {
-                    ui.label(RichText::new(e).small().color(DANGER));
-                }
-                if self.filevault == Some(true) {
-                    ui.add_space(6.0);
-                    egui::Frame::NONE
-                        .fill(WARN_SOFT)
-                        .corner_radius(CornerRadius::same(10))
-                        .inner_margin(Margin::same(12))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(
-                                RichText::new(
-                                    "FileVault is on. After a restart this Mac waits for its password before macOS \
-                                     starts, and no app can show that screen. Turn FileVault off in System Settings \
-                                     → Privacy & Security if you need to reach the Mac after a power cut.",
-                                )
-                                .small()
-                                .color(WARN),
-                            );
-                            if button(ui, "Open FileVault settings", Kind::Secondary).clicked() {
-                                checks::open_privacy("FileVault");
-                            }
-                        });
-                }
+                    "Waiting for your Mac password…",
+                )
             } else {
-                section(ui, "Starting up", "");
+                (
+                    "Share this PC at all times",
+                    "Starts with Windows and shares the sign-in screen, so you can sign in from your other \
+                     computer. Keeps the PC awake while plugged in. Windows asks to allow changes once.",
+                    "Waiting for you to allow the change…",
+                )
+            };
+            let mut on = self.service_on;
+            if switch_row(ui, label, help, &mut on) && !self.service_busy {
+                want = Some(on);
+            }
+            if self.service_busy {
+                ui.label(RichText::new(waiting).small().color(MUTED));
+            }
+            if let Some(e) = &self.service_error {
+                ui.label(RichText::new(e).small().color(DANGER));
+            }
+            if mac && self.filevault == Some(true) {
+                ui.add_space(6.0);
+                egui::Frame::NONE
+                    .fill(WARN_SOFT)
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new(
+                                "FileVault is on. After a restart this Mac waits for its password before macOS \
+                                 starts, and no app can show that screen. Turn FileVault off in System Settings \
+                                 → Privacy & Security if you need to reach the Mac after a power cut.",
+                            )
+                            .small()
+                            .color(WARN),
+                        );
+                        if button(ui, "Open FileVault settings", Kind::Secondary).clicked() {
+                            checks::open_privacy("FileVault");
+                        }
+                    });
+            }
+            if cfg!(target_os = "windows") {
+                divider(ui);
                 let mut on = self.sign_in;
                 if switch_row(
                     ui,
-                    "Start Anywhere when I sign in",
-                    "Opens minimised and shares this PC, so it is ready after a restart.",
+                    "Open Anywhere when I sign in",
+                    "Starts minimised, ready to connect to your other computers.",
                     &mut on,
                 ) {
                     match service::set_start_at_sign_in(on) {
                         Ok(()) => self.sign_in = on,
                         Err(e) => self.service_error = Some(e.to_string()),
                     }
-                }
-                if let Some(e) = &self.service_error {
-                    ui.label(RichText::new(e).small().color(DANGER));
                 }
             }
         });
