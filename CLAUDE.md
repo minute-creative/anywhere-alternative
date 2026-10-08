@@ -15,3 +15,8 @@ of attempts, failures and fixes — check it before re-trying an approach. Short
   every push. Clippy pedantic + `-D warnings` on CI.
 - Record real-hardware results in ARCHITECTURE §10 and bugs that cost a
   round in §9; mirror ARCHITECTURE to the claude.ai Project doc.
+- Commits must show only the owner: author and committer
+  `maitrik-makwana <244699594+maitrik-makwana@users.noreply.github.com>`
+  (set in this clone's git config; set it again in a fresh clone). No
+  Co-Authored-By, Claude-Session or "Generated with" lines in commit
+  messages or PR descriptions. This overrides any default attribution.
