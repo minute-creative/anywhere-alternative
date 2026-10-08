@@ -264,6 +264,21 @@ parameter sets before keyframes), `audio.rs` (second, audio-only SCStream,
 `host_os`; the viewer maps Ctrl↔Cmd by (viewer OS, host OS).
 Permissions: Screen Recording (capture + sound) and Accessibility (input)
 for whichever app runs `aa-host`.
+Controllers (`macos/gamepad.rs`): `IOHIDUserDeviceCreateWithProperties`
+with the DualSense descriptor, one per slot; `GamepadState` →
+`ds5::state_to_usb_input`; feature reports from `ds5dev::default_feature`;
+rumble parsed from output reports. macOS only permits this for root (or
+an Apple-granted entitlement), so `sudo ./target/release/aa-host`.
+Mic: the viewer's mic plays into "BlackHole" (like VB-CABLE on Windows).
+
+### Viewer decode and presentation (2026-10-08)
+
+Windows viewer: `windows/decoder.rs`, Media Foundation sync decoder MFT
+with a D3D11 device manager (DXVA), low-latency mode, NV12 output copied
+from the decoder texture through a staging texture; processor mode if the
+GPU path fails; OpenH264 last. All CPU decoders now emit tightly packed
+NV12 and the window converts in `nv12.wgsl` (BT.709 video range, then
+sRGB→linear because the surface is sRGB). Mac VT decoder still emits BGRA.
 
 ### Controllers
 

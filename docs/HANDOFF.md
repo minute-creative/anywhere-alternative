@@ -114,10 +114,13 @@ grey"; want all accessories (mic, headphones, controllers, other USB).
    ScreenCaptureKit picture + system sound, VideoToolbox HEVC/H.264,
    Quartz input, caffeinate. Owner test: `aa-host` on the Mac, viewer on
    the PC (H.264, software decode for now) or another Mac. Grant Screen
-   Recording + Accessibility to Terminal. Still to do: Windows viewer
-   hardware decode (D3D11VA) for 4K, mic into the Mac (needs a virtual
-   audio device like BlackHole), controllers on a Mac host (needs a
-   DriverKit extension), lock-screen behaviour.
+   Recording + Accessibility to Terminal. Added the same day: PC viewer
+   GPU decode (Media Foundation/DXVA, H.264 + HEVC if the HEVC extension
+   is installed), NV12 drawn by shader on every viewer, Mac-host
+   controllers (virtual DualSense via IOHIDUserDevice, needs `sudo`), mic
+   into the Mac via BlackHole 2ch. Still open: DualSense extras
+   (touchpad/gyro/haptics) on a Mac host (it gets generic state only),
+   lock-screen behaviour, rumble back for non-DualSense pads.
 6. Zero-copy Mac decode (IOSurface → Metal), multi-monitor, encryption +
    internet stage.
 
