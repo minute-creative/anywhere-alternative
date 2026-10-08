@@ -344,6 +344,19 @@ make-signing-cert.sh and added the secrets; 0.4.5 is the first signed
 release (verified by unpacking the dmg with 7z). Added
 NSLocalNetworkUsageDescription to Info.plist.
 
+## Day 5, midnight — blur and freezes explained by the Mac's log (v0.4.6)
+
+host.log/service.log from the Mac: display 1920x1080 at **200 Hz**, so
+the encoder ran with fps=200 (per-frame budget = bitrate/200) and the
+pacer squeezed each frame into ~3.75 ms. Results: VideoToolbox dropped
+frames nonstop at low bitrate (dozens of "OSStatus -1" a second in 0.4.3
+= frozen picture) and ~14% loss bursts at flat RTT (5 ms), each of which
+halved the bitrate: 45 -> 22 -> 11 -> 5 -> 2 Mbps, slow climb, repeat.
+Fixes: Mac capture/encode capped at 60 fps (`AA_MAC_MAX_FPS`); loss
+without rising delay halves only at 25%+, else x0.85; runs of encoder
+skips are logged as "picture frozen". Also seen: "send failed: No route
+to host" on video sends = Local Network permission missing on the Mac.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.
