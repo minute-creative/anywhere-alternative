@@ -651,14 +651,8 @@ impl ApplicationHandler<Wake> for App {
                     return; // the host OS generates its own repeats
                 }
                 if let PhysicalKey::Code(code) = event.physical_key {
-                    if let Some(mut hid) = hid_usage(code) {
-                        if self.cmd_as_ctrl {
-                            hid = match hid {
-                                0xE3 => 0xE0, // Left GUI -> Left Ctrl
-                                0xE7 => 0xE4, // Right GUI -> Right Ctrl
-                                other => other,
-                            };
-                        }
+                    if let Some(hid) = hid_usage(code) {
+                        let hid = shortcut_key(hid, self.cmd_as_ctrl, crate::link::host_is_mac());
                         let pressed = event.state == ElementState::Pressed;
                         let is_modifier = (0xE0..=0xE7).contains(&hid);
                         if pressed && !is_modifier && self.cmd_as_ctrl && self.cmd_held {
@@ -719,5 +713,34 @@ mod tests {
         assert_eq!(r.normalise(0.0, 218.75), Some((0, 0)));
         assert_eq!(r.normalise(1000.0, 781.25), Some((65535, 65535)));
         assert_eq!(r.normalise(500.0, 10.0), None);
+    }
+}
+
+/// Shortcuts mean the same on both machines. `mac_viewer`: this keyboard
+/// is a Mac's (`cmd_as_ctrl`); `mac_host`: the far end is a Mac.
+/// - Mac → PC: Cmd becomes Ctrl (Cmd+C copies on the PC).
+/// - PC → Mac: Ctrl becomes Cmd (Ctrl+C copies on the Mac).
+/// - Same kind on both ends: keys go through unchanged.
+fn shortcut_key(hid: u16, mac_viewer: bool, mac_host: bool) -> u16 {
+    match (mac_viewer, mac_host, hid) {
+        (true, false, 0xE3) => 0xE0, // Left Cmd -> Left Ctrl
+        (true, false, 0xE7) => 0xE4, // Right Cmd -> Right Ctrl
+        (false, true, 0xE0) => 0xE3, // Left Ctrl -> Left Cmd
+        (false, true, 0xE4) => 0xE7, // Right Ctrl -> Right Cmd
+        _ => hid,
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::shortcut_key;
+
+    #[test]
+    fn shortcuts_follow_the_host() {
+        assert_eq!(shortcut_key(0xE3, true, false), 0xE0, "Mac keyboard, PC host: Cmd is Ctrl");
+        assert_eq!(shortcut_key(0xE3, true, true), 0xE3, "Mac to Mac: unchanged");
+        assert_eq!(shortcut_key(0xE0, false, true), 0xE3, "PC keyboard, Mac host: Ctrl is Cmd");
+        assert_eq!(shortcut_key(0xE0, false, false), 0xE0, "PC to PC: unchanged");
+        assert_eq!(shortcut_key(0x06, false, true), 0x06, "letters never change");
     }
 }

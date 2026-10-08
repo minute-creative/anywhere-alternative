@@ -15,7 +15,16 @@ pub enum ControlMessage {
     /// Viewer → host: I want to connect, here is what I can decode.
     Hello { protocol: u16, capabilities: Capabilities },
     /// Host → viewer: accepted, here is what we agreed on.
-    Welcome { protocol: u16, negotiated: Negotiated },
+    Welcome {
+        protocol: u16,
+        negotiated: Negotiated,
+        /// "macos" or "windows": the viewer maps Ctrl/Cmd so shortcuts mean
+        /// the same thing on both (Cmd+C on a Mac keyboard copies on a PC,
+        /// Ctrl+C on a PC keyboard copies on a Mac). Missing from older
+        /// hosts, which were all Windows.
+        #[serde(default)]
+        host_os: String,
+    },
     /// Host → viewer: refused, with a human-readable reason.
     Reject { reason: String },
     /// Either direction: ending the session cleanly.

@@ -60,6 +60,21 @@ impl FrameSlot {
     }
 }
 
+/// The host is a Mac (set at connect). Decides how Ctrl and Cmd are
+/// mapped; read by the window on every key.
+static HOST_IS_MAC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_host_os(os: &str) {
+    let mac = os == "macos";
+    if HOST_IS_MAC.swap(mac, std::sync::atomic::Ordering::Relaxed) != mac || mac {
+        tracing::info!(host = if os.is_empty() { "windows" } else { os }, "host operating system");
+    }
+}
+
+pub fn host_is_mac() -> bool {
+    HOST_IS_MAC.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn command_channel() -> (mpsc::Sender<ViewerCommand>, mpsc::Receiver<ViewerCommand>) {
     mpsc::channel(1024)
 }

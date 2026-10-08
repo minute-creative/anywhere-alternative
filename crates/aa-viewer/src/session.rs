@@ -109,7 +109,10 @@ pub async fn run(
                         continue;
                     }
                     match ControlMessage::decode(&packet.payload) {
-                        Ok(ControlMessage::Welcome { negotiated, .. }) => return anyhow::Ok(negotiated),
+                        Ok(ControlMessage::Welcome { negotiated, host_os, .. }) => {
+                            crate::link::set_host_os(&host_os);
+                            return anyhow::Ok(negotiated);
+                        }
                         Ok(ControlMessage::Reject { reason }) if reason.contains("busy") => {
                             if !said_busy {
                                 tracing::info!("host is busy with another viewer; waiting");

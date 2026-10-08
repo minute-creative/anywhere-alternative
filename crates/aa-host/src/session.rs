@@ -412,7 +412,11 @@ async fn handle_packet(
                             send_control(
                                 socket,
                                 from,
-                                &ControlMessage::Welcome { protocol: PROTOCOL_VERSION, negotiated },
+                                &ControlMessage::Welcome {
+                                    protocol: PROTOCOL_VERSION,
+                                    negotiated,
+                                    host_os: std::env::consts::OS.to_owned(),
+                                },
                                 seq,
                             )
                             .await?;
@@ -435,7 +439,11 @@ async fn handle_packet(
                             send_control(
                                 socket,
                                 from,
-                                &ControlMessage::Welcome { protocol: PROTOCOL_VERSION, negotiated },
+                                &ControlMessage::Welcome {
+                                    protocol: PROTOCOL_VERSION,
+                                    negotiated,
+                                    host_os: std::env::consts::OS.to_owned(),
+                                },
                                 seq,
                             )
                             .await?;

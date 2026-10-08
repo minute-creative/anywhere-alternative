@@ -1,4 +1,4 @@
-//! `macOS` backends. Stage 1 fills these in, in this order:
+//! `macOS` backends. The original plan, now built (gamepad still open):
 //!
 //! 1. `capture`  — `ScreenCaptureKit` (`SCStream`) delivering `CMSampleBuffer`s
 //!    backed by `IOSurface`, at the display's native refresh rate. Needs the
@@ -25,19 +25,11 @@ use aa_core::video::{Codec, ColorRange, Resolution};
 
 use crate::{HostBackends, PlatformError, Result, ViewerBackends};
 
-pub mod capture {
-    //! `ScreenCaptureKit` backend. See module docs in `macos.rs`.
-}
-
-pub mod encoder {
-    //! `VideoToolbox` encoder backend.
-}
-
+pub mod audio;
+pub mod capture;
 pub mod decoder;
-
-pub mod input {
-    //! `CGEvent` input injection.
-}
+pub mod encoder;
+pub mod input;
 
 pub mod gamepad {
     //! Virtual HID gamepad spike.
@@ -58,8 +50,91 @@ pub fn probe_capabilities() -> Capabilities {
     }
 }
 
+/// Encoders for whatever codec and size the session asks for.
+fn vt_factory() -> crate::EncoderFactory {
+    Box::new(|codec, res, fps| {
+        let kbps = aa_core::config::StreamConfig::suggested_bitrate_kbps(res, fps);
+        Ok(Box::new(encoder::VtEncoder::new(codec, res, fps, kbps)?) as Box<dyn crate::VideoEncoder>)
+    })
+}
+
+/// This Mac as the computer being watched: ScreenCaptureKit picture and
+/// sound, VideoToolbox encoding, Quartz events for mouse and keyboard.
 pub fn host_backends() -> Result<HostBackends> {
-    Err(PlatformError::NotImplemented("macOS host backends (stage 1)"))
+    let cap = capture::SckCapture::new()?;
+    let res = crate::ScreenCapture::resolution(&cap);
+    let fps = crate::ScreenCapture::refresh_rate_hz(&cap);
+    // HEVC first (sharper per bit); H.264 for viewers that only have that
+    // (the PC viewer today). The session switches on negotiation.
+    let mut codecs = Vec::new();
+    let mut encoder: Option<Box<dyn crate::VideoEncoder>> = None;
+    for codec in [Codec::Hevc, Codec::H264] {
+        let kbps = aa_core::config::StreamConfig::suggested_bitrate_kbps(res, fps);
+        match encoder::VtEncoder::new(codec, res, fps, kbps) {
+            Ok(e) => {
+                codecs.push(codec);
+                if encoder.is_none() {
+                    encoder = Some(Box::new(e));
+                }
+            }
+            Err(e) => tracing::warn!(?codec, "VideoToolbox can't encode this: {e}"),
+        }
+    }
+    let encoder = encoder.ok_or_else(|| PlatformError::Unavailable("no VideoToolbox encoder".into()))?;
+    let audio: Option<Box<dyn crate::audio::AudioCapture>> = match audio::SckAudio::new() {
+        Ok(a) => Some(Box::new(a)),
+        Err(e) => {
+            tracing::warn!("system audio capture unavailable ({e}); streaming without sound");
+            None
+        }
+    };
+    Ok(HostBackends {
+        capture: Box::new(cap),
+        encoder,
+        encoder_factory: Some(vt_factory()),
+        rebuild: Some(Box::new(|| {
+            Ok((Box::new(capture::SckCapture::new()?) as Box<dyn crate::ScreenCapture>, vt_factory()))
+        })),
+        input: Box::new(input::MacInput::new()?),
+        // No virtual controllers on a Mac host yet: macOS needs a signed
+        // driver extension for that.
+        gamepad: None,
+        audio,
+        speaker: None,
+        clipboard: crate::clipboard::system(),
+        pad_attach: None,
+        capabilities: Capabilities {
+            codecs,
+            max_resolution: res,
+            max_fps: fps,
+            color_ranges: vec![ColorRange::Sdr],
+            has_gamepad: false,
+            can_emulate_gamepad: false,
+        },
+    })
+}
+
+/// Keep the Mac awake with its display on while someone streams it, using
+/// the system's own `caffeinate` tool (it holds the same power assertion an
+/// app would, and the assertion ends by itself if we crash).
+pub fn keep_awake(on: bool) {
+    static CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+    let mut child = CHILD.lock().expect("caffeinate");
+    if let Some(mut c) = child.take() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    if on {
+        // -d display, -i idle sleep, -u "user is active"; -w ends it with us.
+        let pid = std::process::id().to_string();
+        match std::process::Command::new("/usr/bin/caffeinate").args(["-d", "-i", "-u", "-w", &pid]).spawn() {
+            Ok(c) => {
+                *child = Some(c);
+                tracing::info!("keeping the Mac awake while streaming");
+            }
+            Err(e) => tracing::warn!("could not keep the Mac awake: {e}"),
+        }
+    }
 }
 
 pub fn viewer_backends() -> Result<ViewerBackends> {

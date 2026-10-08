@@ -27,6 +27,7 @@ use bytes::Bytes;
 pub mod audio;
 pub mod clipboard;
 pub mod ds5dev;
+pub mod hid_mac;
 pub mod hid_scancode;
 pub mod lan;
 pub mod mock;
@@ -173,7 +174,9 @@ pub type PipelineFactory = Box<dyn FnMut() -> Result<(Box<dyn ScreenCapture>, En
 pub fn keep_awake(on: bool) {
     #[cfg(target_os = "windows")]
     windows::keep_awake(on);
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    macos::keep_awake(on);
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let _ = on;
 }
 /// Same idea on the viewer: build the decoder for the codec the host chose.
