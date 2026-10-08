@@ -640,6 +640,17 @@ Mock host with a loopback stand-in for usbip-win2 plus a pretend game;
   recognising the pad, haptics through Windows' USB audio driver, hidapi
   on the Mac (USB and Bluetooth).
 
+### PC viewer → Mac host on home Wi-Fi, 0.4.6 (2026-10-09)
+
+Mac (M4 Pro, 1920x1080 display at 200 Hz) sharing, PC viewing over LAN
+192.168.1.x. Before 0.4.6 the Mac encoded at fps=200: VideoToolbox
+dropped frames nonstop at low bitrate (freezes) and ~14% loss bursts at
+flat 5 ms RTT walked the bitrate 45 → 2 Mbps repeatedly (blur). 0.4.6
+(60 fps cap, softer cuts on flat-RTT loss) connected and worked per the
+owner after the Mac's background item was re-enabled. Still to measure:
+sustained Mbps/fps in the overlay, sharpness after motion, input with
+Accessibility granted, permissions surviving the next signed update.
+
 ## 11. Coding standards
 
 - `cargo fmt`, `cargo clippy --all-targets` with pedantic lints: zero warnings.
