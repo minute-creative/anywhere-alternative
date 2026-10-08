@@ -53,7 +53,8 @@ jobs:
           # it only if it is missing.
           ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
           if [ ! -f "$ISCC" ]; then choco install innosetup -y --no-progress 2>&1 | tee -a build.log; fi
-          "$ISCC" "/DAppVersion=$VERSION" packaging/windows/installer.iss 2>&1 | tee -a build.log
+          # MSYS_NO_PATHCONV: stop Git Bash turning "/DAppVersion" into a file path.
+          MSYS_NO_PATHCONV=1 "$ISCC" "/DAppVersion=$VERSION" packaging/windows/installer.iss 2>&1 | tee -a build.log
 
       - uses: actions/upload-artifact@v4
         with:
