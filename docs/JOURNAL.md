@@ -388,6 +388,20 @@ owner: (a) Apple Developer Program + request, (b) map the pad to
 keyboard/mouse on the Mac (limited), (c) no controllers on a Mac host.
 Also: 0.4.6 holds 68-80 Mbps on the LAN (soft cuts working).
 
+## Day 6, 01:40 — other-room Wi-Fi sawtooth (v0.4.7)
+
+PC is a laptop (Intel Arc 130T); in another room over Wi-Fi. Viewer log:
+RTT spikes 50-730 ms, loss bursts 15-75%, stutters climbing, audio
+jitter buffer grown to 300 ms. Host log: 30 s sawtooth, 4 -> 80 Mbps at
++10%/s, RTT rises from ~50 Mbps, loss burst, stacked cuts to 2-5 Mbps.
+The link carried ~35 Mbps. Fixes in aa-core control_flow: trim x0.85
+when queueing delay > 30 ms (or 4x quiet RTT) even without loss; remember
+the choke bitrate and grow 2%/s within 80% of it (forget after 30 clean
+s); after a cut, only 25%+ loss may cut on the next report. Simulated
+35 Mbps link: settles ~35, lowest 33. Not yet seen on the real link.
+Also noted: the PC's microphone is "CABLE Output (VB-Audio)" (probably
+the wrong device; it sends whatever plays into the cable).
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.
