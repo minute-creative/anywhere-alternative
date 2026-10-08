@@ -321,6 +321,20 @@ asked for `service.log` and to check aa-host's own permissions after the
 Mac restart test failed. Disk filled up mid-build (29 GB target dir):
 `rm -rf target/debug/incremental` between rounds.
 
+## Day 5, night — still blurry on 0.4.3 (v0.4.4)
+
+Owner: Mac screen still blurry on the PC; Share page showed "encode
+failed: encoded frame: OSStatus -1". -1 is our own code for "VideoToolbox
+dropped the frame" (low-latency rate control over budget). We treated it
+as a failure: forced a keyframe, and a keyframe of a whole Retina screen
+squeezed into one frame's budget is blurry. 0.4.3's third refinement step
+(a forced keyframe at 900 ms) had the same flaw. Fix: drops are
+`PlatformError::FrameSkipped` (no keyframe, not counted), refinement is
+six P-frame re-encodes over 1.3 s, no keyframe. Not tried yet:
+`MaxAllowedFrameQP` during refinement (may make VT drop frames instead).
+Also: BlackHole has no .pkg on GitHub; "Install add-ons" now uses the
+link from formulae.brew.sh (fallback BlackHole2ch-0.7.1.pkg).
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.
