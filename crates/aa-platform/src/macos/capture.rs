@@ -138,13 +138,19 @@ fn main_display_mode() -> (usize, usize, u16) {
     (w, h, hz)
 }
 
+/// Carries an Objective-C object across the completion handler's thread.
+struct Handoff<T>(T);
+// SAFETY: the object is retained and only touched again by the receiving
+// thread after the sender has let go of it.
+unsafe impl<T> Send for Handoff<T> {}
+
 /// The main display as ScreenCaptureKit knows it (asked asynchronously).
 pub(super) fn main_display() -> Result<Retained<SCDisplay>> {
     let content = wait(|tx| {
         let block = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
             let r = match NonNull::new(content) {
                 // SAFETY: a non-null content object is valid here; retain it to keep it.
-                Some(c) => Ok(unsafe { Retained::retain(c.as_ptr()) }.expect("non-null")),
+                Some(c) => Ok(Handoff(unsafe { Retained::retain(c.as_ptr()) }.expect("non-null"))),
                 None => Err(ns_err("listing displays", error)),
             };
             let _ = tx.send(r);
@@ -152,7 +158,8 @@ pub(super) fn main_display() -> Result<Retained<SCDisplay>> {
         // SAFETY: the block lives until it is called (RcBlock copies to the heap).
         unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&block) };
     })
-    .ok_or_else(|| PlatformError::Unavailable("ScreenCaptureKit did not answer".into()))??;
+    .ok_or_else(|| PlatformError::Unavailable("ScreenCaptureKit did not answer".into()))??
+    .0;
     let main_id = CGMainDisplayID();
     // SAFETY: plain property reads on live objects.
     let displays = unsafe { content.displays() };
