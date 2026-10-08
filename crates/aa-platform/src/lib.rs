@@ -118,6 +118,12 @@ pub enum PlatformError {
     /// monitor unplugged): the whole capture/encode pipeline must be rebuilt.
     #[error("device lost: {0}")]
     DeviceLost(String),
+    /// The encoder chose not to output this frame (its rate control was over
+    /// budget). Nothing is wrong: skip it and carry on. Treating this as a
+    /// failure forced a fresh full picture, which the same rate control then
+    /// had to squeeze small, so the screen went blurry (v0.4.3 on a Mac).
+    #[error("encoder skipped this frame")]
+    FrameSkipped,
     #[error("{0}")]
     Backend(#[from] anyhow::Error),
 }

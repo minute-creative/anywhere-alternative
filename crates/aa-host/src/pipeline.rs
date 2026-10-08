@@ -65,6 +65,9 @@ pub struct Pipeline {
     pub rebuild: Option<aa_platform::PipelineFactory>,
 }
 
+/// When to re-encode a still screen, in ms after it stopped changing.
+const REFINE_AFTER_MS: [u64; 6] = [120, 250, 400, 600, 900, 1300];
+
 /// Runs forever on its own OS thread. Frames go to `tx`; if the network task
 /// falls behind, `try_send` drops the frame rather than growing a queue,
 /// because a late frame is worth nothing.
@@ -102,8 +105,9 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
     // Sharpening a still screen. Frames come only when something changes, so
     // after movement the last, rushed (soft, blocky) picture would stay on
     // the viewer for as long as nothing moves. Encoding that same picture
-    // again lets the encoder add the detail it skipped: twice as a cheap
-    // update, then once as a full fresh picture.
+    // again lets the encoder add the detail it skipped; each pass adds more.
+    // Only updates, never a fresh full picture: a full picture has to fit
+    // the same per-frame budget and so starts blurry again (tried in 0.4.3).
     let mut last_frame: Option<aa_platform::CapturedFrame> = None;
     let mut still_since = Instant::now();
     let mut refined = 0u8;
@@ -173,19 +177,12 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
             Ok(None) => {
                 // Nothing changed on screen. Time to sharpen the last picture?
                 let still = still_since.elapsed();
-                let due = match refined {
-                    0 => still > Duration::from_millis(150),
-                    1 => still > Duration::from_millis(400),
-                    2 => still > Duration::from_millis(900),
-                    _ => false,
-                };
+                let due =
+                    REFINE_AFTER_MS.get(usize::from(refined)).is_some_and(|&ms| still > Duration::from_millis(ms));
                 let Some(mut f) = last_frame.clone().filter(|_| due) else { continue };
                 // Encoders insist on time moving forward between frames.
                 f.capture_ts_us += still.as_micros() as u64;
                 refined += 1;
-                if refined == 3 {
-                    ctl.force_keyframe.store(true, Ordering::Relaxed);
-                }
                 f
             }
             Err(PlatformError::DeviceLost(why)) => {
@@ -267,6 +264,9 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
                 if tx.try_send(packet).is_err() {
                     tracing::debug!("network busy, dropped a frame");
                 }
+            }
+            Err(PlatformError::FrameSkipped) => {
+                tracing::debug!("encoder skipped a frame");
             }
             Err(e) => {
                 encode_failures += 1;

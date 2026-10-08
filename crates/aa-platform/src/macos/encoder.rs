@@ -323,6 +323,10 @@ impl VideoEncoder for VtEncoder {
                 },
                 data: Bytes::from(data),
             }),
+            // -1: the encoder dropped the frame itself. The next frame still
+            // follows on from the last one it did send, so no fresh picture
+            // is needed.
+            Some(Err(-1)) => Err(PlatformError::FrameSkipped),
             Some(Err(st)) => {
                 self.key_next = true;
                 Err(os_err(st, "encoded frame"))

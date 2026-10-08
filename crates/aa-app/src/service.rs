@@ -320,10 +320,8 @@ pub fn install_addons() -> anyhow::Result<()> {
     let mut pkgs = Vec::new();
     let mut problems = Vec::new();
     if !Path::new("/Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver").exists() {
-        match blackhole_url().and_then(|u| {
-            let p = dir.join("BlackHole2ch.pkg");
-            aa_platform::update::download(&u, &p).map(|()| p)
-        }) {
+        let p = dir.join("BlackHole2ch.pkg");
+        match aa_platform::update::download(&blackhole_url(), &p).map(|()| p) {
             Ok(p) => pkgs.push(p),
             Err(e) => problems.push(format!("BlackHole: {e}")),
         }
@@ -349,26 +347,24 @@ pub fn install_addons() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The newest `BlackHole` 2-channel installer on its GitHub page.
+/// The newest `BlackHole` 2-channel installer. Its GitHub page carries no
+/// installer (they are only on existential.audio), so we ask Homebrew's
+/// public catalogue, which tracks the current download link, and fall back
+/// to the last version we know.
 #[cfg(target_os = "macos")]
-fn blackhole_url() -> anyhow::Result<String> {
-    let out = aa_platform::update::curl()
+fn blackhole_url() -> String {
+    const KNOWN: &str = "https://existential.audio/downloads/BlackHole2ch-0.7.1.pkg";
+    let from_brew = aa_platform::update::curl()
         .args(["-H", "User-Agent: Anywhere"])
-        .arg("https://api.github.com/repos/ExistentialAudio/BlackHole/releases/latest")
-        .output()?;
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-    v.get("assets")
-        .and_then(|a| a.as_array())
-        .and_then(|a| {
-            a.iter().find_map(|x| {
-                let name = x.get("name")?.as_str()?;
-                (name.starts_with("BlackHole2ch")
-                    && Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("pkg")))
-                .then(|| x.get("browser_download_url")?.as_str().map(str::to_owned))
-                .flatten()
-            })
-        })
-        .ok_or_else(|| anyhow::anyhow!("no installer found; get it from existential.audio/blackhole"))
+        .arg("https://formulae.brew.sh/api/cask/blackhole-2ch.json")
+        .output()
+        .ok()
+        .and_then(|out| serde_json::from_slice::<serde_json::Value>(&out.stdout).ok())
+        .and_then(|v| v.get("url")?.as_str().map(str::to_owned))
+        .filter(|u| {
+            u.starts_with("https://") && Path::new(u).extension().is_some_and(|e| e.eq_ignore_ascii_case("pkg"))
+        });
+    from_brew.unwrap_or_else(|| KNOWN.to_owned())
 }
 
 /// Install the Windows add-ons that are missing (controllers, microphone
