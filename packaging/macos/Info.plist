@@ -13,6 +13,8 @@
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Anywhere finds and connects to your other computers on your home network.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Anywhere sends your microphone to the computer you are viewing, when you turn that on.</string>
 </dict>
