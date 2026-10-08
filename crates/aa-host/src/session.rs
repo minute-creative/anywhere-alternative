@@ -40,6 +40,12 @@ const TAKEOVER_AFTER_SILENCE: Duration = Duration::from_millis(1500);
 pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<()> {
     let socket = Arc::new(crate::udp::bind(listen)?);
     tracing::info!("listening on {}", socket.local_addr()?);
+    // The addresses to type on the viewer if automatic discovery is blocked.
+    let port = socket.local_addr()?.port();
+    let addrs: Vec<String> = aa_platform::lan::ipv4_interfaces().iter().map(|i| format!("{}:{port}", i.ip)).collect();
+    if !addrs.is_empty() {
+        tracing::info!("viewers can connect to: {}", addrs.join("  or  "));
+    }
 
     let HostBackends {
         capture,

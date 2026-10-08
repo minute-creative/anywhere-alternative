@@ -174,17 +174,32 @@ pub async fn resolve(input: Option<&str>) -> anyhow::Result<SocketAddr> {
         }
     }
     tracing::info!("looking for hosts on the local network…");
-    let hosts = match find_hosts(DEFAULT_PORT).await {
-        Ok(h) if h.is_empty() && input.is_none() => {
-            // Nothing answered or announced. If a PC accepted us before,
-            // its address is still the best bet (most routers keep it).
-            if let Some(last) = remembered() {
-                tracing::info!(addr = %last, "nothing answered; trying the PC that worked last time");
-                return Ok(last);
-            }
-            h
+    // Keep looking for a while: which computer gets started first should
+    // not matter. Two minutes, then give up with advice.
+    let started = std::time::Instant::now();
+    let mut said = false;
+    let hosts = loop {
+        let found = find_hosts(DEFAULT_PORT).await?;
+        if !found.is_empty() || input.is_some() {
+            break found;
         }
-        other => other?,
+        // Nothing answered or announced. If a host accepted us before, its
+        // address is still the best bet (most routers keep it).
+        if let Some(last) = remembered() {
+            tracing::info!(addr = %last, "nothing answered; trying the host that worked last time");
+            return Ok(last);
+        }
+        if started.elapsed() > std::time::Duration::from_secs(120) {
+            break found;
+        }
+        if !said {
+            said = true;
+            tracing::info!(
+                "no host yet; still looking (start aa-host on the other computer; it prints the address to \
+                 type here if discovery is blocked)"
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     };
     let wanted = input.map(str::to_ascii_lowercase);
     let pick = match &wanted {
