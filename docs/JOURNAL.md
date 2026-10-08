@@ -257,6 +257,16 @@ Release CI lessons: Git Bash rewrites `/DName=value` arguments into paths
 (MSYS_NO_PATHCONV=1), and Inno Setup is already on GitHub's Windows
 machines. v0.2.0 published on GitHub Releases.
 
+## Day 5, late — light, polished app (2026-10-08, v0.3.0)
+
+Owner asked for a polished light-mode app holding every setting, fast.
+Redesigned with a sidebar (Connect / Share / Settings / Extras), Inter
+font (converted from the npm `inter-ui` woff2 with fonttools, OFL),
+white cards, switches. Viewer accepts start-up preferences by flag.
+Measured idle CPU under Xvfb/llvmpipe: an egui Spinner forced endless
+redraws (~160%); replaced by a 1 Hz blink (~7%). Found by running the
+viewer window under Xvfb: the overlay never cleared egui texture deltas.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.
