@@ -279,7 +279,7 @@ struct MicSink {
 impl MicSink {
     /// Names of the "speaker" side of known virtual microphone cables.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    /// On a Mac the free BlackHole driver plays the same role.
+    /// On a Mac the free `BlackHole` driver plays the same role.
     const CABLES: [&'static str; 4] = ["CABLE Input", "Steam Streaming Microphone", "VB-Audio Virtual", "BlackHole"];
 
     fn handle(&mut self, payload: Bytes) {
@@ -291,21 +291,19 @@ impl MicSink {
                 if let Ok(p) = aa_platform::audio::Player::on_device_named(&Self::CABLES) {
                     tracing::info!(device = p.device(), "viewer microphone → virtual mic");
                     self.player = Some(p);
+                } else if cfg!(target_os = "macos") {
+                    tracing::warn!(
+                        "the viewer is sending its microphone, but this Mac has no virtual microphone to play \
+                         it into. Install BlackHole 2ch (free: existential.audio/blackhole, or `brew install \
+                         blackhole-2ch`), restart aa-host, then choose \"BlackHole 2ch\" as the microphone \
+                         in the app (or System Settings → Sound → Input)"
+                    );
                 } else {
-                    if cfg!(target_os = "macos") {
-                        tracing::warn!(
-                            "the viewer is sending its microphone, but this Mac has no virtual microphone to play \
-                             it into. Install BlackHole 2ch (free: existential.audio/blackhole, or `brew install \
-                             blackhole-2ch`), restart aa-host, then choose \"BlackHole 2ch\" as the microphone \
-                             in the app (or System Settings → Sound → Input)"
-                        );
-                    } else {
-                        tracing::warn!(
-                            "the viewer is sending its microphone, but this PC has no virtual microphone to play \
-                             it into. Install VB-CABLE (free, vb-audio.com/Cable), restart aa-host, then choose \
-                             \"CABLE Output\" as the microphone in Discord, the game or Windows sound settings"
-                        );
-                    }
+                    tracing::warn!(
+                        "the viewer is sending its microphone, but this PC has no virtual microphone to play \
+                         it into. Install VB-CABLE (free, vb-audio.com/Cable), restart aa-host, then choose \
+                         \"CABLE Output\" as the microphone in Discord, the game or Windows sound settings"
+                    );
                 }
             }
         }

@@ -253,7 +253,13 @@ impl MfDecoder {
         unsafe {
             let buf = sample.GetBufferByIndex(0).map_err(|e| win(e, "GetBufferByIndex"))?;
             if let (Some(gpu), Ok(dx)) = (self.gpu.as_mut(), buf.cast::<IMFDXGIBuffer>()) {
-                let tex: ID3D11Texture2D = dx.GetResource().map_err(|e| win(e, "GetResource"))?;
+                let mut raw: *mut std::ffi::c_void = std::ptr::null_mut();
+                dx.GetResource(&ID3D11Texture2D::IID, &mut raw).map_err(|e| win(e, "GetResource"))?;
+                if raw.is_null() {
+                    return Err(PlatformError::Backend(anyhow::anyhow!("decoder gave no texture")));
+                }
+                // SAFETY: GetResource returned an owned reference to this interface.
+                let tex = ID3D11Texture2D::from_raw(raw);
                 let index = dx.GetSubresourceIndex().map_err(|e| win(e, "GetSubresourceIndex"))?;
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
                 tex.GetDesc(&mut desc);
