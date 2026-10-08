@@ -297,6 +297,17 @@ sign-in screen can be seen and typed into from afar (0.4.1). CI green on
 the first try (API signatures checked against the windows-rs source
 first, since Windows code can't be compiled here).
 
+## Day 5, night — feedback on 0.4.1 (v0.4.2)
+
+Owner tested PC watching Mac on Wi-Fi: two cursors (the Mac drew its
+cursor into the video; turned off), blur and glitches (asked for logs and
+the Mac's display resolution before guessing), cropped help text. Asked
+for add-ons by default and automatic updates; chose fully automatic.
+Windows updates go through the SYSTEM service (it fetches the release
+itself, so the app's request file can't make it run anything else); Mac
+replaces its own bundle. Writing GitHub secrets for a fixed Mac signing
+certificate was blocked in this session; left a script for the owner.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.

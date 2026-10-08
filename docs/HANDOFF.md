@@ -150,6 +150,24 @@ sessions. v0.2.0 is the first release. Unsigned: Mac needs "Open Anyway"
 once, Windows SmartScreen "Run anyway". App UI can be screenshotted here
 with Xvfb + `WGPU_BACKEND=gl` (`AA_SHOW_SELF=1`, `AA_HOST_MOCK=1`).
 
+## 0.4.2 (2026-10-08): owner feedback round
+
+Owner on 0.4.1 (PC watching Mac, both Wi-Fi): two cursors (fixed: SCK
+`showsCursor` false, viewer's own pointer only), blurry/glitchy (logs
+requested: PC `viewer.log`, Mac `host.log`, Mac display resolution; not
+fixed yet), cropped help text (fixed), wants add-ons installed by default
+(Windows installer tasks + `packaging/windows/addons.ps1` via winget /
+vb-audio.com; app "Install add-ons" on both, Mac: BlackHole from its
+GitHub release + Tailscale pkg) and **fully automatic updates**
+(`aa_platform::update` + `aa-app/src/update.rs`; Windows service installs
+silently via `update-request`/`update-running`/`relaunch-app` markers in
+the shared folder, else one UAC prompt with `/RELAUNCH=1`; Mac swaps the
+bundle and kickstarts the agent). Updates wait while `viewer-connected`
+(host) or `app-viewing` (app) notes are fresh (<2 min).
+Mac permissions reset on each ad-hoc-signed update until the owner adds
+`MAC_SIGN_P12`/`MAC_SIGN_PASSWORD` secrets (`packaging/macos/
+make-signing-cert.sh`); the session's classifier blocks writing secrets.
+
 ## Agreed next steps, in order
 
 1. Owner test of 0.4.0: pair PC↔Mac with the code, reconnect without it,
