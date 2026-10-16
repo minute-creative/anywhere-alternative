@@ -56,10 +56,12 @@ fn os_err(status: i32, what: &str) -> PlatformError {
 }
 
 /// Where the output callback leaves the encoded frame.
+/// Annex-B bytes, keyframe?, long-term reference token.
+type Encoded = (Vec<u8>, bool, Option<i64>);
+
 #[derive(Default)]
 struct Slot {
-    /// Annex-B bytes, keyframe?, long-term reference token.
-    out: Option<std::result::Result<(Vec<u8>, bool, Option<i64>), i32>>,
+    out: Option<std::result::Result<Encoded, i32>>,
 }
 
 /// The long-term reference token VideoToolbox attached to this frame, if

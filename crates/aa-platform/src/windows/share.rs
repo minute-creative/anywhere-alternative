@@ -211,7 +211,7 @@ fn subtract(a: RECT, b: RECT) -> Vec<RECT> {
 
 /// What to copy out of the screen picture for one share choice, in the
 /// screen's own pixel coordinates (0,0 = its top-left).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Region {
     /// For one window: the part of the screen the picture is cut to.
     pub crop: Option<RECT>,

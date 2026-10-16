@@ -241,11 +241,11 @@ fn backing_scale(display: &SCDisplay) -> f64 {
     (w as f64 / points).clamp(1.0, 4.0)
 }
 
+/// A content filter and the size of what it shows in pixels (`None`: the screen's).
+type Filter = (Retained<SCContentFilter>, Option<(usize, usize)>);
+
 /// The filter for `target` and its size in pixels (`None`: the screen's).
-fn filter_for(
-    target: &ShareTarget,
-    display: &SCDisplay,
-) -> Result<(Retained<SCContentFilter>, Option<(usize, usize)>)> {
+fn filter_for(target: &ShareTarget, display: &SCDisplay) -> Result<Filter> {
     // SAFETY: standard ScreenCaptureKit object setup on live objects.
     unsafe {
         match target {
