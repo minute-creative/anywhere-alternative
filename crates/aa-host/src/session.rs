@@ -752,7 +752,7 @@ impl RecentPackets {
                 out.extend(
                     slices
                         .iter()
-                        .filter(|d| Packet::parse(Bytes::clone(d)).ok().is_some_and(|p| p.header.kind == Kind::Video))
+                        .filter(|d| Packet::parse(Bytes::clone(d)).is_ok_and(|p| p.header.kind == Kind::Video))
                         .cloned(),
                 );
                 continue;
