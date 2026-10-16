@@ -424,6 +424,35 @@ Done:
 - Diagnosis commands for the owner: `sudo lsof -nP -iUDP:7700` (Mac),
   `Get-Process -Id (Get-NetUDPEndpoint -LocalPort 7700).OwningProcess`
   (PC) — shows which program holds the sharing port and when it started.
+- Cause confirmed: `lsof` showed `aa-host` PID 589 (boot-time) still on
+  :7700 after the drag-install; `launchctl kickstart -k` replaced it.
+
+## Day 14, later — blur at 5 ms RTT, 18% loss, 0.1 Mbps (v0.4.8)
+
+Owner's overlay, PC watching the Mac mini, both on Wi-Fi, no cable
+possible, AirDrop must stay on: `8 fps 0.1 Mbps 5 ms 18.2% loss`, plus
+red smears (a graphics decoder painting frames whose references were
+lost). Flat delay + heavy loss = the radio dropping packets, not a full
+link; the controller was trimming ×0.85 every other second for it
+(5–25% loss at flat RTT counted as "lossy") and walked the stream to the
+floor, where the picture is blur by definition.
+
+Three fixes, all verified with a new `AA_SIMULATE_LOSS=18` viewer switch
+against the mock host (before: 10–18 fps, ~10 frames dropped per second):
+- **Radio loss never trims the bitrate** below the 25% "severe" line; above
+  it, one ×0.85 then a 5-report hold. Light radio loss (<5%) still grows.
+- **Adaptive FEC**: parity ratio = 1.5 × smoothed loss, 10–50%, set by the
+  controller and carried to the sender through `PipelineControl`.
+- **Selective resend** (`Kind::Resend`): the host keeps the last 64
+  frames' datagrams (≤12 MB); the viewer asks for exactly the missing
+  slices/parity as soon as a frame's packets stop arriving (a newer frame
+  started, or 2 ms quiet) and again after one RTT, up to 3 times. The
+  reassembler now delivers in order and holds a complete frame for up to
+  2.5 × RTT (8–40 ms) while an older one is being resent — a P-frame is
+  useless without its predecessor anyway. Keyframes never wait. Frames
+  seen only through parity ask for "all data" (`0x7FFF`). Result: 59 fps,
+  0 dropped at 18% loss on the mock link; at 1080p the same 27 fps the
+  clean container link manages. Stats line gains `resent=`.
 
 ## Things we deliberately did not do (yet)
 

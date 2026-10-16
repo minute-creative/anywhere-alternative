@@ -142,11 +142,17 @@ fn reassembler_never_delivers_a_wrong_frame() {
         let keep = r.below(3) as usize;
         let cut = in_flight.len().saturating_sub(keep);
         for d in in_flight.drain(..cut) {
-            if let Reassembly::Complete(f) = ra.push(Packet::parse(d).unwrap()) {
+            if let Reassembly::Complete(f) = ra.push(Packet::parse(d).unwrap(), u64::from(frame_id) * 16) {
                 assert_eq!(f.data, originals[&f.frame_id], "frame {} corrupted", f.frame_id);
                 delivered += 1;
             }
         }
+        // Time moves on; frames held behind a gap come out in order.
+        for f in ra.poll(u64::from(frame_id) * 16 + 15) {
+            assert_eq!(f.data, originals[&f.frame_id], "frame {} corrupted", f.frame_id);
+            delivered += 1;
+        }
+        let _ = ra.resend_requests(u64::from(frame_id) * 16 + 15);
         let _ = ra.take_abandoned();
         originals.retain(|&id, _| id + 50 > frame_id);
     }
@@ -171,7 +177,7 @@ fn reassembler_survives_hostile_headers() {
         let mut b = header(kind, frame_id, ix, n);
         let plen = r.below(MAX_PAYLOAD as u64 + 1) as usize;
         b.extend_from_slice(&r.bytes(plen));
-        let _ = ra.push(Packet::parse(b.freeze()).unwrap());
+        let _ = ra.push(Packet::parse(b.freeze()).unwrap(), 0);
         let _ = ra.take_abandoned();
     }
 }
@@ -257,7 +263,7 @@ fn slicing_handles_empty_tiny_and_huge_frames() {
         let mut got = None;
         for p in pkts {
             assert!(p.len() <= wire::MAX_DATAGRAM + 2, "datagram of {} bytes", p.len());
-            if let Reassembly::Complete(f) = ra.push(Packet::parse(p).unwrap()) {
+            if let Reassembly::Complete(f) = ra.push(Packet::parse(p).unwrap(), 0) {
                 got = Some(f.data);
             }
         }

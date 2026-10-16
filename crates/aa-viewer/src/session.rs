@@ -178,6 +178,11 @@ pub async fn run(
 
     // --- main loop ---------------------------------------------------------
     let mut reassembler = Reassembler::default();
+    let session_t0 = Instant::now();
+    // A short tick while a frame waits for a resend: nothing else wakes
+    // the loop at the right moment to notice the grace has run out.
+    let mut resend_tick = tokio::time::interval(Duration::from_millis(2));
+    resend_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut stats = StreamStats::default();
     let mut frame_first_slice: Option<(u32, Instant)> = None;
     let mut keepalive = tokio::time::interval(KEEPALIVE);
@@ -202,6 +207,12 @@ pub async fn run(
         tracing::info!("sending this machine's microphone to the host");
     }
 
+    // AA_SIMULATE_LOSS=18: test switch that throws away 18% of incoming
+    // datagrams at random, like a radio dropping packets at flat delay.
+    let simulate_loss: f64 =
+        std::env::var("AA_SIMULATE_LOSS").ok().and_then(|v| v.parse::<f64>().ok()).map_or(0.0, |p| p / 100.0);
+    let mut noise: u32 = 0x9E37_79B9;
+
     loop {
         tokio::select! {
             recv = socket.recv(&mut buf) => {
@@ -212,6 +223,13 @@ pub async fn run(
                     Ok(p) => p,
                     Err(e) => { tracing::debug!("bad datagram: {e}"); continue; }
                 };
+                if simulate_loss > 0.0 && matches!(packet.header.kind, Kind::Video | Kind::VideoFec | Kind::Audio) {
+                    // xorshift: cheap, deterministic, good enough for a test.
+                    noise ^= noise << 13; noise ^= noise >> 17; noise ^= noise << 5;
+                    if f64::from(noise % 10_000) / 10_000.0 < simulate_loss {
+                        continue;
+                    }
+                }
                 stats.loss.observe(packet.header.seq);
 
                 match packet.header.kind {
@@ -220,24 +238,28 @@ pub async fn run(
                         if !frame_first_slice.is_some_and(|(id, _)| id == fid) {
                             frame_first_slice = Some((fid, Instant::now()));
                         }
-                        match reassembler.push(packet) {
-                            Reassembly::Complete(frame) => {
-                                if let Some((id, t0)) = frame_first_slice.take().filter(|(id, _)| *id == frame.frame_id) {
-                                    let _ = id;
-                                    stats.frame_assembly_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
-                                }
-                                frames_this_second += 1;
-                                pacing.frame();
-                                let fid = frame.frame_id;
-                                if frame_tx.try_send(frame).is_err() {
-                                    // Decoder is behind; whatever it misses breaks the
-                                    // reference chain, so a keyframe is needed.
-                                    stats.frames_dropped += 1;
-                                    need_keyframe.store(true, Ordering::Relaxed);
-                                    let _ = fid;
-                                }
+                        let now_ms = session_t0.elapsed().as_millis() as u64;
+                        let mut ready = Vec::new();
+                        if let Reassembly::Complete(frame) = reassembler.push(packet, now_ms) {
+                            ready.push(frame);
+                        }
+                        ready.extend(reassembler.poll(now_ms));
+                        for frame in ready {
+                            if let Some((id, t0)) = frame_first_slice.take().filter(|(id, _)| *id == frame.frame_id) {
+                                let _ = id;
+                                stats.frame_assembly_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
                             }
-                            Reassembly::Pending | Reassembly::Stale => {}
+                            frames_this_second += 1;
+                            pacing.frame();
+                            if frame_tx.try_send(frame).is_err() {
+                                // Decoder is behind; whatever it misses breaks the
+                                // reference chain, so a keyframe is needed.
+                                stats.frames_dropped += 1;
+                                need_keyframe.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        for rq in reassembler.resend_requests(now_ms) {
+                            send_resend(&socket, &rq, &seq).await?;
                         }
                         for lost in reassembler.take_abandoned() {
                             stats.frames_dropped += 1;
@@ -271,6 +293,9 @@ pub async fn run(
                             let sent = u64::from_be_bytes(packet.payload[..8].try_into().expect("8 bytes"));
                             let now = monotonic_us();
                             stats.rtt_ms.push((now.saturating_sub(sent)) as f64 / 1000.0);
+                            if let Some(rtt) = stats.rtt_ms.get() {
+                                reassembler.set_rtt_ms(rtt);
+                            }
                         }
                     }
                     Kind::Control => match ControlMessage::decode(&packet.payload) {
@@ -370,6 +395,33 @@ pub async fn run(
                 }
             }
 
+            _ = resend_tick.tick() => {
+                let now_ms = session_t0.elapsed().as_millis() as u64;
+                for frame in reassembler.poll(now_ms) {
+                    frames_this_second += 1;
+                    pacing.frame();
+                    if frame_tx.try_send(frame).is_err() {
+                        stats.frames_dropped += 1;
+                        need_keyframe.store(true, Ordering::Relaxed);
+                    }
+                }
+                for rq in reassembler.resend_requests(now_ms) {
+                    send_resend(&socket, &rq, &seq).await?;
+                }
+                let mut abandoned = false;
+                for _ in reassembler.take_abandoned() {
+                    stats.frames_dropped += 1;
+                    abandoned = true;
+                }
+                if abandoned {
+                    need_keyframe.store(true, Ordering::Relaxed);
+                }
+                if need_keyframe.load(Ordering::Relaxed) && !last_nack.is_some_and(|t| t.elapsed() <= NACK_INTERVAL) {
+                    send_nack(&socket, 0, &seq).await?;
+                    last_nack = Some(Instant::now());
+                }
+            }
+
             _ = keepalive.tick() => {
                 if last_from_host.elapsed() > HOST_SILENT {
                     tracing::warn!("nothing from the host for {HOST_SILENT:?}");
@@ -399,6 +451,7 @@ pub async fn run(
                     loss = format_args!("{:.2}%", loss_1s * 100.0),
                     dropped = stats.frames_dropped,
                     fec_fixed = reassembler.recovered,
+                    resent = reassembler.resent,
                     gap_ms = format_args!("{:.1}/{:.1}/{:.1}", pace.p50_ms, pace.p99_ms, pace.max_ms),
                     stutters = format_args!("{}/{}", pace.stutters, pacing.total_stutters),
                     audio = format_args!("{}f/{}c buf={}ms under={}", audio.frames(), audio.concealed(), audio.buffer_ms(), audio.underruns()),
@@ -527,6 +580,16 @@ async fn send_report(socket: &Link, rep: &ReceiverReport, seq: &SeqCounter) -> a
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN + ReceiverReport::ENCODED_LEN);
     Header { kind: Kind::Ack, flags: 0, seq: seq.take(), frame_id: 0, slice_index: 0, slice_count: 1 }.write(&mut out);
     rep.encode(&mut out);
+    socket.send(&out).await?;
+    Ok(())
+}
+
+async fn send_resend(socket: &Link, rq: &wire::ResendRequest, seq: &SeqCounter) -> anyhow::Result<()> {
+    let payload = rq.encode();
+    let mut out = BytesMut::with_capacity(wire::HEADER_LEN + payload.len());
+    Header { kind: Kind::Resend, flags: 0, seq: seq.take(), frame_id: rq.frame_id, slice_index: 0, slice_count: 1 }
+        .write(&mut out);
+    out.extend_from_slice(&payload);
     socket.send(&out).await?;
     Ok(())
 }

@@ -116,6 +116,9 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     // never run inside the receive loop or incoming packets starve (which
     // is exactly how the first Wi-Fi session froze).
     let video_dest: Arc<std::sync::Mutex<Option<SocketAddr>>> = Arc::new(std::sync::Mutex::new(None));
+    // The last second or so of video packets, so a viewer can ask for the
+    // ones its radio dropped (see `Kind::Resend`).
+    let recent: Arc<std::sync::Mutex<RecentPackets>> = Arc::default();
 
     let cap_ctl = Arc::clone(&ctl);
     let initial_codec = capabilities.codecs.first().copied().unwrap_or(aa_core::video::Codec::H264);
@@ -150,7 +153,17 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     {
         let socket = Arc::clone(&socket);
         let video_dest = Arc::clone(&video_dest);
-        tokio::spawn(sender_task(socket, frame_rx, audio_rx, video_dest, pacer, fps, Arc::clone(&seq)));
+        tokio::spawn(sender_task(
+            socket,
+            frame_rx,
+            audio_rx,
+            video_dest,
+            pacer,
+            fps,
+            Arc::clone(&seq),
+            Arc::clone(&recent),
+            Arc::clone(&ctl),
+        ));
     }
     let mut buf = vec![0u8; wire::MAX_DATAGRAM * 2];
     let mut housekeeping = tokio::time::interval(Duration::from_secs(1));
@@ -212,7 +225,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                     }
                     continue;
                 }
-                if let Err(e) = handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &seq, &mut bitrate, &video_dest, &mut speaker).await {
+                if let Err(e) = handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &seq, &mut bitrate, &video_dest, &mut speaker, &recent).await {
                     tracing::warn!("network send error (continuing): {e:#}");
                 }
             }
@@ -429,6 +442,7 @@ async fn handle_packet(
     bitrate: &mut BitrateController,
     video_dest: &std::sync::Mutex<Option<SocketAddr>>,
     speaker: &mut Option<Box<dyn aa_platform::audio::SpeakerControl>>,
+    recent: &std::sync::Mutex<RecentPackets>,
 ) -> anyhow::Result<()> {
     let is_current_viewer = viewer.as_ref().is_some_and(|v| v.addr == from);
 
@@ -588,10 +602,36 @@ async fn handle_packet(
             ctl.intra_refresh.store(true, Ordering::Relaxed);
         }
 
+        Kind::Resend if is_current_viewer => {
+            if let Some(rq) = wire::ResendRequest::decode(&packet.payload) {
+                // Copy the datagrams out under the lock, send outside it.
+                let again: Vec<Bytes> = recent.lock().expect("recent").lookup(&rq);
+                for d in &again {
+                    socket.send_to(d, from).await?;
+                }
+                if !again.is_empty() {
+                    tracing::debug!(frame = rq.frame_id, n = again.len(), "resent");
+                }
+            }
+        }
+
         Kind::Ack if is_current_viewer => {
             let mut payload = packet.payload.clone();
             if let Some(rep) = ReceiverReport::decode(&mut payload) {
-                if let Some(kbps) = bitrate.on_report(&rep) {
+                let changed = bitrate.on_report(&rep);
+                let fec_before = ctl.fec_permille.load(Ordering::Relaxed);
+                let fec_now = (bitrate.fec_ratio() * 1000.0) as u32;
+                if fec_now != fec_before {
+                    ctl.fec_permille.store(fec_now, Ordering::Relaxed);
+                    if fec_now.abs_diff(fec_before) >= 50 {
+                        tracing::info!(
+                            parity = format_args!("{}%", fec_now / 10),
+                            loss = format_args!("{:.1}%", rep.loss_ratio() * 100.0),
+                            "video redundancy adjusted"
+                        );
+                    }
+                }
+                if let Some(kbps) = changed {
                     ctl.target_kbps.store(kbps, Ordering::Relaxed);
                     tracing::info!(
                         kbps,
@@ -618,6 +658,7 @@ async fn handle_packet(
 
 /// Pulls encoded frames and sends them to the current viewer, paced across
 /// the frame interval. Runs independently of the receive loop.
+#[allow(clippy::too_many_arguments)] // one task, one set of channels
 async fn sender_task(
     socket: Arc<Net>,
     mut frame_rx: mpsc::Receiver<EncodedFrame>,
@@ -626,6 +667,8 @@ async fn sender_task(
     pacer: Pacer,
     fps: u16,
     seq: Arc<SeqCounter>,
+    recent: Arc<std::sync::Mutex<RecentPackets>>,
+    ctl: Arc<PipelineControl>,
 ) {
     let mut audio_open = true;
     loop {
@@ -650,27 +693,83 @@ async fn sender_task(
             }
         };
         let Some(dest) = *video_dest.lock().expect("dest") else { continue };
-        let slices = match wire::slice_frame_with_fec(&frame.data, frame.meta.frame_id, frame.meta.is_keyframe, &seq) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("frame too large to slice: {e}");
-                continue;
-            }
-        };
+        let fec = f64::from(ctl.fec_permille.load(Ordering::Relaxed)) / 1000.0;
+        let slices =
+            match wire::slice_frame_with_fec_at(&frame.data, frame.meta.frame_id, frame.meta.is_keyframe, &seq, fec) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("frame too large to slice: {e}");
+                    continue;
+                }
+            };
         // Burst send. Pacing a frame across the interval was tried and made
         // Wi-Fi worse: consecutive frames overlapped on the air and collided.
         // The real fix for bursts is a lower bitrate (the controller), and
         // the real fix for the earlier freeze was moving sends off the
         // receive loop, which this task is.
         let _ = (&pacer, fps);
-        for s in slices {
-            if let Err(e) = socket.send_to(&s, dest).await {
+        for s in &slices {
+            if let Err(e) = socket.send_to(s, dest).await {
                 tracing::warn!("send failed: {e}");
                 break;
             }
         }
+        recent.lock().expect("recent").remember(frame.meta.frame_id, slices);
     }
     tracing::info!("sender task exiting");
+}
+
+/// Video datagrams of the most recent frames, kept for resend requests.
+/// Bounded by count and bytes; at 60 fps the count bound is about a second.
+#[derive(Debug, Default)]
+pub struct RecentPackets {
+    frames: std::collections::VecDeque<(u32, Vec<Bytes>)>,
+    bytes: usize,
+}
+
+impl RecentPackets {
+    const MAX_FRAMES: usize = 64;
+    /// 12 MB: a second of a 4K keyframe-heavy stream, roughly.
+    const MAX_BYTES: usize = 12 * 1024 * 1024;
+
+    fn remember(&mut self, frame_id: u32, slices: Vec<Bytes>) {
+        self.bytes += slices.iter().map(Bytes::len).sum::<usize>();
+        self.frames.push_back((frame_id, slices));
+        while self.frames.len() > Self::MAX_FRAMES || self.bytes > Self::MAX_BYTES {
+            if let Some((_, old)) = self.frames.pop_front() {
+                self.bytes -= old.iter().map(Bytes::len).sum::<usize>();
+            }
+        }
+    }
+
+    /// The datagrams a request names, as they were sent (same headers, so
+    /// the viewer's reassembler takes them like any other packet).
+    fn lookup(&self, rq: &wire::ResendRequest) -> Vec<Bytes> {
+        let Some((_, slices)) = self.frames.iter().find(|(id, _)| *id == rq.frame_id) else { return Vec::new() };
+        let mut out = Vec::with_capacity(rq.items.len());
+        for &item in rq.items.iter().take(wire::ResendRequest::MAX_ITEMS) {
+            if item == wire::ResendRequest::ALL_DATA {
+                out.extend(
+                    slices
+                        .iter()
+                        .filter(|d| Packet::parse(Bytes::clone(d)).ok().is_some_and(|p| p.header.kind == Kind::Video))
+                        .cloned(),
+                );
+                continue;
+            }
+            let want_parity = item & wire::ResendRequest::PARITY_BIT != 0;
+            let index = item & !wire::ResendRequest::PARITY_BIT;
+            let hit = slices.iter().find(|d| {
+                Packet::parse(Bytes::clone(d))
+                    .ok()
+                    .is_some_and(|p| (p.header.kind == Kind::VideoFec) == want_parity && p.header.slice_index == index)
+            });
+            if let Some(d) = hit {
+                out.push(d.clone());
+            }
+        }
+        out
+    }
 }
 
 async fn send_control(socket: &Net, to: SocketAddr, msg: &ControlMessage, seq: &SeqCounter) -> anyhow::Result<()> {

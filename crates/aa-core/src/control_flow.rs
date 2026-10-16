@@ -86,6 +86,8 @@ pub struct BitrateController {
     /// right after a cut is mostly the queue we already filled draining;
     /// cutting for it again stacked halvings (40 -> 2.5 Mbps in 12 s).
     hold: u8,
+    /// Smoothed loss ratio from recent reports; sizes the FEC.
+    loss_avg: f64,
 }
 
 impl BitrateController {
@@ -112,6 +114,8 @@ impl BitrateController {
     const CEILING_FORGET_AFTER: u32 = 30;
     /// Reports after a cut in which only severe loss cuts again.
     const HOLD_REPORTS: u8 = 1;
+    /// After a trim for severe radio loss, reports to wait before another.
+    const RADIO_HOLD_REPORTS: u8 = 5;
     /// Growth per clean second while probing (see `probing`).
     const PROBE_GROW: f64 = 0.5;
     /// Queueing delay that marks congestion: RTT this far above the base,
@@ -140,7 +144,16 @@ impl BitrateController {
             base_rtt: None,
             ceiling: None,
             hold: 0,
+            loss_avg: 0.0,
         }
+    }
+
+    /// How much parity each frame should carry now, as a fraction of its
+    /// data packets. Interleaved XOR parity rebuilds one missing packet per
+    /// stripe, so to survive a loss rate `p` with margin we send about
+    /// 1.5 p (never below the 10% floor, never above 50%).
+    pub fn fec_ratio(&self) -> f64 {
+        (self.loss_avg * 1.5).clamp(crate::wire::FEC_RATIO, crate::wire::FEC_RATIO_MAX)
     }
 
     pub fn current_kbps(&self) -> u32 {
@@ -156,6 +169,10 @@ impl BitrateController {
     /// Feed one report. Returns the new target if it changed.
     pub fn on_report(&mut self, report: &ReceiverReport) -> Option<u32> {
         let loss = report.loss_ratio();
+        // Fast up, slow down: parity should grow the second loss appears and
+        // linger a while after it stops.
+        self.loss_avg =
+            if loss > self.loss_avg { 0.5 * self.loss_avg + 0.5 * loss } else { 0.8 * self.loss_avg + 0.2 * loss };
         let before = self.current_kbps;
         let congested = self.queue_building(report.rtt_tenths_ms);
         // Light loss only counts when delay says a queue is filling; with
@@ -176,10 +193,39 @@ impl BitrateController {
         let bloated = self
             .base_rtt
             .is_some_and(|b| report.rtt_tenths_ms.saturating_sub(b) > Self::BLOATED_TENTHS.max(b.saturating_mul(4)));
-        let lossy = lossy || bloated || (loss >= Self::HEAVY_LOSS && !heavy);
+        // Loss with flat delay is the radio dropping packets, not a full
+        // link: a Mac mini on Wi-Fi showed 18% loss at 5 ms RTT while
+        // sending 0.1 Mbps (0.4.7). Sending less does not make a radio drop
+        // fewer packets; parity does (see `fec_ratio`). So radio loss never
+        // trims the bitrate below the 25% "severe" line, and even then only
+        // gently and rarely, and it merely pauses growth while it lasts.
+        let radio = loss >= Self::LIGHT_LOSS && !congested && !bloated;
+        let lossy = lossy || bloated;
         let held = self.hold > 0 && loss < Self::SEVERE_LOSS;
+        // For radio loss the hold applies whatever the loss: the trim does
+        // not change what the radio drops, so repeating it only blurs.
+        let radio_held = self.hold > 0;
         self.hold = self.hold.saturating_sub(1);
-        let next = if self.probing && !lossy && !heavy {
+        let next = if radio && !heavy {
+            if loss >= Self::HEAVY_LOSS {
+                self.probing = false;
+                self.clean_streak = 0;
+                self.current_kbps
+            } else {
+                // Light radio loss: carry on as if clean (parity covers it).
+                self.clean_streak += 1;
+                let step = (f64::from(self.current_kbps) * Self::GROW).max(250.0);
+                (f64::from(self.current_kbps) + step) as u32
+            }
+        } else if radio && heavy && radio_held {
+            self.current_kbps
+        } else if radio && heavy {
+            // Severe loss at flat delay: one gentle trim, then wait a while.
+            self.probing = false;
+            self.clean_streak = 0;
+            self.hold = Self::RADIO_HOLD_REPORTS;
+            (f64::from(self.current_kbps) * Self::LIGHT_CUT) as u32
+        } else if self.probing && !lossy && !heavy {
             // Probing: climb fast from the very first clean report.
             (f64::from(self.current_kbps) * (1.0 + Self::PROBE_GROW)) as u32
         } else if (heavy || lossy) && held {
@@ -253,10 +299,42 @@ mod tests {
     }
 
     #[test]
-    fn heavy_loss_at_flat_rtt_trims_and_severe_loss_halves() {
+    fn radio_loss_holds_the_bitrate_and_raises_parity() {
+        // 18% loss at a flat 5 ms RTT (Mac mini on Wi-Fi, 0.4.7): not a
+        // full link. Hold, don't cut; send more parity instead.
         let mut c = settled(20_000, 2_000, 60_000);
-        assert_eq!(c.on_report(&noisy(8.0, 0)), Some(17_000));
-        assert_eq!(c.on_report(&noisy(30.0, 0)), Some(8_500));
+        for _ in 0..10 {
+            assert_eq!(c.on_report(&noisy(18.0, 0)), None);
+        }
+        assert_eq!(c.current_kbps(), 20_000);
+        assert!(c.fec_ratio() > 0.25, "parity should scale with loss, got {}", c.fec_ratio());
+        // Light radio loss keeps growing.
+        let mut c = settled(20_000, 2_000, 60_000);
+        assert!(c.on_report(&noisy(2.0, 0)).is_some_and(|k| k > 20_000));
+    }
+
+    #[test]
+    fn severe_radio_loss_trims_once_then_waits() {
+        let mut c = settled(20_000, 2_000, 60_000);
+        assert_eq!(c.on_report(&noisy(30.0, 0)), Some(17_000));
+        for _ in 0..BitrateController::RADIO_HOLD_REPORTS {
+            assert_eq!(c.on_report(&noisy(30.0, 0)), None);
+        }
+        assert_eq!(c.on_report(&noisy(30.0, 0)), Some(14_450));
+    }
+
+    #[test]
+    fn fec_ratio_is_clamped_and_decays() {
+        let mut c = settled(20_000, 2_000, 60_000);
+        assert!((c.fec_ratio() - 0.10).abs() < 1e-9);
+        for _ in 0..5 {
+            c.on_report(&noisy(60.0, 0));
+        }
+        assert!((c.fec_ratio() - 0.50).abs() < 1e-9);
+        for _ in 0..40 {
+            c.on_report(&noisy(0.0, 0));
+        }
+        assert!((c.fec_ratio() - 0.10).abs() < 1e-9);
     }
 
     /// A Wi-Fi link that carries `cap` kbps: above it the queue fills (RTT

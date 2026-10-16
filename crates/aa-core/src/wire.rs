@@ -64,6 +64,12 @@ pub enum Kind {
     Mic = 12,
     /// `DualSense` raw pass-through, both directions; see `ds5`.
     Pad = 13,
+    /// Viewer → host: "send these packets of frame `frame_id` again"; see
+    /// [`ResendRequest`]. The host keeps the last second of video packets
+    /// for exactly this. On a 5 ms link a resend lands long before the
+    /// frame would otherwise be given up on, so a lost packet costs a few
+    /// milliseconds instead of a keyframe.
+    Resend = 14,
 }
 
 impl Kind {
@@ -82,6 +88,7 @@ impl Kind {
             11 => Self::ClipboardAck,
             12 => Self::Mic,
             13 => Self::Pad,
+            14 => Self::Resend,
             _ => return None,
         })
     }
@@ -221,10 +228,20 @@ pub fn slice_frame(frame: &Bytes, frame_id: u32, keyframe: bool, seq: &SeqCounte
 /// and the cost (8 Mbps at an 80 Mbps stream) is far cheaper than a frozen
 /// frame plus a recovery keyframe.
 pub const FEC_RATIO: f64 = 0.10;
+/// The most redundancy we will add: one parity packet per two data
+/// packets. Past this the parity costs more airtime than it saves.
+pub const FEC_RATIO_MAX: f64 = 0.50;
 
-/// How many parity packets a frame of `data_slices` gets: 10%, at least 1.
+/// How many parity packets a frame of `data_slices` gets at the default
+/// ratio: 10%, at least 1.
 pub fn parity_count(data_slices: usize) -> usize {
-    ((data_slices as f64 * FEC_RATIO).ceil() as usize).clamp(1, data_slices.max(1))
+    parity_count_at(data_slices, FEC_RATIO)
+}
+
+/// Parity packets for `data_slices` at `ratio` (clamped to 0.10..=0.50).
+pub fn parity_count_at(data_slices: usize, ratio: f64) -> usize {
+    let ratio = ratio.clamp(FEC_RATIO, FEC_RATIO_MAX);
+    ((data_slices as f64 * ratio).ceil() as usize).clamp(1, data_slices.max(1))
 }
 
 /// XOR parity for one stripe: data slices `k, k+G, k+2G, ...`.
@@ -258,9 +275,22 @@ pub fn slice_frame_with_fec(
     keyframe: bool,
     seq: &SeqCounter,
 ) -> Result<Vec<Bytes>, WireError> {
+    slice_frame_with_fec_at(frame, frame_id, keyframe, seq, FEC_RATIO)
+}
+
+/// Like [`slice_frame_with_fec`] with the parity ratio chosen by the
+/// bitrate controller from the loss the viewer reports: a radio dropping
+/// one packet in five needs far more parity than a clean cable.
+pub fn slice_frame_with_fec_at(
+    frame: &Bytes,
+    frame_id: u32,
+    keyframe: bool,
+    seq: &SeqCounter,
+    ratio: f64,
+) -> Result<Vec<Bytes>, WireError> {
     let mut out = slice_frame(frame, frame_id, keyframe, seq)?;
     let data: Vec<&[u8]> = out.iter().map(|d| &d[HEADER_LEN..]).collect();
-    let stripes = parity_count(data.len());
+    let stripes = parity_count_at(data.len(), ratio);
     let flags = if keyframe { flags::KEYFRAME } else { 0 };
     let mut parity = Vec::with_capacity(stripes);
     for k in 0..stripes {
@@ -288,6 +318,43 @@ pub fn slice_frame_with_fec(
 /// frame after the wrap look ancient and be thrown away.
 pub fn is_newer(a: u32, b: u32) -> bool {
     a != b && a.wrapping_sub(b) < u32::MAX / 2
+}
+
+/// Which packets of one frame the viewer still needs. Data slices are
+/// listed by index; parity packets with the high bit set (`0x8000 | k`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResendRequest {
+    pub frame_id: u32,
+    pub items: Vec<u16>,
+}
+
+impl ResendRequest {
+    pub const PARITY_BIT: u16 = 0x8000;
+    /// "Every data slice": used when only parity arrived, so the viewer
+    /// does not even know how many slices the frame has.
+    pub const ALL_DATA: u16 = 0x7FFF;
+    /// At most this many items per request (one datagram).
+    pub const MAX_ITEMS: usize = 500;
+
+    /// Payload only; the header carries kind and `frame_id` too, but the
+    /// id is repeated so the payload stands alone.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + self.items.len() * 2);
+        out.extend_from_slice(&self.frame_id.to_be_bytes());
+        for i in self.items.iter().take(Self::MAX_ITEMS) {
+            out.extend_from_slice(&i.to_be_bytes());
+        }
+        out
+    }
+
+    pub fn decode(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 4 || (payload.len() - 4) % 2 != 0 {
+            return None;
+        }
+        let frame_id = u32::from_be_bytes(payload[..4].try_into().ok()?);
+        let items = payload[4..].chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        Some(Self { frame_id, items })
+    }
 }
 
 /// A frame that has been fully received.
@@ -319,9 +386,20 @@ struct PartialFrame {
     slices: Vec<Option<Bytes>>,
     /// FEC parity by stripe; empty until the first parity packet.
     parity: Vec<Option<Bytes>>,
+    /// When the last packet of this frame arrived (ms, caller's clock).
+    last_packet_ms: u64,
+    /// When a resend was last asked for, if ever.
+    requested_ms: Option<u64>,
+    /// How many times a resend was asked for.
+    requests: u8,
 }
 
 impl PartialFrame {
+    /// Data slices still missing (after FEC).
+    fn missing_slices(&self) -> Vec<u16> {
+        self.slices.iter().enumerate().filter(|(_, s)| s.is_none()).map(|(i, _)| i as u16).collect()
+    }
+
     /// Rebuild every stripe that is missing exactly one data slice and has
     /// its parity. Returns how many slices were recovered.
     fn recover(&mut self) -> u16 {
@@ -367,33 +445,87 @@ impl PartialFrame {
 /// is abandoned (and the caller should NACK so the host intra-refreshes).
 /// We never hold a complete frame back to wait for an older incomplete one;
 /// a 16 ms stall is worse than a brief artifact.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Reassembler {
     partial: BTreeMap<u32, PartialFrame>,
+    /// Complete frames waiting behind an older frame that is still being
+    /// resent. A P-frame cannot be decoded without the one before it, so
+    /// handing it over early would only break the picture.
+    held: BTreeMap<u32, CompleteFrame>,
     /// Highest frame id delivered or abandoned; anything ≤ this is stale.
     last_delivered: Option<u32>,
     /// Frames abandoned since the last call to [`Self::take_abandoned`].
     abandoned: Vec<u32>,
     /// Slices rebuilt from FEC parity since the stream started.
     pub recovered: u64,
+    /// Packets that arrived again after a resend request.
+    pub resent: u64,
+    /// How long an incomplete frame may wait for resends before it is given
+    /// up on, in ms. Set from the measured RTT by [`Self::set_rtt_ms`].
+    grace_ms: u64,
+    /// Current RTT estimate in ms (for spacing repeat requests).
+    rtt_ms: u64,
+}
+
+impl Default for Reassembler {
+    fn default() -> Self {
+        Self {
+            partial: BTreeMap::new(),
+            held: BTreeMap::new(),
+            last_delivered: None,
+            abandoned: Vec::new(),
+            recovered: 0,
+            resent: 0,
+            grace_ms: Self::GRACE_MIN_MS,
+            rtt_ms: 5,
+        }
+    }
 }
 
 impl Reassembler {
     /// How many incomplete frames we keep around before giving up on the oldest.
-    const MAX_PARTIAL: usize = 4;
+    const MAX_PARTIAL: usize = 8;
+    /// Grace for resends: 2.5 × RTT, within these bounds. The floor covers
+    /// a LAN where RTT is under a millisecond but the host still needs a
+    /// moment to answer; the ceiling keeps a bad link from stalling the
+    /// picture for long — past it a keyframe is the better repair.
+    const GRACE_MIN_MS: u64 = 8;
+    const GRACE_MAX_MS: u64 = 40;
+    /// A frame whose packets stopped arriving this long ago has a gap
+    /// worth asking about (the host sends a frame as one burst).
+    const QUIET_MS: u64 = 2;
+    /// Give up asking after this many tries.
+    const MAX_REQUESTS: u8 = 3;
 
-    pub fn push(&mut self, packet: Packet) -> Reassembly {
+    /// Tell the reassembler the current round trip so it knows how long a
+    /// resend takes.
+    pub fn set_rtt_ms(&mut self, rtt_ms: f64) {
+        let rtt = rtt_ms.max(0.0) as u64;
+        self.rtt_ms = rtt.max(1);
+        self.grace_ms = (rtt * 5 / 2).clamp(Self::GRACE_MIN_MS, Self::GRACE_MAX_MS);
+    }
+
+    /// Feed one video or parity packet. `now_ms` is any monotonic clock
+    /// in milliseconds; it is only compared with itself.
+    pub fn push(&mut self, packet: Packet, now_ms: u64) -> Reassembly {
         let h = packet.header;
         debug_assert!(matches!(h.kind, Kind::Video | Kind::VideoFec));
 
         if self.last_delivered.is_some_and(|last| !is_newer(h.frame_id, last)) {
             return Reassembly::Stale;
         }
+        if self.held.contains_key(&h.frame_id) {
+            return Reassembly::Stale; // a resend of something already complete
+        }
 
         let pf = self
             .partial
             .entry(h.frame_id)
             .or_insert_with(|| PartialFrame { keyframe: h.flags & flags::KEYFRAME != 0, ..PartialFrame::default() });
+        if pf.requested_ms.is_some() {
+            self.resent += 1;
+        }
+        pf.last_packet_ms = now_ms;
 
         if h.kind == Kind::VideoFec {
             if pf.parity.is_empty() {
@@ -429,29 +561,122 @@ impl Reassembler {
             for s in pf.slices.into_iter().flatten() {
                 data.extend_from_slice(&s);
             }
-            // Everything older than this frame is now abandoned.
-            let older: Vec<u32> = self.partial.keys().copied().filter(|&id| is_newer(h.frame_id, id)).collect();
-            for id in older {
-                self.partial.remove(&id);
-                self.abandoned.push(id);
+            let frame = CompleteFrame { frame_id: h.frame_id, keyframe: pf.keyframe, data: data.freeze() };
+            // A keyframe needs nothing before it: whatever is older is moot.
+            if frame.keyframe {
+                self.abandon_older_than(h.frame_id);
             }
-            self.last_delivered = Some(h.frame_id);
-            return Reassembly::Complete(CompleteFrame {
-                frame_id: h.frame_id,
-                keyframe: pf.keyframe,
-                data: data.freeze(),
-            });
+            self.held.insert(h.frame_id, frame);
+            return self.deliver_next(now_ms).map_or(Reassembly::Pending, Reassembly::Complete);
         }
 
         // Bound memory: too many in flight means the oldest is never coming.
         while self.partial.len() > Self::MAX_PARTIAL {
-            if let Some(id) = self.partial.keys().copied().reduce(|a, b| if is_newer(b, a) { a } else { b }) {
+            if let Some(id) = self.oldest_partial() {
                 self.partial.remove(&id);
                 self.abandoned.push(id);
                 self.last_delivered = Some(self.last_delivered.map_or(id, |l| if is_newer(id, l) { id } else { l }));
             }
         }
         Reassembly::Pending
+    }
+
+    fn oldest_partial(&self) -> Option<u32> {
+        self.partial.keys().copied().reduce(|a, b| if is_newer(b, a) { a } else { b })
+    }
+
+    fn abandon_older_than(&mut self, frame_id: u32) {
+        let older: Vec<u32> = self.partial.keys().copied().filter(|&id| is_newer(frame_id, id)).collect();
+        for id in older {
+            self.partial.remove(&id);
+            self.abandoned.push(id);
+        }
+        let older: Vec<u32> = self.held.keys().copied().filter(|&id| is_newer(frame_id, id)).collect();
+        for id in older {
+            self.held.remove(&id);
+            self.abandoned.push(id);
+        }
+    }
+
+    /// Hand over the oldest held frame if nothing older is still pending
+    /// (or everything older has run out of grace).
+    fn deliver_next(&mut self, now_ms: u64) -> Option<CompleteFrame> {
+        let next = *self.held.keys().next()?;
+        // Older partial frames: still worth waiting for?
+        let waiting: Vec<u32> = self.partial.keys().copied().filter(|&id| is_newer(next, id)).collect();
+        // Too many complete frames queued behind a gap: the clock we were
+        // given may not be moving (tests), or the link is a mess. Either
+        // way, stop waiting.
+        let backlog = self.held.len() >= Self::MAX_PARTIAL;
+        for id in waiting {
+            let pf = &self.partial[&id];
+            let since = now_ms.saturating_sub(pf.last_packet_ms);
+            let expired =
+                backlog || since > self.grace_ms || pf.requests >= Self::MAX_REQUESTS && since > self.rtt_ms * 2;
+            if expired {
+                self.partial.remove(&id);
+                self.abandoned.push(id);
+            } else {
+                return None; // give the resend a chance
+            }
+        }
+        let frame = self.held.remove(&next)?;
+        self.last_delivered = Some(next);
+        Some(frame)
+    }
+
+    /// Call every few milliseconds: frames whose older siblings ran out of
+    /// grace become deliverable, in order.
+    pub fn poll(&mut self, now_ms: u64) -> Vec<CompleteFrame> {
+        let mut out = Vec::new();
+        while let Some(f) = self.deliver_next(now_ms) {
+            out.push(f);
+        }
+        out
+    }
+
+    /// Which packets to ask the host for again, right now. A frame is
+    /// asked about once its packets have stopped arriving (a newer frame
+    /// has started, or nothing for a couple of ms), and again no sooner
+    /// than one RTT later.
+    pub fn resend_requests(&mut self, now_ms: u64) -> Vec<ResendRequest> {
+        let newest = self.partial.keys().copied().reduce(|a, b| if is_newer(a, b) { a } else { b });
+        let newest_held = self.held.keys().next_back().copied();
+        let mut out = Vec::new();
+        for (&id, pf) in &mut self.partial {
+            if pf.slice_count > 0 && pf.received == pf.slice_count {
+                continue; // done
+            }
+            let later_frame_seen =
+                newest.is_some_and(|n| is_newer(n, id)) || newest_held.is_some_and(|n| is_newer(n, id));
+            let quiet = now_ms.saturating_sub(pf.last_packet_ms) >= Self::QUIET_MS;
+            if !(later_frame_seen || quiet) {
+                continue;
+            }
+            if pf.requests >= Self::MAX_REQUESTS {
+                continue;
+            }
+            if pf.requested_ms.is_some_and(|t| now_ms.saturating_sub(t) < self.rtt_ms.max(2)) {
+                continue;
+            }
+            // Only parity so far: we do not know how many data slices there
+            // are, so ask for all of them (small frames, usually just one).
+            let mut items = if pf.slice_count == 0 { vec![ResendRequest::ALL_DATA] } else { pf.missing_slices() };
+            // Parity we never got is worth having too: one parity packet can
+            // stand in for any one data slice of its stripe.
+            for (k, p) in pf.parity.iter().enumerate() {
+                if p.is_none() {
+                    items.push(ResendRequest::PARITY_BIT | k as u16);
+                }
+            }
+            if items.is_empty() {
+                continue;
+            }
+            pf.requested_ms = Some(now_ms);
+            pf.requests += 1;
+            out.push(ResendRequest { frame_id: id, items });
+        }
+        out
     }
 
     /// Frame ids given up on since the last call. The viewer sends these as NACKs.
@@ -470,7 +695,7 @@ mod tests {
         let mut got = Vec::new();
         for id in (u32::MAX - 3..=u32::MAX).chain(0..4) {
             for d in slice_frame_with_fec(&Bytes::from(vec![1u8; 3000]), id, false, &seq).unwrap() {
-                if let Reassembly::Complete(f) = ra.push(Packet::parse(d).unwrap()) {
+                if let Reassembly::Complete(f) = ra.push(Packet::parse(d).unwrap(), 0) {
                     got.push(f.frame_id);
                 }
             }
@@ -493,7 +718,7 @@ mod tests {
     fn deliver(r: &mut Reassembler, pkts: Vec<Packet>) -> Option<CompleteFrame> {
         let mut done = None;
         for p in pkts {
-            if let Reassembly::Complete(f) = r.push(p) {
+            if let Reassembly::Complete(f) = r.push(p, 0) {
                 done = Some(f);
             }
         }
@@ -577,7 +802,7 @@ mod tests {
         let mut r = Reassembler::default();
         let mut result = None;
         for s in slices {
-            match r.push(Packet::parse(s).unwrap()) {
+            match r.push(Packet::parse(s).unwrap(), 0) {
                 Reassembly::Complete(f) => result = Some(f),
                 Reassembly::Pending => {}
                 Reassembly::Stale => panic!("fresh frame marked stale"),
@@ -596,7 +821,7 @@ mod tests {
         let mut slices = slice_frame(&frame, 1, false, &seq).unwrap();
         slices.reverse();
         let mut r = Reassembler::default();
-        let last = slices.into_iter().map(|s| r.push(Packet::parse(s).unwrap())).last().unwrap();
+        let last = slices.into_iter().map(|s| r.push(Packet::parse(s).unwrap(), 0)).last().unwrap();
         match last {
             Reassembly::Complete(f) => assert_eq!(f.data, frame),
             other => panic!("expected Complete, got {other:?}"),
@@ -604,17 +829,57 @@ mod tests {
     }
 
     #[test]
-    fn newer_complete_frame_abandons_older_incomplete_one() {
+    fn newer_complete_frame_waits_for_a_resend_then_gives_up() {
         let seq = SeqCounter::default();
         let old = slice_frame(&frame_of(MAX_PAYLOAD * 2), 10, false, &seq).unwrap();
         let new = slice_frame(&frame_of(10), 11, false, &seq).unwrap();
 
         let mut r = Reassembler::default();
-        assert_eq!(r.push(Packet::parse(old[0].clone()).unwrap()), Reassembly::Pending);
-        assert!(matches!(r.push(Packet::parse(new[0].clone()).unwrap()), Reassembly::Complete(_)));
-        assert_eq!(r.take_abandoned(), vec![10]);
-        // The late slice of frame 10 is now stale, not resurrected.
-        assert_eq!(r.push(Packet::parse(old[1].clone()).unwrap()), Reassembly::Stale);
+        r.set_rtt_ms(4.0); // grace = 10 ms
+        assert_eq!(r.push(Packet::parse(old[0].clone()).unwrap(), 0), Reassembly::Pending);
+        // Frame 11 completes but 10 is missing a slice: hold 11, ask for 10's.
+        assert_eq!(r.push(Packet::parse(new[0].clone()).unwrap(), 1), Reassembly::Pending);
+        let asks = r.resend_requests(1);
+        assert_eq!(asks, vec![ResendRequest { frame_id: 10, items: vec![1] }]);
+        assert!(r.resend_requests(2).is_empty(), "no repeat within an RTT");
+        // The resend arrives: 10 completes and 11 follows in order.
+        assert!(
+            matches!(r.push(Packet::parse(old[1].clone()).unwrap(), 5), Reassembly::Complete(f) if f.frame_id == 10)
+        );
+        assert_eq!(r.poll(5).into_iter().map(|f| f.frame_id).collect::<Vec<_>>(), vec![11]);
+        assert_eq!(r.resent, 1);
+        assert!(r.take_abandoned().is_empty());
+
+        // Same again, but the resend never comes: after the grace, 10 is
+        // abandoned and 11 delivered.
+        let old = slice_frame(&frame_of(MAX_PAYLOAD * 2), 20, false, &seq).unwrap();
+        let new = slice_frame(&frame_of(10), 21, false, &seq).unwrap();
+        assert_eq!(r.push(Packet::parse(old[0].clone()).unwrap(), 100), Reassembly::Pending);
+        assert_eq!(r.push(Packet::parse(new[0].clone()).unwrap(), 101), Reassembly::Pending);
+        assert!(r.poll(105).is_empty());
+        assert_eq!(r.poll(111).into_iter().map(|f| f.frame_id).collect::<Vec<_>>(), vec![21]);
+        assert_eq!(r.take_abandoned(), vec![20]);
+        assert_eq!(r.push(Packet::parse(old[1].clone()).unwrap(), 112), Reassembly::Stale);
+    }
+
+    #[test]
+    fn keyframe_does_not_wait_for_older_frames() {
+        let seq = SeqCounter::default();
+        let old = slice_frame(&frame_of(MAX_PAYLOAD * 2), 30, false, &seq).unwrap();
+        let key = slice_frame(&frame_of(10), 31, true, &seq).unwrap();
+        let mut r = Reassembler::default();
+        assert_eq!(r.push(Packet::parse(old[0].clone()).unwrap(), 0), Reassembly::Pending);
+        assert!(
+            matches!(r.push(Packet::parse(key[0].clone()).unwrap(), 1), Reassembly::Complete(f) if f.frame_id == 31)
+        );
+        assert_eq!(r.take_abandoned(), vec![30]);
+    }
+
+    #[test]
+    fn resend_request_round_trips() {
+        let rq = ResendRequest { frame_id: 7, items: vec![3, 9, ResendRequest::PARITY_BIT | 1] };
+        assert_eq!(ResendRequest::decode(&rq.encode()), Some(rq));
+        assert_eq!(ResendRequest::decode(&[1, 2, 3]), None);
     }
 
     #[test]
@@ -623,9 +888,9 @@ mod tests {
         let seq = SeqCounter::default();
         let slices = slice_frame(&frame, 3, false, &seq).unwrap();
         let mut r = Reassembler::default();
-        assert_eq!(r.push(Packet::parse(slices[0].clone()).unwrap()), Reassembly::Pending);
-        assert_eq!(r.push(Packet::parse(slices[0].clone()).unwrap()), Reassembly::Pending);
-        assert!(matches!(r.push(Packet::parse(slices[1].clone()).unwrap()), Reassembly::Complete(_)));
+        assert_eq!(r.push(Packet::parse(slices[0].clone()).unwrap(), 0), Reassembly::Pending);
+        assert_eq!(r.push(Packet::parse(slices[0].clone()).unwrap(), 0), Reassembly::Pending);
+        assert!(matches!(r.push(Packet::parse(slices[1].clone()).unwrap(), 0), Reassembly::Complete(_)));
     }
 
     #[test]

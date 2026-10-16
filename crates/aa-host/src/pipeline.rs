@@ -21,6 +21,9 @@ pub struct PipelineControl {
     pub force_keyframe: AtomicBool,
     /// Target bitrate from the adaptive controller; 0 = unchanged.
     pub target_kbps: AtomicU32,
+    /// Parity packets per data packet for video, in thousandths (100 =
+    /// 10%). Set by the bitrate controller from reported loss.
+    pub fec_permille: AtomicU32,
     /// Codec the current viewer negotiated (`Codec as u8`); `NO_CODEC` =
     /// keep whatever encoder is loaded.
     pub codec: AtomicU8,
@@ -40,6 +43,7 @@ impl Default for PipelineControl {
             intra_refresh: AtomicBool::new(false),
             force_keyframe: AtomicBool::new(false),
             target_kbps: AtomicU32::new(0),
+            fec_permille: AtomicU32::new((aa_core::wire::FEC_RATIO * 1000.0) as u32),
             codec: AtomicU8::new(NO_CODEC),
             shutdown: AtomicBool::new(false),
             screen_status: std::sync::Mutex::new(None),
