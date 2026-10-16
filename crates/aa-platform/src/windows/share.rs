@@ -150,7 +150,7 @@ pub fn shareable() -> Vec<ShareTarget> {
         }
         let Some(exe) = exe_of(hwnd) else { continue };
         if OURS.contains(&exe.as_str())
-            || frame_of(hwnd).is_none_or(|r| r.right - r.left < 120 || r.bottom - r.top < 80)
+            || frame_of(hwnd).map_or(true, |r| r.right - r.left < 120 || r.bottom - r.top < 80)
         {
             continue;
         }

@@ -128,7 +128,7 @@ impl SendInputInjector {
     }
 
     /// Stream-normalised (0..=65535 over the captured output) → screen pixels.
-    fn to_pixels(&mut self, x: u16, y: u16) -> (i32, i32) {
+    fn pixels_for(&mut self, x: u16, y: u16) -> (i32, i32) {
         // The captured screen as it is *now*: resolution changes and display
         // switches move it, and a stale rectangle sends clicks to the wrong place.
         let screen = super::capture::current_output_rect().unwrap_or(self.output);
@@ -199,7 +199,7 @@ impl SendInputInjector {
         let pos = self.last_pos;
         let held = self.held_keys.clone();
         let Some(l) = self.limit.as_mut() else { return true };
-        let point_ok = |l: &Limit| pos.is_none_or(|(x, y)| super::share::point_allowed(&l.target, x, y));
+        let point_ok = |l: &Limit| pos.map_or(true, |(x, y)| super::share::point_allowed(&l.target, x, y));
         match *event {
             InputEvent::MouseButton { button, pressed: true } => {
                 let ok = point_ok(l);
@@ -284,7 +284,7 @@ impl InputInjector for SendInputInjector {
             InputEvent::MouseMoveAbs { x, y } => {
                 // SetCursorPos takes real pixels and is immune to the
                 // normalisation quirks of SendInput on scaled displays.
-                let (px, py) = self.to_pixels(x, y);
+                let (px, py) = self.pixels_for(x, y);
                 self.last_pos = Some((px, py));
                 // SAFETY: plain Win32 call.
                 unsafe { SetCursorPos(px, py) }
