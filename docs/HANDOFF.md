@@ -24,7 +24,7 @@ for setup. Everything below is true as of the last commit on `main`.
 |---------|-----------|-------|
 | Windows 11 25H2, Intel Core Ultra with Arc 130T, 2880×1800 @ 60 Hz (panel supports 120 Hz+, owner says) | host | Quick Sync H.264 **and** HEVC encoders via Media Foundation; WASAPI process-loopback audio works; "Anywhere Alternative" UDP 7700 firewall rule added |
 | Mac mini M4 Pro | viewer | VideoToolbox hardware decode; cpal output |
-| Network | Wi-Fi, same router | Ping between them measured **36–187 ms** — very poor. Most "60 fps isn't steady" and "audio crackles" reports trace to this. Ethernet on the PC is the standing recommendation. |
+| Network | Wi-Fi, same router, **both machines wireless; no Ethernet cable available; AirDrop must stay on** (owner, 2026-10-16) | Ping has measured 36–187 ms on bad days and a flat 5 ms with 18% loss on others. Software must cope: see "Lossy Wi-Fi" in 0.4.8. Don't lead with "plug in a cable" again. |
 
 Their router reassigns the PC's address often (seen 192.168.1.3 → .5); the
 viewer now discovers the host by broadcast so no address is needed.
@@ -96,6 +96,23 @@ through Anywhere**; **code once, then remembered**.
   Not verified on real hardware yet.
 
 ## Shipped but NOT yet confirmed by the owner (ask for results first)
+
+**0.4.8 (2026-10-17), the newest — check these first:**
+- **Lossy Wi-Fi fix** for the owner's "blurry + red smears" at
+  `5 ms / 18% loss / 0.1 Mbps`: radio loss no longer trims the bitrate,
+  parity scales with loss, and the viewer asks for missing packets
+  (`Kind::Resend`). Ask for an overlay screenshot: expect loss still in the
+  teens (that is the radio), Mbps in the tens, ~60 fps, `resent=` growing
+  in `viewer.log`. If fps is fine but it still blurs, look at `mbps` and
+  the host log's `bitrate adapted` lines.
+- **Stale always-on host after update**: `service-version` file + app
+  check every 30 s; Mac kickstarts itself, Windows shows what to do. Only
+  hosts ≥0.4.8 write the file. The "older Anywhere" note now names both
+  versions.
+- **Tailscale adapters skipped by the beacon** (the yellow "os error 49"
+  note on the Share page should be gone).
+- Release 0.4.8 must be started by the owner (Actions → Release → Run
+  workflow → `0.4.8`); Claude sessions are not allowed to trigger it.
 
 Picture:
 1. **HEVC end to end** (the first try was black: host sent H.264 labelled

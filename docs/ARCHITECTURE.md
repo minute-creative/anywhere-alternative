@@ -216,14 +216,41 @@ choices (all in `aa-core/src/audio.rs` and `aa-platform/src/audio.rs`):
 
 ### Forward error correction (video)
 
-Each frame's slices are followed by `Kind::VideoFec` parity packets: 10%
-of the slice count, at least one. Parity *k* is the XOR of data slices
-k, k+G, k+2G… (G = parity count), prefixed with the XOR of their lengths so
-a short last slice rebuilds to its exact size. Interleaved stripes mean a
-burst of up to G consecutive losses hits G different stripes and is still
-fully recoverable. The reassembler rebuilds as soon as a stripe is missing
-exactly one slice and has its parity. Simulated Wi-Fi (0.5% loss + stalls,
-120 fps): dropped frames 110 → 10 over 20 s, stutters halved.
+Each frame's slices are followed by `Kind::VideoFec` parity packets.
+Parity *k* is the XOR of data slices k, k+G, k+2G… (G = parity count),
+prefixed with the XOR of their lengths so a short last slice rebuilds to
+its exact size. Interleaved stripes mean a burst of up to G consecutive
+losses hits G different stripes and is still fully recoverable. The
+reassembler rebuilds as soon as a stripe is missing exactly one slice and
+has its parity. Simulated Wi-Fi (0.5% loss + stalls, 120 fps): dropped
+frames 110 → 10 over 20 s, stutters halved.
+
+**The ratio is adaptive (0.4.8):** the bitrate controller keeps a smoothed
+loss figure from receiver reports and sets parity to 1.5 × loss, between
+10% and 50%, carried to the sender through `PipelineControl::fec_permille`.
+A clean cable pays the 10% floor; a radio losing one packet in five gets
+~30%.
+
+### Selective resend (0.4.8)
+
+Single-parity stripes cannot fix two losses in one stripe, and at 18%
+random loss big frames hit that constantly. On a low-delay link the
+cheaper repair is to ask again: `Kind::Resend` carries a frame id and the
+indexes still missing (data slices, parity with the high bit set, or
+`0x7FFF` for "all data" when only parity arrived). The host keeps the last
+64 frames' datagrams (≤12 MB) in `RecentPackets` and sends the named ones
+again unchanged, so they reassemble like any other packet.
+
+The viewer asks the moment a frame's packets stop arriving — a newer
+frame has started, or 2 ms of quiet — and again after one RTT, three
+times at most. For that to help, the reassembler now delivers **in
+order**: a complete frame waits behind an older incomplete one for up to
+2.5 × RTT (8–40 ms), because a P-frame is useless without its
+predecessor anyway and abandoning the older one would force a keyframe
+(far more bytes, visible stall). Keyframes never wait and discard
+everything older. A backlog of 8 held frames ends the wait regardless.
+Stats line: `resent=`. Mock link at 18% injected loss
+(`AA_SIMULATE_LOSS=18`): 59 fps, 0 dropped frames.
 
 ### Colour path (Windows host)
 
@@ -505,6 +532,19 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   Now the host opens HEVC at startup and only offers it if that works; the
   capture thread logs the codec on every connect and sends nothing rather
   than mislabelled video if a switch fails.
+- **Loss with flat delay is not congestion.** A Mac mini on Wi-Fi showed
+  18% loss at 5 ms RTT while sending 0.1 Mbps. Cutting bitrate for it
+  only blurred the picture; the radio kept dropping the same share. Radio
+  loss now holds the bitrate and is answered with parity and resends.
+- **Repair beats retransmit-by-keyframe on a 5 ms link.** A resend lands in
+  ~10 ms; a keyframe costs many frames' worth of bytes and a visible
+  stall. Give the resend its window before giving up on a frame.
+- **A background process keeps the old code after an update.** Files on
+  disk are new, the process in memory is not. Record the running version
+  and compare it with the app's; restart the agent when they differ.
+- **Bindings' destructors can free memory you only borrowed.** windows-rs
+  `PROPVARIANT` runs `PropVariantClear` on drop; a `VT_BLOB` pointing at
+  the stack corrupted the heap. `ManuallyDrop` when the blob is borrowed.
 
 ## 10. Measured so far
 
@@ -650,6 +690,17 @@ flat 5 ms RTT walked the bitrate 45 → 2 Mbps repeatedly (blur). 0.4.6
 owner after the Mac's background item was re-enabled. Still to measure:
 sustained Mbps/fps in the overlay, sharpness after motion, input with
 Accessibility granted, permissions surviving the next signed update.
+
+### PC viewer → Mac host, both Wi-Fi, 0.4.7 (2026-10-16)
+
+Owner's overlay: `8 fps 0.1 Mbps 5 ms 18.2% loss`, blurry, red smears.
+Flat delay with heavy loss = radio loss; the controller had trimmed to
+the floor for it. Also: the Mac's always-on host was still the pre-update
+process (PID 589 from boot) — "runs an older Anywhere" from the PC.
+Fixes shipped in 0.4.8 (radio-loss rule, adaptive FEC, selective resend,
+version-aware stale-host restart). Measured on the mock link only so far:
+18% injected loss → 59 fps, 0 dropped (was 10–18 fps, ~10 drops/s).
+Awaiting the owner's overlay on the real link.
 
 ## 11. Coding standards
 

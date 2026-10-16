@@ -54,15 +54,15 @@ installer (about 15 minutes) and publishes them on the Releases page
 
 ## Status
 
-**Stage 2 in progress.** Windows hosts its real screen (DXGI Desktop
-Duplication → hardware H.264/HEVC via Media Foundation, zero-copy) with
-keyboard and mouse forwarding, adaptive bitrate, keyframe recovery after
-loss, an in-window settings overlay (Ctrl/Cmd+Shift+S), **system audio**
-(process-loopback → Opus → adaptive jitter buffer, with a "mute PC
-speakers" toggle), **LAN auto-discovery** (no IP to type) and
-**VideoToolbox hardware decode** on the Mac. Verified Windows→Mac over
-Wi-Fi at 60 fps with audio. Microphone, zero-copy decode, macOS hosting and
-controllers are next. Picking this up fresh? Read `docs/HANDOFF.md`.
+**0.4.x, in daily use by the owner.** Both directions (Windows ↔ Mac)
+with hardware encode and decode (Media Foundation / VideoToolbox, H.264
+and HEVC), keyboard, mouse and DualSense, system audio both ways and a
+microphone, clipboard, pairing codes with encrypted sessions, Tailscale
+for other networks, always-on sharing including the sign-in screen, LAN
+auto-discovery, automatic updates, and a settings overlay in the viewer
+(Ctrl/Cmd+Shift+S). 0.4.8 adds the lossy-Wi-Fi repair path (adaptive
+parity plus selective resend) so a radio dropping packets no longer turns
+the picture blurry. Picking this up fresh? Read `docs/HANDOFF.md`.
 
 ## Setup
 
