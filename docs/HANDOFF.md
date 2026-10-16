@@ -97,7 +97,51 @@ through Anywhere**; **code once, then remembered**.
 
 ## Shipped but NOT yet confirmed by the owner (ask for results first)
 
-**0.4.8 (2026-10-17), the newest — check these first:**
+**0.5.0 (2026-10-17), the newest — built on top of 0.4.8, CI only:**
+Owner's rules (asked and answered 2026-10-17): quality steady rather than
+chasing the top; frame rate gives way first but never below 60, then
+sharpness (not resolution); 240 fps is the most; Resolution and Frame
+rate as settings; share one app *or* one window; viewer limited to that
+app (clicks, keys, sound); only the person at the sharing computer picks,
+unless a paired computer has **Full access** (= may pick what is shared
+*and* keeps full control); a computer left alone shares the whole screen.
+- **Frame-rate ladder** (`aa_core::quality`): starts at 60, climbs to the
+  fastest rung the bitrate affords at full sharpness after 3 clean
+  seconds, drops at once below 80% of what the rung needs. Mac capture
+  now runs at the display's rate (≤240, `AA_MAC_MAX_FPS`); the pipeline
+  holds early frames back (newest wins). Host log: `frame rate adapted`.
+- **Settings** (watching side): Resolution full/1440/1080/720 (Mac scales
+  in ScreenCaptureKit, PC in the GPU video processor); Frame rate
+  auto/60–240 (`--resolution`, `--fps`; the viewer also sends its screen's
+  refresh, so a 60 Hz PC screen is never sent 200).
+- **Share one app/window**: app writes `share.json` (fresh ≤120 s, else
+  whole screen) next to the pairing files; host follows it. Mac: SCK
+  filters (app = display incl. that app; window = desktop-independent
+  window) and SCK audio filter; input limited via the Quartz window list.
+  PC: whole screen captured, only the app's visible rects copied into a
+  black texture on the GPU (`windows/share.rs`), crop for one window;
+  per-process loopback audio (include tree); input limited via
+  WindowFromPoint/GetForegroundWindow; Win key, Alt+Tab etc. blocked.
+  Failure to share just that = nothing shown (never the whole screen).
+- **Full access** toggle per paired computer (Share page); viewer overlay
+  shows "What to show" with the host's list (`ShareList`/`SetShare`).
+- **AV1 PC→Mac**: Windows offers AV1 if an MF hardware AV1 encoder opens
+  (Arc 130T should); Mac viewer offers AV1 if `VTIsHardwareDecodeSupported`
+  (M4 Pro: yes). av1C built from the sequence header (`aa_core::av1`).
+  `AA_NO_AV1=1` on the PC turns it off. Mac→PC stays HEVC (no Mac AV1 encoder).
+- **Loss repair without keyframes (Mac host)**: VideoToolbox long-term
+  references; viewer reports `last_good_frame`; NACK → `ForceLTRRefresh`
+  frame flagged `RECOVERY`, viewer resumes on it. `AA_NO_LTR=1` off.
+  Encoder log `loss_repair=true` if the Mac accepted it.
+- **Steady**: bitrate holds at 90% of the last choke point for 60 s.
+- **HEVC Video Extensions** as a PC add-on (winget msstore 9N4WGH0Z6VHQ);
+  Extras check asks Windows' decoders directly. Viewer corner shows the
+  codec, target fps, what is shared, and notes (H.264 fallback, Tailscale
+  relay via `tailscale status --json` CurAddr/Relay).
+Ask for: host + viewer logs from one session each way; `encoder:` lines
+(codec, loss_repair), `frame rate adapted`, corner screenshot.
+
+**0.4.8 (2026-10-17), check these too:**
 - **Lossy Wi-Fi fix** for the owner's "blurry + red smears" at
   `5 ms / 18% loss / 0.1 Mbps`: radio loss no longer trims the bitrate,
   parity scales with loss, and the viewer asks for missing packets

@@ -466,6 +466,38 @@ direction had a quieter bug: a Mac *viewer* reports Caps Lock as
 Windows host toggles on presses, so it would stick on; the viewer now
 sends a whole tap for every change. Untested on hardware (CI only).
 
+## Day 16 — "highest quality everywhere", one app at a time (v0.5.0)
+
+Owner: fps never above 150-200, quality dropping, wants the highest
+quality, consistent at 100 km or 1000 km; share one app or window so
+nothing slips; best compression; resolution and fps as settings; 240 max.
+Honest framing given: distance adds only delay; the ceiling is the
+sharing side's upload speed, Wi-Fi, and whether Tailscale goes direct or
+through its relay. Software can only use what the path carries and keep
+it steady. Answers: steady over sharp, fps gives way first down to 60,
+then sharpness; app and window both; full access = pick + full control;
+alone = whole screen; ship all at once.
+
+What was built (CI-compiled only; the container cannot build Mac/PC code
+and rustup cannot download those targets here):
+- Frame-rate ladder priced by `sharp_kbps` (bits/pixel/frame at 60 fps:
+  H.264 0.16, HEVC 0.11, AV1 0.09, × (fps/60)^0.75). Mock check: 60 → 200
+  at a clean 80 Mbps; first version climbed one rung per 5 s (35 s to
+  200), changed to "straight to what fits after 3 clean seconds".
+- AV1 PC→Mac. Mac has no AV1 encoder, and software AV1 on an M4 at 1080p
+  would take most of the CPU for ~60 fps and look no better than the
+  media engine's HEVC: told the owner and left out.
+- Mac LTR repairs; per-app capture, sound and input limits on both OSes.
+- I told the owner the PC path copied frames through the CPU; it doesn't
+  (DXGI → GPU video processor → MFT is already zero-copy). Corrected.
+- Mac encoder already used low-latency rate control (since 0.4.3); the
+  Mac→PC data saving comes from LTR repairs (no keyframe bursts), app
+  sharing, and the steadier bitrate.
+- A parallel session had pushed 0.4.8 (resend, adaptive FEC from the
+  controller) an hour before: rebased onto it, kept its FEC and resend,
+  dropped my loss→FEC formula, a repair frame now also ends waiting for
+  older frames in the reassembler.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.

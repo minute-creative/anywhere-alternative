@@ -368,10 +368,50 @@ Mac: hidapi reads the real pad ──Kind::Pad Input (64-byte USB report)──�
 - Not done: DualSense Edge identity (presents as a standard DualSense),
   the pad's microphone (silence is sent), the pad's own speaker over BT.
 
+### Frame rate and quality rules (0.5.0)
+
+`aa_core::quality::FpsLadder` picks the frame rate from what the bitrate
+controller allows: rungs 240/200/165/144/120/100/90/75/60 (plus the cap
+itself), cap = min(host refresh, viewer's screen or setting, 240). It
+starts at 60, climbs after 3 clean reports to the fastest rung whose
+`sharp_kbps` fits, and drops at once when the bitrate is below 80% of the
+current rung's need. Never below 60: below that, sharpness gives way (the
+bitrate just keeps falling). A fixed Frame rate setting disables it. The
+capture thread holds early frames (newest wins) to the target; Mac
+encoders change `ExpectedFrameRate` live, PC encoders are rebuilt.
+Resolution setting: the viewer's `max_resolution`; the Mac scales in
+ScreenCaptureKit, the PC in the D3D11 video processor (`NvConverter::scaled`).
+After a choke the bitrate settles at 90% of it for 60 clean seconds.
+
+### Sharing one app or window (0.5.0)
+
+`ShareTarget` (`aa_core::share`): Screen, App (bundle id / exe name),
+Window (window number / HWND). The app writes `share.json` in `host_dir`
+every 30 s; older than 120 s = Screen. A full-access viewer may override
+with `SetShare` (newest decision wins). Mac: SCK content filters for
+picture and sound, Quartz window list for input. PC: compose on the GPU
+from the full duplication frame (black + visible rects of the app, crop
+for a window), per-process loopback (include tree) for sound,
+WindowFromPoint/foreground checks for input. If just-that can't be
+shown, nothing is shown, retried every 3 s.
+
+### Loss repair from long-term references (Mac host, 0.5.0)
+
+VideoToolbox `EnableLTR` (low-latency mode). LTR tokens ride on
+`EncodedFrame::ltr_token`; the viewer reports `last_good_frame` (bytes
+8..12 of the receiver report; old peers ignore/omit it); the host acks
+tokens of frames up to it. A NACK becomes `ForceLTRRefresh`: a P-frame on
+a confirmed reference, flagged `RECOVERY`; the viewer resumes on it like a
+keyframe. Unconfirmed tokens are discarded on any repair or keyframe.
+Negotiated as `loss_recovery` (both sides must say yes).
+
 ### Codec choice
 
 `Codec::ALL` is preference order (AV1, HEVC, H.264); `negotiate` takes the
-first codec both sides list. Each side lists what it can *really* do:
+first codec both sides list. AV1 (0.5.0): Windows hosts with an MF AV1
+encoder list it last (`codecs[0]` must stay the loaded encoder); Mac
+viewers with hardware AV1 decode list it; the Mac decoder builds `av1C`
+from the sequence header and strips temporal delimiters. Each side lists what it can *really* do:
 Windows adds HEVC only if a Media Foundation HEVC encoder exists; the Mac
 adds HEVC only if `VideoToolbox` opens. The engines are built from factories
 after Welcome (`HostBackends::encoder_factory`, `ViewerBackends::decoder`),
