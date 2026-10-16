@@ -111,6 +111,9 @@ through Anywhere**; **code once, then remembered**.
   versions.
 - **Tailscale adapters skipped by the beacon** (the yellow "os error 49"
   note on the Share page should be gone).
+- **Caps Lock on a Mac host** now toggles the real lock state through
+  IOKit (`IOHIDSetModifierLockState`); a Mac viewer sends a full tap per
+  state change. Ask: does the Mac's keyboard light follow the PC's key?
 - Release 0.4.8 must be started by the owner (Actions → Release → Run
   workflow → `0.4.8`); Claude sessions are not allowed to trigger it.
 

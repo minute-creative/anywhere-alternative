@@ -542,6 +542,10 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
 - **A background process keeps the old code after an update.** Files on
   disk are new, the process in memory is not. Record the running version
   and compare it with the app's; restart the agent when they differ.
+- **Caps Lock on a Mac is a state, not a key.** Quartz ignores a
+  `kVK_CapsLock` key event; flip the lock through `IOHIDSystem`
+  (`IOHIDSetModifierLockState`). And a Mac *viewer* reports it as
+  on/off, not press/release — send a whole tap per change.
 - **Bindings' destructors can free memory you only borrowed.** windows-rs
   `PROPVARIANT` runs `PropVariantClear` on drop; a `VT_BLOB` pointing at
   the stack corrupted the heap. `ManuallyDrop` when the blob is borrowed.
