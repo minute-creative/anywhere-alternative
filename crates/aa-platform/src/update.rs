@@ -136,6 +136,13 @@ pub mod marker {
     pub fn viewing() -> PathBuf {
         crate::trust::system_dir().join("app-viewing")
     }
+    /// Always-on host → app: the version of the code it is *running*
+    /// (written at start). After an update the files on disk are new but a
+    /// process started earlier still runs the old code; comparing this
+    /// with the app's own version catches that.
+    pub fn service_version() -> PathBuf {
+        crate::trust::host_dir().join("service-version")
+    }
 }
 
 /// Is someone connected to this computer, or is it watching another one? (The host refreshes

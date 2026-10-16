@@ -201,7 +201,12 @@ async fn main() -> anyhow::Result<()> {
         return tokio::task::spawn_blocking(aa_platform::windows::session::run_service).await?;
     }
     if args.service {
-        tracing::info!(login_screen = at_login_screen(), "sharing service starting");
+        tracing::info!(
+            version = aa_platform::update::current(),
+            login_screen = at_login_screen(),
+            "sharing service starting"
+        );
+        let _ = std::fs::write(aa_platform::update::marker::service_version(), aa_platform::update::current());
         // Logging in or out: the other session's copy may still hold the
         // port for a moment. Wait for it rather than failing.
         let mut waited = 0;

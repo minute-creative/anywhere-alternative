@@ -386,6 +386,11 @@ struct App {
     addons_busy: bool,
     addons_note: Option<(String, bool)>,
     viewing_note_at: Instant,
+    /// Last time we compared the always-on host's version with our own.
+    stale_check_at: Instant,
+    /// The always-on host runs an older version than the app (after an
+    /// update it kept running the old code); what we told the person.
+    stale_service: Option<String>,
     icon: Option<egui::TextureHandle>,
     settings: Settings,
     found: Arc<Mutex<Vec<Found>>>,
@@ -439,6 +444,8 @@ impl App {
             addons_busy: false,
             addons_note: None,
             viewing_note_at: Instant::now(),
+            stale_check_at: Instant::now().checked_sub(Duration::from_secs(60)).unwrap_or_else(Instant::now),
+            stale_service: None,
             icon,
             settings: Settings::load(),
             found,
@@ -629,12 +636,7 @@ impl App {
                     match f.key {
                         Some(k) if trust::paired_host(&k).is_some() => self.connect(&t, &f.name),
                         Some(_) => self.ask_code(&t, &f.name),
-                        None => {
-                            self.viewer_note = Some((
-                                format!("{} runs an older Anywhere. Update it from the Releases page first.", f.name),
-                                true,
-                            ));
-                        }
+                        None => self.viewer_note = Some((older_version_note(&f), true)),
                     }
                 }
                 Bg::Probed(_, Err(e)) => self.viewer_note = Some((e, true)),
@@ -734,6 +736,7 @@ impl App {
             aa_platform::update::note(&aa_platform::update::marker::viewing(), self.viewer.is_some());
         }
         self.maybe_update();
+        self.check_stale_service();
         if self.lists_at.elapsed() > Duration::from_secs(2) {
             self.refresh_lists();
         }
@@ -1377,6 +1380,9 @@ impl App {
             if let Some(e) = &self.service_error {
                 ui.label(RichText::new(e).small().color(DANGER));
             }
+            if let Some(n) = &self.stale_service {
+                ui.label(RichText::new(n).small().color(WARN));
+            }
             if mac && self.filevault == Some(true) {
                 ui.add_space(6.0);
                 egui::Frame::NONE
@@ -1654,6 +1660,52 @@ fn main() -> eframe::Result {
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native("Anywhere", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+impl App {
+    /// After an update, the always-on sharing process may still be the old
+    /// one (started before the files changed). A Mac can restart it by
+    /// itself; on Windows we say what to do.
+    fn check_stale_service(&mut self) {
+        if !self.service_on || self.stale_check_at.elapsed() < Duration::from_secs(30) {
+            return;
+        }
+        self.stale_check_at = Instant::now();
+        let Some(running) = service::running_version() else { return };
+        if running == aa_platform::update::current() {
+            self.stale_service = None;
+            return;
+        }
+        match service::restart() {
+            Ok(()) => {
+                tracing::info!(running, now = aa_platform::update::current(), "restarted the always-on host");
+                self.stale_service = None;
+            }
+            Err(e) => {
+                self.stale_service = Some(format!(
+                    "Sharing is still running version {running} (this app is {}). To finish the update, {e}.",
+                    aa_platform::update::current()
+                ));
+            }
+        }
+    }
+}
+
+/// Why we won't connect to a computer that answered without a key.
+///
+/// Two very different situations look the same from here: the other
+/// computer really has an old Anywhere, or it has the new one installed
+/// but its sharing process started before the update and is still running
+/// the old code. The version it reports (none before 0.4.8) is the clue.
+fn older_version_note(f: &Found) -> String {
+    let theirs = if f.version.is_empty() { "before 0.4.0".to_owned() } else { f.version.clone() };
+    format!(
+        "{} is sharing with an older Anywhere ({theirs}; this one is {}). If it is already updated there, \
+         turn Share off and on again on that computer (or restart it) so the new version takes over. \
+         Otherwise update it from the Releases page.",
+        f.name,
+        aa_platform::update::current()
+    )
 }
 
 #[cfg(test)]

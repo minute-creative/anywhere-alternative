@@ -219,8 +219,11 @@ updates; 0.4.5 itself needs them granted once more (remove + re-add).
   A full run takes ~15 min (Windows is slowest). Expect one or two rounds
   of API-drift fixes per new platform file.
 - Smoke test that always works locally:
-  `aa-host --mock` in one process, `aa-viewer --headless --mock` (no
-  address → discovery) in another; expect `fps=60 loss=0.00%`.
+  `aa-host --mock` in one process; read its "pairing code for new
+  computers" line; `aa-viewer --headless --mock --pair <code>` (no
+  address → discovery) in another; expect `fps=60 loss=0.00%`. The
+  pairing is remembered in `AA_DATA_DIR`/the data folder, so later runs
+  need no `--pair`.
 - Clippy runs with `pedantic` and `-D warnings` on CI. FFI modules carry
   `#![allow(unsafe_code, clippy::pedantic)]` and SAFETY comments.
 - Code style: `rustfmt.toml` (max width 120). Commit messages explain the

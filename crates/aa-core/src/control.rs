@@ -48,6 +48,11 @@ pub enum ControlMessage {
         /// computer paired at home can still be reached from elsewhere.
         #[serde(default)]
         addrs: Vec<String>,
+        /// The host program's version ("0.4.8"); empty from anything
+        /// older than 0.4.8. Lets the app say *which* old version is
+        /// answering rather than just "older".
+        #[serde(default)]
+        version: String,
     },
     /// Host → whole LAN, every second, unasked: "I'm here, connect on
     /// `port`". The viewer only listens, so this works even when the PC's
@@ -57,6 +62,8 @@ pub enum ControlMessage {
         port: u16,
         #[serde(default)]
         key: String,
+        #[serde(default)]
+        version: String,
     },
     /// Host → viewer: why the picture is paused ("the PC is locked…"), or
     /// `None` when it is back. Repeated every few seconds while set.

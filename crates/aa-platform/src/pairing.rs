@@ -106,12 +106,13 @@ pub async fn probe(addr: SocketAddr) -> anyhow::Result<crate::discover::Found> {
                     let Ok(n) = r else { continue };
                     let Ok(p) = Packet::parse(bytes::Bytes::copy_from_slice(&buf[..n])) else { continue };
                     if p.header.kind != Kind::Control { continue }
-                    if let Ok(ControlMessage::Here { name, key, .. }) = ControlMessage::decode(&p.payload) {
+                    if let Ok(ControlMessage::Here { name, key, version, .. }) = ControlMessage::decode(&p.payload) {
                         return crate::discover::Found {
                             name,
                             addr,
                             key: secure::from_hex(&key),
                             addrs: vec![addr],
+                            version,
                         };
                     }
                 }

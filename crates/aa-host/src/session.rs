@@ -373,7 +373,8 @@ fn start_beacon(port: u16, key: String) {
         return;
     }
     let name = aa_platform::trust::computer_name();
-    let payload = ControlMessage::Beacon { name, port, key }.encode();
+    let version = aa_platform::update::current().to_owned();
+    let payload = ControlMessage::Beacon { name, port, key, version }.encode();
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN + payload.len());
     Header { kind: Kind::Control, flags: 0, seq: 0, frame_id: 0, slice_index: 0, slice_count: 1 }.write(&mut out);
     out.extend_from_slice(&payload);
@@ -547,7 +548,12 @@ async fn handle_packet(
                     send_control(
                         socket,
                         from,
-                        &ControlMessage::Here { name, key: socket.public_key_hex(), addrs },
+                        &ControlMessage::Here {
+                            name,
+                            key: socket.public_key_hex(),
+                            addrs,
+                            version: aa_platform::update::current().to_owned(),
+                        },
                         seq,
                     )
                     .await?;

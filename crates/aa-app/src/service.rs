@@ -444,3 +444,28 @@ pub fn set_start_at_sign_in(on: bool) -> anyhow::Result<()> {
         anyhow::bail!("only on Windows")
     }
 }
+
+/// Start the always-on host again so it runs the code now on disk. On a
+/// Mac this needs no password (it is the user's own launch agent). On
+/// Windows the service runs as the system; restarting it needs an
+/// administrator prompt, so the app only tells the person.
+#[cfg(target_os = "macos")]
+pub fn restart() -> anyhow::Result<()> {
+    let status = std::process::Command::new("/bin/launchctl")
+        .args(["kickstart", "-k", &format!("gui/{}/{LABEL}", uid())])
+        .status()?;
+    anyhow::ensure!(status.success(), "launchctl kickstart failed ({status})");
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn restart() -> anyhow::Result<()> {
+    anyhow::bail!("turn Share off and on again, or restart the computer")
+}
+
+/// The version the always-on host is running, if it has said.
+pub fn running_version() -> Option<String> {
+    let v = std::fs::read_to_string(aa_platform::update::marker::service_version()).ok()?;
+    let v = v.trim();
+    (!v.is_empty()).then(|| v.to_owned())
+}

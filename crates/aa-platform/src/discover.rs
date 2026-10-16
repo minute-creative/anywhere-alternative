@@ -42,6 +42,8 @@ pub struct Found {
     pub key: Option<aa_core::secure::PublicKeyBytes>,
     /// Every address it answered at.
     pub addrs: Vec<SocketAddr>,
+    /// What it runs; empty when it predates 0.4.8.
+    pub version: String,
 }
 
 impl Found {
@@ -153,7 +155,7 @@ pub async fn find_hosts(port: u16) -> anyhow::Result<Vec<Found>> {
                     Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
                     Err(e) => return Err(e.into()),
                 };
-                if let Some(ControlMessage::Here { name, key, addrs }) = parse(&buf[..n]) {
+                if let Some(ControlMessage::Here { name, key, addrs, version }) = parse(&buf[..n]) {
                     let key = aa_core::secure::from_hex(&key);
                     if let Some(k) = key {
                         // Learn its other addresses (its Tailscale one, say)
@@ -165,14 +167,14 @@ pub async fn find_hosts(port: u16) -> anyhow::Result<Vec<Found>> {
                             crate::trust::set_host_name(&k, &name);
                         }
                     }
-                    add(&mut found, &mut deadline, name, from, key, "answered");
+                    add(&mut found, &mut deadline, name, from, key, version, "answered");
                 }
             }
             recv = async { beacons.as_ref().expect("guarded").recv_from(&mut beacon_buf).await }, if beacons.is_some() => {
                 if let Ok((n, from)) = recv {
-                    if let Some(ControlMessage::Beacon { name, port, key }) = parse(&beacon_buf[..n]) {
+                    if let Some(ControlMessage::Beacon { name, port, key, version }) = parse(&beacon_buf[..n]) {
                         let key = aa_core::secure::from_hex(&key);
-                        add(&mut found, &mut deadline, name, SocketAddr::new(from.ip(), port), key, "announced");
+                        add(&mut found, &mut deadline, name, SocketAddr::new(from.ip(), port), key, version, "announced");
                     }
                 }
             }
@@ -217,6 +219,7 @@ fn add(
     name: String,
     addr: SocketAddr,
     key: Option<aa_core::secure::PublicKeyBytes>,
+    version: String,
     how: &str,
 ) {
     // The same computer at another address (Wi-Fi and Tailscale): one entry.
@@ -230,13 +233,16 @@ fn add(
         if f.key.is_none() {
             f.key = key;
         }
+        if f.version.is_empty() {
+            f.version = version;
+        }
         return;
     }
     tracing::info!(%addr, name, how, "found host");
     if found.is_empty() {
         *deadline = (*deadline).min(tokio::time::Instant::now() + AFTER_FIRST);
     }
-    found.push(Found { name, addr, key, addrs: vec![addr] });
+    found.push(Found { name, addr, key, addrs: vec![addr], version });
 }
 
 /// Find one particular computer (by its key) wherever it is now: home

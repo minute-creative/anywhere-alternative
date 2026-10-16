@@ -402,6 +402,29 @@ s); after a cut, only 25%+ loss may cut on the next report. Simulated
 Also noted: the PC's microphone is "CABLE Output (VB-Audio)" (probably
 the wrong device; it sends whatever plays into the cable).
 
+## Day 14 — "runs an older Anywhere" with 0.4.7 on both (v0.4.8)
+
+Owner (2026-10-16): Connect to 192.168.1.6 says it runs an older
+Anywhere, though both computers have 0.4.7. The note appears when a host
+answers `Here` without its key, which every host since 0.4.0 sends — so
+the *process* answering on .6 was old, even if the files were new. Most
+likely the always-on sharing process started before the update and kept
+running the old code (a manual drag-install on the Mac never kickstarts
+the agent; the app-driven update does).
+
+Done:
+- `Here` and `Beacon` carry the host's `version`; the app's note now says
+  "sharing with an older Anywhere (0.3.0; this one is 0.4.8)" and tells
+  the person to turn Share off and on if it is already updated.
+- The always-on host writes `service-version` at start; the app compares
+  it with its own every 30 s and, on a Mac, kickstarts the agent itself
+  (no password); on Windows it says what to do (restarting a SYSTEM
+  service needs a prompt). Pre-0.4.8 hosts write nothing, so this helps
+  from the next update on.
+- Diagnosis commands for the owner: `sudo lsof -nP -iUDP:7700` (Mac),
+  `Get-Process -Id (Get-NetUDPEndpoint -LocalPort 7700).OwningProcess`
+  (PC) — shows which program holds the sharing port and when it started.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.
