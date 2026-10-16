@@ -61,6 +61,12 @@ pub fn send_everywhere(payload: &[u8], port: u16, multicast: bool) -> Vec<String
             }
         };
         let _ = sock.set_broadcast(true);
+        // Tailscale (100.64.0.0/10) is point-to-point: there is nobody at a
+        // broadcast address, and macOS refuses the send (os error 49). Its
+        // peers are found through Tailscale's own list instead.
+        if is_cgnat(iface.ip) {
+            continue;
+        }
         let mut targets = vec![iface.broadcast, Ipv4Addr::BROADCAST];
         if multicast {
             let _ = sock.set_multicast_ttl_v4(1);
@@ -73,6 +79,12 @@ pub fn send_everywhere(payload: &[u8], port: u16, multicast: bool) -> Vec<String
         }
     }
     errors
+}
+
+/// 100.64.0.0/10, the range Tailscale (and carrier NAT) uses.
+pub fn is_cgnat(ip: Ipv4Addr) -> bool {
+    let [a, b, _, _] = ip.octets();
+    a == 100 && (64..128).contains(&b)
 }
 
 /// A socket that hears beacons: bound to [`BEACON_PORT`] (shared, so two
@@ -98,6 +110,14 @@ pub fn beacon_listener() -> std::io::Result<std::net::UdpSocket> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tailscale_range_is_cgnat() {
+        assert!(super::is_cgnat("100.125.107.127".parse().unwrap()));
+        assert!(super::is_cgnat("100.64.0.1".parse().unwrap()));
+        assert!(!super::is_cgnat("100.128.0.1".parse().unwrap()));
+        assert!(!super::is_cgnat("192.168.1.6".parse().unwrap()));
+    }
+
     use super::*;
 
     #[test]
