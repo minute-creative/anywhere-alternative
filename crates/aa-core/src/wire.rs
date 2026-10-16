@@ -841,14 +841,14 @@ mod tests {
         assert_eq!(r.push(Packet::parse(new[0].clone()).unwrap(), 1), Reassembly::Pending);
         let asks = r.resend_requests(1);
         assert_eq!(asks, vec![ResendRequest { frame_id: 10, items: vec![1] }]);
-        assert!(r.resend_requests(2).is_empty(), "no repeat within an RTT");
+        assert_eq!(r.resend_requests(2), Vec::new(), "no repeat within an RTT");
         // The resend arrives: 10 completes and 11 follows in order.
         assert!(
             matches!(r.push(Packet::parse(old[1].clone()).unwrap(), 5), Reassembly::Complete(f) if f.frame_id == 10)
         );
         assert_eq!(r.poll(5).into_iter().map(|f| f.frame_id).collect::<Vec<_>>(), vec![11]);
         assert_eq!(r.resent, 1);
-        assert!(r.take_abandoned().is_empty());
+        assert_eq!(r.take_abandoned(), Vec::<u32>::new());
 
         // Same again, but the resend never comes: after the grace, 10 is
         // abandoned and 11 delivered.
@@ -856,7 +856,7 @@ mod tests {
         let new = slice_frame(&frame_of(10), 21, false, &seq).unwrap();
         assert_eq!(r.push(Packet::parse(old[0].clone()).unwrap(), 100), Reassembly::Pending);
         assert_eq!(r.push(Packet::parse(new[0].clone()).unwrap(), 101), Reassembly::Pending);
-        assert!(r.poll(105).is_empty());
+        assert_eq!(r.poll(105).len(), 0);
         assert_eq!(r.poll(111).into_iter().map(|f| f.frame_id).collect::<Vec<_>>(), vec![21]);
         assert_eq!(r.take_abandoned(), vec![20]);
         assert_eq!(r.push(Packet::parse(old[1].clone()).unwrap(), 112), Reassembly::Stale);
