@@ -11,6 +11,7 @@ use crate::video::{Codec, ColorRange, Resolution};
 
 /// Announced by each side during the handshake.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // independent yes/no abilities
 pub struct Capabilities {
     /// Codecs this side can handle (encode for host, decode for viewer),
     /// with hardware acceleration. Software-only codecs are not listed:
@@ -24,6 +25,16 @@ pub struct Capabilities {
     pub has_gamepad: bool,
     /// Host only: it can present a virtual game controller to the OS.
     pub can_emulate_gamepad: bool,
+    /// Viewer only: `max_fps` is a number the person picked, not just the
+    /// screen's limit, so hold it instead of choosing by the connection.
+    #[serde(default)]
+    pub fixed_fps: bool,
+    /// Viewer: it can resume after a loss from a frame marked
+    /// [`crate::wire::flags::RECOVERY`] and reports its last good frame.
+    /// Host: its encoder can send such frames (Mac long-term references).
+    /// Both must say yes; otherwise a loss costs a whole new picture.
+    #[serde(default)]
+    pub loss_recovery: bool,
 }
 
 /// The result of a successful negotiation. Both sides compute this
@@ -35,6 +46,12 @@ pub struct Negotiated {
     pub fps: u16,
     pub color_range: ColorRange,
     pub gamepad: bool,
+    /// See [`Capabilities::fixed_fps`].
+    #[serde(default)]
+    pub fixed_fps: bool,
+    /// See [`Capabilities::loss_recovery`]: both sides said yes.
+    #[serde(default)]
+    pub loss_recovery: bool,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -68,13 +85,21 @@ pub fn negotiate(host: &Capabilities, viewer: &Capabilities) -> Result<Negotiate
             ColorRange::Sdr
         };
 
-    Ok(Negotiated { codec, resolution, fps, color_range, gamepad: viewer.has_gamepad && host.can_emulate_gamepad })
+    Ok(Negotiated {
+        codec,
+        resolution,
+        fps,
+        color_range,
+        gamepad: viewer.has_gamepad && host.can_emulate_gamepad,
+        fixed_fps: viewer.fixed_fps,
+        loss_recovery: viewer.loss_recovery && host.loss_recovery,
+    })
 }
 
 /// Shrink `src` to fit inside `bound`, keeping aspect ratio. Returns `src`
 /// unchanged when it already fits. Dimensions are rounded down to even
 /// numbers because 4:2:0 chroma subsampling requires it.
-fn fit_within(src: Resolution, bound: Resolution) -> Resolution {
+pub fn fit_within(src: Resolution, bound: Resolution) -> Resolution {
     if src.width <= bound.width && src.height <= bound.height {
         return even(src);
     }
@@ -100,6 +125,8 @@ mod tests {
             color_ranges: vec![ColorRange::Sdr],
             has_gamepad: false,
             can_emulate_gamepad: false,
+            fixed_fps: false,
+            loss_recovery: false,
         }
     }
 

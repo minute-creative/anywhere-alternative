@@ -18,6 +18,7 @@ use std::ptr::NonNull;
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
+use aa_core::share::ShareTarget;
 use aa_core::video::{PixelFormat, Resolution};
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
@@ -36,10 +37,14 @@ use objc2_core_video::{
 };
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamOutput, SCStreamOutputType,
+    SCContentFilter, SCDisplay, SCRunningApplication, SCShareableContent, SCStream, SCStreamConfiguration,
+    SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 
 use crate::{CapturedFrame, FrameBuffer, GpuApi, PlatformError, Result, ScreenCapture};
+
+/// Our own app, never offered in the share lists.
+const OWN_BUNDLE: &str = "com.minutecreative.anywhere";
 
 /// Largest width we capture at. A 5K or 6K display is scaled down to this:
 /// beyond 4K the stream gets no sharper on the viewer's screen, only
@@ -100,6 +105,15 @@ pub struct SckCapture {
     resolution: Resolution,
     refresh_hz: u16,
     started: Instant,
+    /// The whole screen's size in pixels (after the 4K cap).
+    screen: (usize, usize),
+    /// What is shared, and the size of that in pixels before the viewer's
+    /// Resolution setting.
+    share: ShareTarget,
+    source: (usize, usize),
+    /// The viewer's Resolution setting.
+    max: Option<Resolution>,
+    display: Retained<SCDisplay>,
 }
 
 // SAFETY: the SCStream and our output object are thread-safe Objective-C
@@ -128,7 +142,7 @@ pub(super) fn ns_err(what: &str, e: *mut NSError) -> PlatformError {
 }
 
 /// The main display's size in real pixels and its refresh rate.
-fn main_display_mode() -> (usize, usize, u16) {
+pub(crate) fn main_display_mode() -> (usize, usize, u16) {
     let mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
     let w = CGDisplayMode::pixel_width(mode.as_deref());
     let h = CGDisplayMode::pixel_height(mode.as_deref());
@@ -144,22 +158,145 @@ struct Handoff<T>(T);
 // thread after the sender has let go of it.
 unsafe impl<T> Send for Handoff<T> {}
 
-/// The main display as ScreenCaptureKit knows it (asked asynchronously).
-pub(super) fn main_display() -> Result<Retained<SCDisplay>> {
-    let content = wait(|tx| {
+/// What could be captured (displays, apps, windows), asked asynchronously.
+/// `on_screen`: only windows that are visible now (for the share lists).
+pub(super) fn content(on_screen: bool) -> Result<Retained<SCShareableContent>> {
+    Ok(wait(|tx| {
         let block = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
             let r = match NonNull::new(content) {
                 // SAFETY: a non-null content object is valid here; retain it to keep it.
                 Some(c) => Ok(Handoff(unsafe { Retained::retain(c.as_ptr()) }.expect("non-null"))),
-                None => Err(ns_err("listing displays", error)),
+                None => Err(ns_err("listing what can be shared", error)),
             };
             let _ = tx.send(r);
         });
         // SAFETY: the block lives until it is called (RcBlock copies to the heap).
-        unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&block) };
+        unsafe {
+            if on_screen {
+                SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+                    true, true, &block,
+                );
+            } else {
+                SCShareableContent::getShareableContentWithCompletionHandler(&block);
+            }
+        }
     })
     .ok_or_else(|| PlatformError::Unavailable("ScreenCaptureKit did not answer".into()))??
-    .0;
+    .0)
+}
+
+/// Windows a person would pick: ordinary (layer 0), a real size, not ours.
+fn pickable(w: &SCWindow) -> Option<(Retained<SCRunningApplication>, String)> {
+    // SAFETY: property reads on a live object.
+    unsafe {
+        let app = w.owningApplication()?;
+        let bundle = app.bundleIdentifier().to_string();
+        let f = w.frame();
+        if w.windowLayer() != 0 || f.size.width < 120.0 || f.size.height < 80.0 || bundle == OWN_BUNDLE {
+            return None;
+        }
+        Some((app, bundle))
+    }
+}
+
+/// The apps and windows open on this Mac, for the share lists.
+pub fn shareable() -> Result<Vec<ShareTarget>> {
+    let content = content(true)?;
+    let mut out = Vec::new();
+    // SAFETY: property reads on live objects.
+    unsafe {
+        for w in content.windows().iter() {
+            let Some((app, bundle)) = pickable(&w) else { continue };
+            let name = app.applicationName().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            out.push(ShareTarget::App { id: bundle, name: name.clone() });
+            let title = w.title().map(|t| t.to_string()).unwrap_or_default();
+            out.push(ShareTarget::Window { id: u64::from(w.windowID()), app: name, title });
+        }
+    }
+    Ok(out)
+}
+
+/// The app's processes, for keeping the viewer's clicks inside it.
+pub(super) fn app_pids(bundle: &str) -> Vec<i32> {
+    let Ok(content) = content(false) else { return Vec::new() };
+    // SAFETY: property reads on live objects.
+    unsafe {
+        content
+            .applications()
+            .iter()
+            .filter(|a| a.bundleIdentifier().to_string() == bundle)
+            .map(|a| a.processID())
+            .collect()
+    }
+}
+
+/// Points → pixels on the main display (2 on Retina screens).
+fn backing_scale(display: &SCDisplay) -> f64 {
+    let (w, _, _) = main_display_mode();
+    // SAFETY: plain property read.
+    let points = unsafe { display.width() }.max(1) as f64;
+    (w as f64 / points).clamp(1.0, 4.0)
+}
+
+/// The filter for `target` and its size in pixels (`None`: the screen's).
+fn filter_for(
+    target: &ShareTarget,
+    display: &SCDisplay,
+) -> Result<(Retained<SCContentFilter>, Option<(usize, usize)>)> {
+    // SAFETY: standard ScreenCaptureKit object setup on live objects.
+    unsafe {
+        match target {
+            ShareTarget::Screen => Ok((
+                SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), display, &NSArray::new()),
+                None,
+            )),
+            ShareTarget::App { id, name } => {
+                let content = content(false)?;
+                let apps: Vec<Retained<SCRunningApplication>> =
+                    content.applications().iter().filter(|a| a.bundleIdentifier().to_string() == *id).collect();
+                if apps.is_empty() {
+                    return Err(PlatformError::Unavailable(format!("{name} is not open")));
+                }
+                let apps = NSArray::from_retained_slice(&apps);
+                Ok((
+                    SCContentFilter::initWithDisplay_includingApplications_exceptingWindows(
+                        SCContentFilter::alloc(),
+                        display,
+                        &apps,
+                        &NSArray::new(),
+                    ),
+                    None,
+                ))
+            }
+            ShareTarget::Window { id, title, .. } => {
+                let content = content(false)?;
+                let window = content
+                    .windows()
+                    .iter()
+                    .find(|w| u64::from(w.windowID()) == *id)
+                    .ok_or_else(|| PlatformError::Unavailable(format!("the window \"{title}\" was closed")))?;
+                let f = window.frame();
+                let scale = backing_scale(display);
+                let size = ((f.size.width * scale) as usize & !1, (f.size.height * scale) as usize & !1);
+                Ok((SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window), Some(size)))
+            }
+        }
+    }
+}
+
+/// `src` shrunk to fit `max` (keeping its shape), even sizes.
+fn fit(src: (usize, usize), max: Option<Resolution>) -> (usize, usize) {
+    let r = Resolution::new(src.0 as u32, src.1 as u32);
+    let r = max.map_or(r, |m| aa_core::capability::fit_within(r, m));
+    ((r.width as usize & !1).max(2), (r.height as usize & !1).max(2))
+}
+
+/// The main display as ScreenCaptureKit knows it (asked asynchronously).
+pub(super) fn main_display() -> Result<Retained<SCDisplay>> {
+    let content = content(false)?;
     let main_id = CGMainDisplayID();
     // SAFETY: plain property reads on live objects.
     let displays = unsafe { content.displays() };
@@ -187,11 +324,12 @@ impl SckCapture {
         let display = main_display()?;
 
         let (mut w, mut h, refresh_hz) = main_display_mode();
-        // Fast gaming monitors report 144 or 200 Hz. Encoding that many
-        // frames gives each one a sliver of the bitrate (the encoder then
-        // dropped frames: blur and freezes) and squeezes each frame's packets
-        // into a few ms (bursts the Wi-Fi lost). 60 is plenty for a desktop.
-        let max_fps: u16 = std::env::var("AA_MAC_MAX_FPS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+        // Capture as fast as the screen refreshes (up to 240). How many of
+        // those frames are sent is the frame-rate ladder's call (it starts
+        // at 60 and climbs only while the connection carries every frame
+        // sharp); 0.4.6 capped this at 60 for everyone because 200 frames
+        // a second at a fixed bitrate made each one blurry and froze Wi-Fi.
+        let max_fps: u16 = std::env::var("AA_MAC_MAX_FPS").ok().and_then(|v| v.parse().ok()).unwrap_or(240);
         let refresh_hz = refresh_hz.min(max_fps.max(1));
         let max_w = std::env::var("AA_MAC_MAX_WIDTH").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_MAX_WIDTH);
         if w > max_w {
@@ -255,7 +393,42 @@ impl SckCapture {
             resolution: Resolution::new(w as u32, h as u32),
             refresh_hz,
             started: Instant::now(),
+            screen: (w, h),
+            share: ShareTarget::Screen,
+            source: (w, h),
+            max: None,
+            display,
         })
+    }
+
+    /// Change the stream's picture size (what the viewer gets).
+    fn resize(&mut self) -> Result<()> {
+        let (w, h) = fit(self.source, self.max);
+        // SAFETY: configuring our own live stream.
+        unsafe {
+            let config = SCStreamConfiguration::new();
+            config.setWidth(w);
+            config.setHeight(h);
+            config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+            config.setColorMatrix(kCVImageBufferYCbCrMatrix_ITU_R_709_2);
+            config.setMinimumFrameInterval(CMTime::new(1, i32::from(self.refresh_hz)));
+            config.setShowsCursor(false);
+            config.setQueueDepth(4);
+            config.setScalesToFit(true);
+            // One window: no drop shadow around it (it would be sent too).
+            config.setIgnoreShadowsSingleWindow(true);
+            let done = wait(|tx| {
+                let block = RcBlock::new(move |error: *mut NSError| {
+                    let _ = tx.send(if error.is_null() { Ok(()) } else { Err(ns_err("resizing the capture", error)) });
+                });
+                self.stream.updateConfiguration_completionHandler(&config, Some(&block));
+            })
+            .ok_or_else(|| PlatformError::Unavailable("screen capture did not answer".into()))?;
+            done?;
+        }
+        self.resolution = Resolution::new(w as u32, h as u32);
+        tracing::info!(width = w, height = h, "capture size");
+        Ok(())
     }
 }
 
@@ -293,5 +466,35 @@ impl ScreenCapture for SckCapture {
 
     fn refresh_rate_hz(&self) -> u16 {
         self.refresh_hz
+    }
+
+    fn set_share(&mut self, target: &ShareTarget) -> Result<()> {
+        let (filter, size) = filter_for(target, &self.display)?;
+        // SAFETY: updating our own live stream.
+        let done = wait(|tx| {
+            let block = RcBlock::new(move |error: *mut NSError| {
+                let _ = tx.send(if error.is_null() { Ok(()) } else { Err(ns_err("changing what is shared", error)) });
+            });
+            unsafe { self.stream.updateContentFilter_completionHandler(&filter, Some(&block)) };
+        })
+        .ok_or_else(|| PlatformError::Unavailable("screen capture did not answer".into()))?;
+        done?;
+        self.share = target.clone();
+        self.source = size.unwrap_or(self.screen);
+        self.resize()
+    }
+
+    fn set_max_size(&mut self, max: Option<Resolution>) {
+        if max == self.max {
+            return;
+        }
+        self.max = max;
+        if let Err(e) = self.resize() {
+            tracing::warn!("could not change the picture size: {e}");
+        }
+    }
+
+    fn scales_itself(&self) -> bool {
+        true
     }
 }

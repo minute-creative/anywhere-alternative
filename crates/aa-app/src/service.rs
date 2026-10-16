@@ -373,7 +373,8 @@ fn blackhole_url() -> String {
 pub fn install_addons() -> anyhow::Result<()> {
     let path = aa_platform::trust::user_dir().join("addons.ps1");
     std::fs::write(&path, include_str!("../../../packaging/windows/addons.ps1"))?;
-    let params = format!("-NoProfile -ExecutionPolicy Bypass -File \"{}\" controllers mic tailscale", path.display());
+    let params =
+        format!("-NoProfile -ExecutionPolicy Bypass -File \"{}\" controllers mic tailscale hevc", path.display());
     let r = aa_platform::windows::session::run_elevated("powershell.exe", &params);
     let _ = std::fs::remove_file(&path);
     r.map(|_| ())

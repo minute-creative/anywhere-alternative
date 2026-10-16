@@ -101,6 +101,7 @@ impl AudioOutput {
 }
 
 pub struct SckAudio {
+    display: Retained<objc2_screen_capture_kit::SCDisplay>,
     stream: Retained<SCStream>,
     _output: Retained<AudioOutput>,
     _queue: dispatch2::DispatchRetained<DispatchQueue>,
@@ -162,7 +163,7 @@ impl SckAudio {
         .ok_or_else(|| PlatformError::Unavailable("audio capture did not start".into()))?;
         started?;
         tracing::info!("system audio: ScreenCaptureKit (48 kHz stereo)");
-        Ok(Self { stream, _output: output, _queue: queue, chunks, pending: VecDeque::new() })
+        Ok(Self { display, stream, _output: output, _queue: queue, chunks, pending: VecDeque::new() })
     }
 }
 
@@ -173,7 +174,70 @@ impl Drop for SckAudio {
     }
 }
 
+impl SckAudio {
+    /// Only these apps' sound (`None`: everything but us).
+    fn filter(&self, bundle: Option<&str>) -> Result<Retained<SCContentFilter>> {
+        // SAFETY: ScreenCaptureKit object setup on live objects.
+        unsafe {
+            let Some(bundle) = bundle else {
+                return Ok(SCContentFilter::initWithDisplay_excludingWindows(
+                    SCContentFilter::alloc(),
+                    &self.display,
+                    &NSArray::new(),
+                ));
+            };
+            let content = super::capture::content(false)?;
+            let apps: Vec<_> =
+                content.applications().iter().filter(|a| a.bundleIdentifier().to_string() == bundle).collect();
+            if apps.is_empty() {
+                return Err(PlatformError::Unavailable(format!("{bundle} is not open")));
+            }
+            Ok(SCContentFilter::initWithDisplay_includingApplications_exceptingWindows(
+                SCContentFilter::alloc(),
+                &self.display,
+                &NSArray::from_retained_slice(&apps),
+                &NSArray::new(),
+            ))
+        }
+    }
+}
+
+/// The app a window belongs to (bundle id), for its sound.
+fn window_app(id: u64) -> Option<String> {
+    let content = super::capture::content(false).ok()?;
+    // SAFETY: property reads on live objects.
+    unsafe {
+        let w = content.windows().iter().find(|w| u64::from(w.windowID()) == id)?;
+        Some(w.owningApplication()?.bundleIdentifier().to_string())
+    }
+}
+
 impl AudioCapture for SckAudio {
+    fn set_share(&mut self, target: &aa_core::share::ShareTarget) -> Result<bool> {
+        use aa_core::share::ShareTarget;
+        let bundle = match target {
+            ShareTarget::Screen => None,
+            ShareTarget::App { id, .. } => Some(id.clone()),
+            ShareTarget::Window { id, .. } => {
+                Some(window_app(*id).ok_or_else(|| PlatformError::Unavailable("that window was closed".into()))?)
+            }
+        };
+        let filter = self.filter(bundle.as_deref())?;
+        let done = wait(|tx| {
+            let block = RcBlock::new(move |error: *mut NSError| {
+                let _ =
+                    tx.send(if error.is_null() { Ok(()) } else { Err(ns_err("changing whose sound is sent", error)) });
+            });
+            // SAFETY: updating our own live stream; the block is copied by the call.
+            unsafe { self.stream.updateContentFilter_completionHandler(&filter, Some(&block)) };
+        })
+        .ok_or_else(|| PlatformError::Unavailable("audio capture did not answer".into()))?;
+        done?;
+        self.pending.clear();
+        tracing::info!(app = bundle.as_deref().unwrap_or("everything"), "sound: only from");
+        Ok(true)
+    }
+
     fn next_frame(&mut self, pcm: &mut [i16]) -> Result<bool> {
         while self.pending.len() < FRAME_LEN_I16 {
             match self.chunks.recv_timeout(Duration::from_millis(100)) {

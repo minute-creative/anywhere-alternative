@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 pub mod audio;
+pub mod av1;
 pub mod capability;
 pub mod clipboard;
 pub mod config;
@@ -24,7 +25,9 @@ pub mod control;
 pub mod control_flow;
 pub mod ds5;
 pub mod input;
+pub mod quality;
 pub mod secure;
+pub mod share;
 pub mod stats;
 pub mod video;
 pub mod wire;

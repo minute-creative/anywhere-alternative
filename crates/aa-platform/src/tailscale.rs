@@ -78,6 +78,35 @@ fn query() -> Option<Vec<Peer>> {
     parse_status(&out.stdout)
 }
 
+/// Does the connection to `ip` go through Tailscale's relay servers
+/// ("DERP") instead of straight between the computers? `None`: unknown
+/// (Tailscale not installed, or that address isn't one of your computers).
+pub fn is_relayed(ip: IpAddr) -> Option<bool> {
+    let mut cmd = std::process::Command::new(cli()?);
+    cmd.args(["status", "--json"]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().ok()?;
+    relayed_in_status(&out.stdout, ip)
+}
+
+/// The relay question, answered from `tailscale status --json`: a peer
+/// with no direct address (`CurAddr` empty) but a relay region is relayed.
+pub fn relayed_in_status(json: &[u8], ip: IpAddr) -> Option<bool> {
+    let v: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let peer = v.get("Peer")?.as_object()?.values().find(|p| {
+        p.get("TailscaleIPs")
+            .and_then(|a| a.as_array())
+            .is_some_and(|a| a.iter().any(|x| x.as_str().and_then(|s| s.parse::<IpAddr>().ok()) == Some(ip)))
+    })?;
+    let direct = peer.get("CurAddr").and_then(|c| c.as_str()).is_some_and(|c| !c.is_empty());
+    let relay = peer.get("Relay").and_then(|c| c.as_str()).is_some_and(|c| !c.is_empty());
+    Some(!direct && relay)
+}
+
 /// Read `tailscale status --json`.
 pub fn parse_status(json: &[u8]) -> Option<Vec<Peer>> {
     let v: serde_json::Value = serde_json::from_slice(json).ok()?;
@@ -101,6 +130,16 @@ pub fn parse_status(json: &[u8]) -> Option<Vec<Peer>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tells_direct_from_relayed() {
+        let json = br#"{"Peer":{
+            "a":{"TailscaleIPs":["100.101.1.2"],"CurAddr":"203.0.113.5:41641","Relay":"blr"},
+            "b":{"TailscaleIPs":["100.90.0.9"],"CurAddr":"","Relay":"blr"}}}"#;
+        assert_eq!(relayed_in_status(json, "100.101.1.2".parse().unwrap()), Some(false));
+        assert_eq!(relayed_in_status(json, "100.90.0.9".parse().unwrap()), Some(true));
+        assert_eq!(relayed_in_status(json, "100.1.1.1".parse().unwrap()), None);
+    }
 
     #[test]
     fn reads_tailscale_status() {

@@ -25,6 +25,10 @@ pub enum ViewerCommand {
     SetHostMute(bool),
     /// User toggled "send my microphone to the PC".
     SetMic(bool),
+    /// Full access: ask the host what it could share.
+    ShareList,
+    /// Full access: show this on the host instead.
+    SetShare(aa_core::share::ShareTarget),
     /// The window closed; send `Bye` and exit.
     Quit,
 }
@@ -77,4 +81,35 @@ pub fn host_is_mac() -> bool {
 
 pub fn command_channel() -> (mpsc::Sender<ViewerCommand>, mpsc::Receiver<ViewerCommand>) {
     mpsc::channel(1024)
+}
+
+/// What the host told us about the stream, for the corner display and the
+/// settings panel. Written by the session, read by the window each frame.
+#[derive(Debug, Clone, Default)]
+pub struct HostInfo {
+    pub codec: Option<aa_core::video::Codec>,
+    /// Frames a second the host is aiming for (the connection decides).
+    pub target_fps: u16,
+    pub target_kbps: u32,
+    /// What is shown ("Whole screen", "Safari").
+    pub sharing: String,
+    /// We may choose what is shared.
+    pub full_access: bool,
+    /// The host's list of apps and windows (asked for from the panel).
+    pub shareables: Vec<aa_core::share::ShareTarget>,
+    /// Things worth knowing that cost quality ("picture is going through
+    /// Tailscale's relay").
+    pub notes: Vec<String>,
+}
+
+static INFO: Mutex<Option<HostInfo>> = Mutex::new(None);
+
+pub fn host_info() -> HostInfo {
+    INFO.lock().ok().and_then(|i| i.clone()).unwrap_or_default()
+}
+
+pub fn update_host_info(f: impl FnOnce(&mut HostInfo)) {
+    if let Ok(mut i) = INFO.lock() {
+        f(i.get_or_insert_with(HostInfo::default));
+    }
 }

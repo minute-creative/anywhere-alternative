@@ -242,6 +242,7 @@ fn bitrate_controller_stays_in_bounds_whatever_it_is_told() {
                 frames_abandoned: r.below(300) as u16,
                 frames_received: r.below(300) as u16,
                 rtt_tenths_ms: if r.chance(5) { 0 } else { r.below(65_535) as u16 },
+                last_good_frame: None,
             };
             c.on_report(&rep);
             if r.chance(1) {

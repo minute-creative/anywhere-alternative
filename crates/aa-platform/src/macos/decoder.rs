@@ -28,10 +28,11 @@ use std::ptr::{self, NonNull};
 
 use aa_core::video::{Codec, PixelFormat, Resolution};
 use bytes::Bytes;
-use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString};
+use objc2_core_foundation::{CFData, CFDictionary, CFNumber, CFRetained, CFString};
 use objc2_core_media::{
     kCMBlockBufferAssureMemoryNowFlag, kCMFormatDescriptionExtension_FullRangeVideo,
-    kCMFormatDescriptionExtension_YCbCrMatrix, CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime,
+    kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms, kCMFormatDescriptionExtension_YCbCrMatrix,
+    kCMVideoCodecType_AV1, CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime, CMVideoFormatDescriptionCreate,
     CMVideoFormatDescriptionCreateFromH264ParameterSets, CMVideoFormatDescriptionCreateFromHEVCParameterSets,
 };
 use objc2_core_video::{
@@ -41,7 +42,14 @@ use objc2_core_video::{
 };
 use objc2_video_toolbox::{
     VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord, VTDecompressionSession,
+    VTIsHardwareDecodeSupported,
 };
+
+/// Can this Mac decode AV1 in hardware (M3 and later)?
+pub fn av1_supported() -> bool {
+    // SAFETY: a plain query.
+    unsafe { VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) }
+}
 
 use crate::{DecodedFrame, FrameBuffer, PlatformError, Result, VideoDecoder};
 
@@ -190,8 +198,8 @@ impl std::fmt::Debug for VtDecoder {
 
 impl VtDecoder {
     pub fn new(codec: Codec) -> Result<Self> {
-        if !matches!(codec, Codec::H264 | Codec::Hevc) {
-            return Err(PlatformError::Unavailable(format!("VideoToolbox: unsupported codec {codec:?}")));
+        if codec == Codec::Av1 && !av1_supported() {
+            return Err(PlatformError::Unavailable("this Mac has no AV1 decoder (M3 and later do)".into()));
         }
         Ok(Self {
             codec,
@@ -238,7 +246,45 @@ impl VtDecoder {
         }
         // SAFETY: a successful Create returns a +1 reference we now own.
         let format = unsafe { CFRetained::from_raw(NonNull::new(fmt_out.cast_mut()).expect("format")) };
+        self.start_session(format, sets)
+    }
 
+    /// AV1: the stream description is built from the sequence header.
+    fn configure_av1(&mut self, seq_obu: &[u8]) -> Result<()> {
+        let parts = aa_core::av1::obus(seq_obu);
+        let info = parts
+            .first()
+            .and_then(|o| aa_core::av1::parse_sequence_header(o.payload))
+            .ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("unreadable AV1 sequence header")))?;
+        let av1c = CFData::from_bytes(&aa_core::av1::av1c(seq_obu, &info));
+        let atom_key = CFString::from_static_str("av1C");
+        let atoms: CFRetained<CFDictionary<CFString, CFData>> = CFDictionary::from_slices(&[&*atom_key], &[&*av1c]);
+        // SAFETY: static key from CoreMedia.
+        let key: &CFString = unsafe { kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms };
+        let ext: CFRetained<CFDictionary<CFString, CFDictionary<CFString, CFData>>> =
+            CFDictionary::from_slices(&[key], &[&*atoms]);
+        let mut fmt_out: *const CMFormatDescription = ptr::null();
+        // SAFETY: valid dictionary; out-pointer is a local.
+        let status = unsafe {
+            CMVideoFormatDescriptionCreate(
+                None,
+                kCMVideoCodecType_AV1,
+                info.width as i32,
+                info.height as i32,
+                Some(ext.as_opaque()),
+                NonNull::from(&mut fmt_out),
+            )
+        };
+        if status != 0 {
+            return Err(os_err(status, "CMVideoFormatDescriptionCreate(AV1)"));
+        }
+        tracing::info!(width = info.width, height = info.height, level = info.level, "AV1 stream");
+        // SAFETY: +1 reference from a successful Create.
+        let format = unsafe { CFRetained::from_raw(NonNull::new(fmt_out.cast_mut()).expect("format")) };
+        self.start_session(format, vec![seq_obu.to_vec()])
+    }
+
+    fn start_session(&mut self, format: CFRetained<CMFormatDescription>, sets: Vec<Vec<u8>>) -> Result<()> {
         // Ask for BGRA so the window can upload it directly.
         let fmt_num = CFNumber::new_i32(kCVPixelFormatType_32BGRA as i32);
         // SAFETY: the key is a valid static CFString provided by CoreVideo.
@@ -298,6 +344,15 @@ impl VtDecoder {
 
 impl VideoDecoder for VtDecoder {
     fn decode(&mut self, frame_id: u32, data: &Bytes) -> Result<Option<DecodedFrame>> {
+        if self.codec == Codec::Av1 {
+            if let Some(seq) = aa_core::av1::sequence_header(data) {
+                if self.param_sets.first().map(Vec::as_slice) != Some(seq) {
+                    self.configure_av1(seq)?;
+                }
+            }
+            self.avcc = aa_core::av1::without_delimiters(data);
+            return self.submit(frame_id);
+        }
         let nals = split_nals(data);
         let mut sets: Vec<Vec<u8>> = Vec::new();
         self.avcc.clear();
@@ -316,6 +371,13 @@ impl VideoDecoder for VtDecoder {
             sets.sort_by_key(|s| nal_type(self.codec, s));
             self.configure(sets)?;
         }
+        self.submit(frame_id)
+    }
+}
+
+impl VtDecoder {
+    /// Decode what is in `self.avcc` (one frame, in the decoder's format).
+    fn submit(&mut self, frame_id: u32) -> Result<Option<DecodedFrame>> {
         let Some(session) = self.session.as_ref() else {
             // No parameter sets seen yet: nothing to decode against. The
             // viewer's keyframe gate asks the host for one.

@@ -23,6 +23,102 @@ use objc2_core_graphics::{
 
 use crate::hid_mac::{hid_to_mac_keycode, modifier_flag, ClickCounter};
 use crate::{InputInjector, Result};
+use aa_core::share::ShareTarget;
+use std::time::{Duration, Instant};
+
+use super::wininfo::{self, WinInfo};
+
+/// Keeping a viewer inside one shared app or window.
+struct Limit {
+    target: ShareTarget,
+    /// The app's processes.
+    pids: Vec<i32>,
+    pids_at: Instant,
+    /// The window list, refreshed every few hundred ms.
+    windows: Vec<WinInfo>,
+    windows_at: Instant,
+    /// Buttons whose press was dropped (so their release is dropped too).
+    dropped_buttons: u8,
+    /// Keys whose press was dropped.
+    dropped_keys: Vec<u16>,
+}
+
+impl Limit {
+    fn new(target: &ShareTarget) -> Self {
+        let mut l = Self {
+            target: target.clone(),
+            pids: Vec::new(),
+            pids_at: Instant::now() - Duration::from_secs(60),
+            windows: Vec::new(),
+            windows_at: Instant::now() - Duration::from_secs(60),
+            dropped_buttons: 0,
+            dropped_keys: Vec::new(),
+        };
+        l.refresh();
+        l
+    }
+
+    fn refresh(&mut self) {
+        if self.windows_at.elapsed() > Duration::from_millis(300) {
+            self.windows = wininfo::on_screen();
+            self.windows_at = Instant::now();
+        }
+        if self.pids_at.elapsed() > Duration::from_secs(2) {
+            self.pids = match &self.target {
+                ShareTarget::App { id, .. } => super::capture::app_pids(id),
+                ShareTarget::Window { id, .. } => {
+                    self.windows.iter().filter(|w| u64::from(w.id) == *id).map(|w| w.pid).collect()
+                }
+                ShareTarget::Screen => Vec::new(),
+            };
+            self.pids_at = Instant::now();
+        }
+    }
+
+    /// The shared window's place on screen (window sharing only).
+    fn window(&mut self) -> Option<WinInfo> {
+        let ShareTarget::Window { id, .. } = self.target else { return None };
+        self.refresh();
+        self.windows.iter().copied().find(|w| u64::from(w.id) == id)
+    }
+
+    /// Would a click at this point land in the shared app?
+    fn allows_point(&mut self, x: f64, y: f64) -> bool {
+        self.refresh();
+        wininfo::at(&self.windows, x, y).is_some_and(|w| self.pids.contains(&w.pid))
+    }
+
+    /// Is the shared app the one in front (so typing goes to it)?
+    fn allows_keys(&mut self) -> bool {
+        self.refresh();
+        wininfo::front_pid(&self.windows).is_some_and(|p| self.pids.contains(&p))
+    }
+}
+
+/// Shortcuts that would leave the shared app or show the rest of the Mac:
+/// app switcher, Spotlight, Force Quit, Mission Control and Spaces,
+/// screenshots, lock screen. (HID usage of the key, modifier flags that
+/// must all be held.)
+fn escapes_the_app(usage: u16, flags: u64) -> bool {
+    const CMD: u64 = 0x10_0000;
+    const OPT: u64 = 0x8_0000;
+    const CTRL: u64 = 0x4_0000;
+    const SHIFT: u64 = 0x2_0000;
+    let has = |m: u64| flags & m == m;
+    match usage {
+        0x2B => has(CMD) || has(CTRL),   // Tab: app switcher (Ctrl+Tab moves focus areas)
+        0x35 => has(CMD),                // ` : next window of an app (harmless) / switcher
+        0x2C => has(CMD) || has(CTRL),   // Space: Spotlight, input sources
+        0x29 => has(CMD | OPT),          // Esc: Force Quit
+        0x4F..=0x52 => has(CTRL),        // arrows: Spaces, Mission Control
+        0x3C | 0x3D => true,             // F3 Mission Control, F4 Launchpad
+        0x20..=0x22 => has(CMD | SHIFT), // 3, 4, 5: screenshots
+        0x14 => has(CMD | CTRL),         // Q: lock screen
+        0x07 => has(CMD | OPT) || has(CMD | CTRL), // D: Dock, Dictionary
+        0x0B => has(CMD | OPT),          // H: hide all other apps
+        _ => false,
+    }
+}
 
 // Quartz event types (CGEventTypes.h).
 const LEFT_DOWN: u32 = 1;
@@ -128,6 +224,7 @@ pub struct MacInput {
     /// Keys held, so modifier flags and `ReleaseAll` are right.
     keys: Vec<u16>,
     clicks: ClickCounter,
+    limit: Option<Limit>,
 }
 
 // SAFETY: the event source is an immutable CF object only used from the
@@ -167,6 +264,7 @@ impl MacInput {
                 }
                 c
             },
+            limit: None,
         })
     }
 
@@ -208,9 +306,53 @@ impl MacInput {
     }
 
     fn clamp_to_screen(&mut self) {
+        // Sharing one window: the pointer stays inside it.
+        if let Some(w) = self.limit.as_mut().and_then(Limit::window) {
+            self.x = self.x.clamp(w.x, w.x + w.w - 1.0);
+            self.y = self.y.clamp(w.y, w.y + w.h - 1.0);
+            return;
+        }
         let b = CGDisplayBounds(CGMainDisplayID());
         self.x = self.x.clamp(b.origin.x, b.origin.x + b.size.width - 1.0);
         self.y = self.y.clamp(b.origin.y, b.origin.y + b.size.height - 1.0);
+    }
+
+    /// Sharing one app: may this press go through? Releases follow their press.
+    fn button_allowed(&mut self, bit: u8, pressed: bool) -> bool {
+        let (x, y) = (self.x, self.y);
+        let Some(l) = self.limit.as_mut() else { return true };
+        if pressed {
+            let ok = l.allows_point(x, y);
+            if !ok {
+                l.dropped_buttons |= bit;
+            }
+            ok
+        } else if l.dropped_buttons & bit != 0 {
+            l.dropped_buttons &= !bit;
+            false
+        } else {
+            true
+        }
+    }
+
+    fn key_allowed(&mut self, usage: u16, pressed: bool) -> bool {
+        let flags = self.flags();
+        let Some(l) = self.limit.as_mut() else { return true };
+        if modifier_flag(usage).is_some() {
+            return true; // modifiers alone do nothing; keep their state right
+        }
+        if pressed {
+            let ok = l.allows_keys() && !escapes_the_app(usage, flags);
+            if !ok && !l.dropped_keys.contains(&usage) {
+                l.dropped_keys.push(usage);
+            }
+            ok
+        } else if l.dropped_keys.contains(&usage) {
+            l.dropped_keys.retain(|k| *k != usage);
+            false
+        } else {
+            true
+        }
     }
 
     fn button(&mut self, button: MouseButton, pressed: bool) {
@@ -229,6 +371,9 @@ impl MacInput {
             (_, true) => OTHER_DOWN,
             (_, false) => OTHER_UP,
         };
+        if !self.button_allowed(bit, pressed) {
+            return;
+        }
         let count = if pressed { self.clicks.press(bit, self.x, self.y) } else { self.clicks.current() };
         if pressed {
             self.buttons |= bit;
@@ -254,6 +399,9 @@ impl MacInput {
             return;
         }
         let Some(code) = hid_to_mac_keycode(usage) else { return };
+        if !self.key_allowed(usage, pressed) {
+            return;
+        }
         if pressed {
             if !self.keys.contains(&usage) {
                 self.keys.push(usage);
@@ -271,7 +419,13 @@ impl MacInput {
         self.post(&ev);
     }
 
-    fn scroll(&self, dx: i16, dy: i16) {
+    fn scroll(&mut self, dx: i16, dy: i16) {
+        let (x, y) = (self.x, self.y);
+        if let Some(l) = self.limit.as_mut() {
+            if !l.allows_point(x, y) {
+                return;
+            }
+        }
         // From a PC mouse wheel the values are whole notches (120 each):
         // scroll by lines like a Mac mouse wheel. From a trackpad they are
         // pixels: scroll by pixels so it stays smooth.
@@ -306,9 +460,16 @@ impl InputInjector for MacInput {
     fn inject(&mut self, event: InputEvent) -> Result<()> {
         match event {
             InputEvent::MouseMoveAbs { x, y } => {
-                let b = CGDisplayBounds(CGMainDisplayID());
-                let nx = b.origin.x + f64::from(x) / 65535.0 * b.size.width;
-                let ny = b.origin.y + f64::from(y) / 65535.0 * b.size.height;
+                // The picture is the shared window when sharing one; else the screen.
+                let (ox, oy, w, h) = match self.limit.as_mut().and_then(Limit::window) {
+                    Some(win) => (win.x, win.y, win.w, win.h),
+                    None => {
+                        let b = CGDisplayBounds(CGMainDisplayID());
+                        (b.origin.x, b.origin.y, b.size.width, b.size.height)
+                    }
+                };
+                let nx = ox + f64::from(x) / 65535.0 * w;
+                let ny = oy + f64::from(y) / 65535.0 * h;
                 let (dx, dy) = (nx - self.x, ny - self.y);
                 self.x = nx;
                 self.y = ny;
@@ -329,5 +490,13 @@ impl InputInjector for MacInput {
             _ => {}
         }
         Ok(())
+    }
+
+    fn set_limit(&mut self, limit: Option<&ShareTarget>) {
+        self.limit = limit.filter(|t| !t.is_screen()).map(Limit::new);
+        match limit {
+            Some(t) if !t.is_screen() => tracing::info!(app = t.label(), "the viewer can only use the shared app"),
+            _ => tracing::info!("the viewer can use the whole Mac"),
+        }
     }
 }

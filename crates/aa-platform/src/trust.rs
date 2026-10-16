@@ -246,6 +246,10 @@ pub struct PairedViewer {
     pub key: String,
     #[serde(default)]
     pub added: u64,
+    /// "Full access": this computer may choose what is shared and always
+    /// has full control, even while the person here shares only one app.
+    #[serde(default)]
+    pub full_access: bool,
 }
 
 fn viewers_file() -> PathBuf {
@@ -269,11 +273,63 @@ pub fn paired_viewer_name(key: &PublicKeyBytes) -> Option<String> {
 pub fn add_paired_viewer(name: &str, key: &PublicKeyBytes) {
     let hex = secure::to_hex(key);
     let mut list = paired_viewers();
+    // Re-pairing keeps the access it had.
+    let full_access = list.iter().any(|v| v.key == hex && v.full_access);
     list.retain(|v| v.key != hex);
-    list.push(PairedViewer { name: name.to_owned(), key: hex, added: now() });
+    list.push(PairedViewer { name: name.to_owned(), key: hex, added: now(), full_access });
     if let Ok(b) = serde_json::to_vec_pretty(&list) {
         if let Err(e) = write_private(&viewers_file(), &b) {
             tracing::warn!("could not save the paired computer: {e}");
+        }
+    }
+}
+
+/// Does this paired computer have "Full access" here?
+pub fn viewer_full_access(key: &PublicKeyBytes) -> bool {
+    let hex = secure::to_hex(key);
+    paired_viewers().iter().any(|v| v.key == hex && v.full_access)
+}
+
+/// Give or take away "Full access" (the Share page's switch).
+pub fn set_viewer_full_access(key_hex: &str, on: bool) {
+    let mut list = paired_viewers();
+    for v in &mut list {
+        if v.key == key_hex {
+            v.full_access = on;
+        }
+    }
+    if let Ok(b) = serde_json::to_vec_pretty(&list) {
+        if let Err(e) = write_private(&viewers_file(), &b) {
+            tracing::warn!("could not save the access change: {e}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What to share (one app, one window, or everything)
+// ---------------------------------------------------------------------------
+
+fn share_file() -> PathBuf {
+    host_dir().join("share.json")
+}
+
+/// What the person at this computer chose to share. Anything but a fresh
+/// choice (the app closed, or never chose) is the whole screen.
+pub fn share_choice() -> aa_core::share::ShareTarget {
+    std::fs::read(share_file())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<aa_core::share::ShareChoice>(&b).ok())
+        .map(|c| c.target_at(now()))
+        .unwrap_or_default()
+}
+
+/// Save (and keep fresh) the choice; the app calls this every half minute
+/// while it is open.
+pub fn save_share_choice(target: &aa_core::share::ShareTarget) {
+    let c = aa_core::share::ShareChoice { target: target.clone(), written: now() };
+    if let Ok(b) = serde_json::to_vec_pretty(&c) {
+        if let Err(e) = write_private(&share_file(), &b) {
+            tracing::warn!("could not save what to share: {e}");
         }
     }
 }

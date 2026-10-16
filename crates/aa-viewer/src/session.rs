@@ -1,7 +1,7 @@
 //! Viewer network loop: handshake, receive video, decode, send input.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -113,6 +113,7 @@ pub async fn run(
     // (either way) used to fail the whole connection on a lossy link. Junk
     // that arrives meanwhile is skipped instead of aborting, and "busy" is
     // retried because the previous viewer may be about to time out.
+    let we_decode_hevc = capabilities.codecs.contains(&aa_core::video::Codec::Hevc);
     let hello = ControlMessage::hello(capabilities);
     let mut buf = vec![0u8; wire::MAX_DATAGRAM * 2];
     let mut said_busy = false;
@@ -128,8 +129,9 @@ pub async fn run(
                         continue;
                     }
                     match ControlMessage::decode(&packet.payload) {
-                        Ok(ControlMessage::Welcome { negotiated, host_os, .. }) => {
+                        Ok(ControlMessage::Welcome { negotiated, host_os, full_access, .. }) => {
                             crate::link::set_host_os(&host_os);
+                            crate::link::update_host_info(|i| i.full_access = full_access);
                             return anyhow::Ok(negotiated);
                         }
                         Ok(ControlMessage::Reject { reason }) if reason.contains("busy") => {
@@ -161,6 +163,14 @@ pub async fn run(
     if !negotiated.gamepad {
         tracing::info!("controllers won't reach the host: it has no virtual controller driver (ViGEmBus on Windows)");
     }
+    crate::link::update_host_info(|i| {
+        i.codec = Some(negotiated.codec);
+        i.notes = quality_notes(negotiated.codec, we_decode_hevc);
+    });
+    for n in crate::link::host_info().notes {
+        tracing::warn!("{n}");
+    }
+    spawn_route_check(host);
     // Now we know the codec, build the decoder for it.
     let decoder = decoder_factory(negotiated.codec)
         .map_err(|e| anyhow::anyhow!("no decoder for negotiated codec {:?}: {e}", negotiated.codec))?;
@@ -172,9 +182,13 @@ pub async fn run(
     // the decode thread skips non-keyframes until one arrives.
     let need_keyframe = Arc::new(AtomicBool::new(true));
     let decoder_wants_key = Arc::clone(&need_keyframe);
+    // The newest frame decoded with nothing missing before it (`u32::MAX`:
+    // none yet). Reported to the host so it can repair losses from there.
+    let last_good = Arc::new(AtomicU32::new(u32::MAX));
+    let decoder_good = Arc::clone(&last_good);
     std::thread::Builder::new()
         .name("aa-decode".into())
-        .spawn(move || decode_thread(decoder, frame_rx, frames.as_ref(), &decoder_wants_key))?;
+        .spawn(move || decode_thread(decoder, frame_rx, frames.as_ref(), &decoder_wants_key, &decoder_good))?;
 
     // --- main loop ---------------------------------------------------------
     let mut reassembler = Reassembler::default();
@@ -303,6 +317,19 @@ pub async fn run(
                             tracing::info!("host said bye");
                             return Ok(());
                         }
+                        Ok(ControlMessage::StreamInfo { fps, kbps, sharing }) => {
+                            crate::link::update_host_info(|i| {
+                                i.target_fps = fps;
+                                i.target_kbps = kbps;
+                                i.sharing = sharing;
+                            });
+                        }
+                        Ok(ControlMessage::Shareables { items, current }) => {
+                            crate::link::update_host_info(|i| {
+                                i.shareables = items;
+                                i.sharing = current.label();
+                            });
+                        }
                         Ok(ControlMessage::HostStatus { message }) if message != last_status => {
                             if let Some(m) = &message {
                                 tracing::info!("host: {m}");
@@ -336,6 +363,10 @@ pub async fn run(
                                         send_control(&socket, &ControlMessage::SetHostMute { muted }, &seq).await?;
                                     }
                                     ViewerCommand::SetMic(on) => set_mic(&mut mic, on),
+                                    ViewerCommand::ShareList => send_control(&socket, &ControlMessage::ShareList, &seq).await?,
+                                    ViewerCommand::SetShare(target) => {
+                                        send_control(&socket, &ControlMessage::SetShare { target }, &seq).await?;
+                                    }
                                     ViewerCommand::Pad(m) => send_pad(&socket, &m, &seq).await?,
                                     ViewerCommand::Quit => {
                                         send_input(&socket, &batch, &seq, negotiated.gamepad).await?;
@@ -360,6 +391,10 @@ pub async fn run(
                         send_control(&socket, &ControlMessage::SetHostMute { muted }, &seq).await?;
                     }
                     Some(ViewerCommand::SetMic(on)) => set_mic(&mut mic, on),
+                    Some(ViewerCommand::ShareList) => send_control(&socket, &ControlMessage::ShareList, &seq).await?,
+                    Some(ViewerCommand::SetShare(target)) => {
+                        send_control(&socket, &ControlMessage::SetShare { target }, &seq).await?;
+                    }
                     Some(ViewerCommand::Pad(m)) => send_pad(&socket, &m, &seq).await?,
                     Some(ViewerCommand::Quit) | None => {
                         tracing::info!("window closed");
@@ -468,6 +503,7 @@ pub async fn run(
                     frames_abandoned: drop_d.min(u64::from(u16::MAX)) as u16,
                     frames_received: u16::try_from(frames_this_second).unwrap_or(u16::MAX),
                     rtt_tenths_ms: (stats.rtt_ms.get().unwrap_or(0.0) * 10.0).clamp(0.0, 65535.0) as u16,
+                    last_good_frame: Some(last_good.load(Ordering::Relaxed)).filter(|&f| f != u32::MAX),
                 };
                 send_report(&socket, &rep, &seq).await?;
                 if let Some(tx) = &stats_tx {
@@ -500,29 +536,38 @@ fn decode_thread(
     mut rx: mpsc::Receiver<CompleteFrame>,
     frames: Option<&FrameSlot>,
     need_keyframe: &AtomicBool,
+    last_good: &AtomicU32,
 ) {
     let mut skipped = 0u32;
     while let Some(frame) = rx.blocking_recv() {
         // A P-frame is useless without the frames before it. After any gap,
-        // wait for a keyframe; feeding the decoder garbage only makes it
-        // report errors for every frame until the next keyframe anyway.
-        if need_keyframe.load(Ordering::Relaxed) && !frame.keyframe {
+        // wait for a keyframe or a repair frame (one built only on a frame we
+        // confirmed we have); feeding the decoder garbage only makes it
+        // report errors for every frame until then anyway.
+        let resumes = frame.keyframe || frame.recovery;
+        if need_keyframe.load(Ordering::Relaxed) && !resumes {
             skipped += 1;
             continue;
         }
-        if frame.keyframe && skipped > 0 {
-            tracing::info!(skipped, frame_id = frame.frame_id, "keyframe arrived; resuming");
+        if resumes && skipped > 0 {
+            let how = if frame.keyframe { "keyframe" } else { "repair frame" };
+            tracing::info!(skipped, frame_id = frame.frame_id, "{how} arrived; resuming");
             skipped = 0;
         }
         match decoder.decode(frame.frame_id, &frame.data) {
             Ok(Some(picture)) => {
                 need_keyframe.store(false, Ordering::Relaxed);
+                last_good.store(frame.frame_id, Ordering::Relaxed);
                 tracing::trace!(frame_id = picture.frame_id, ?picture.resolution, "decoded");
                 if let Some(slot) = frames {
                     slot.publish(picture);
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                if !need_keyframe.load(Ordering::Relaxed) {
+                    last_good.store(frame.frame_id, Ordering::Relaxed);
+                }
+            }
             Err(e) => {
                 tracing::warn!(frame_id = frame.frame_id, "decode failed: {e}; requesting keyframe");
                 need_keyframe.store(true, Ordering::Relaxed);
@@ -622,4 +667,56 @@ fn set_mic(mic: &mut Option<(crate::audio::MicSender, mpsc::Receiver<Bytes>)>, o
     } else if !on {
         *mic = None;
     }
+}
+
+/// Things about this connection that cost picture quality, in plain words.
+fn quality_notes(codec: aa_core::video::Codec, we_decode_hevc: bool) -> Vec<String> {
+    let mut notes = Vec::new();
+    if codec == aa_core::video::Codec::H264 {
+        if we_decode_hevc {
+            notes.push(
+                "The other computer can only send H.264, which needs about 40% more data for the same picture.".into(),
+            );
+        } else if cfg!(target_os = "windows") {
+            notes.push(
+                "This PC is missing Microsoft's HEVC Video Extensions, so the picture uses H.264 and needs about \
+                 40% more data. Install it from the Anywhere app (Add-ons)."
+                    .into(),
+            );
+        }
+    }
+    notes
+}
+
+/// Over Tailscale, check now and then whether the connection goes direct or
+/// through Tailscale's relay servers (slow: a few Mbps, extra delay), and
+/// say so in the corner display while it does.
+fn spawn_route_check(host: SocketAddr) {
+    if !aa_platform::tailscale::is_tailscale_ip(host.ip()) {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("aa-route".into()).spawn(move || {
+        const NOTE: &str = "Tailscale is relaying this connection through its servers (slow). It usually goes \
+                            direct within a minute; if not, a router setting is blocking it: turn on UPnP on the \
+                            router at either end.";
+        let mut said = None;
+        for _ in 0..120 {
+            let relayed = aa_platform::tailscale::is_relayed(host.ip());
+            if relayed != said {
+                match relayed {
+                    Some(true) => tracing::warn!("{NOTE}"),
+                    Some(false) => tracing::info!("Tailscale: direct connection"),
+                    None => {}
+                }
+                crate::link::update_host_info(|i| {
+                    i.notes.retain(|n| n != NOTE);
+                    if relayed == Some(true) {
+                        i.notes.push(NOTE.to_owned());
+                    }
+                });
+                said = relayed;
+            }
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    });
 }

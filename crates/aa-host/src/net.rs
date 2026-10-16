@@ -89,6 +89,12 @@ impl Net {
         aa_platform::trust::paired_viewer_name(&key)
     }
 
+    /// Has whoever is at `addr` been given "Full access" here?
+    pub fn peer_full_access(&self, addr: SocketAddr) -> bool {
+        let Some(key) = self.peers.lock().ok().and_then(|p| p.get(&addr).map(|p| p.viewer)) else { return false };
+        aa_platform::trust::viewer_full_access(&key)
+    }
+
     /// Send one packet: sealed if `to` is a connected computer.
     pub async fn send_to(&self, buf: &[u8], to: SocketAddr) -> std::io::Result<usize> {
         let session = self.peers.lock().ok().and_then(|p| p.get(&to).map(|p| Arc::clone(&p.session)));

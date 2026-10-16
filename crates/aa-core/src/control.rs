@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::capability::{Capabilities, Negotiated};
+use crate::share::ShareTarget;
 use crate::PROTOCOL_VERSION;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24,6 +25,10 @@ pub enum ControlMessage {
         /// hosts, which were all Windows.
         #[serde(default)]
         host_os: String,
+        /// This viewer has "Full access" here: it may pick what is shared
+        /// (see [`ControlMessage::SetShare`]) and always has full control.
+        #[serde(default)]
+        full_access: bool,
     },
     /// Host → viewer: refused, with a human-readable reason.
     Reject { reason: String },
@@ -68,6 +73,23 @@ pub enum ControlMessage {
     /// Host → viewer: why the picture is paused ("the PC is locked…"), or
     /// `None` when it is back. Repeated every few seconds while set.
     HostStatus { message: Option<String> },
+    /// Viewer → host: what could you share? (Full-access viewers only get
+    /// an answer.)
+    ShareList,
+    /// Host → viewer: the apps and windows open there, and what is shown now.
+    Shareables { items: Vec<ShareTarget>, current: ShareTarget },
+    /// Viewer → host: show this instead. Ignored without full access.
+    SetShare { target: ShareTarget },
+    /// Host → viewer, once a second: what the stream is doing right now,
+    /// for the viewer's corner display.
+    StreamInfo {
+        /// Frames per second the host is aiming for (the connection decides).
+        fps: u16,
+        /// Bitrate the host is aiming for.
+        kbps: u32,
+        /// What is being shared.
+        sharing: String,
+    },
 }
 
 impl ControlMessage {
@@ -98,6 +120,8 @@ mod tests {
             color_ranges: vec![ColorRange::Sdr],
             has_gamepad: true,
             can_emulate_gamepad: false,
+            fixed_fps: false,
+            loss_recovery: false,
         };
         let m = ControlMessage::hello(caps);
         assert_eq!(ControlMessage::decode(&m.encode()).unwrap(), m);

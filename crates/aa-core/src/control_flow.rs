@@ -31,28 +31,42 @@ pub struct ReceiverReport {
     pub frames_received: u16,
     /// Smoothed RTT the viewer measured, in tenths of a millisecond.
     pub rtt_tenths_ms: u16,
+    /// The newest frame the viewer decoded with nothing missing before it
+    /// (since its last fresh picture or repair). The host may build repairs
+    /// on any frame up to this one. `None` from older viewers, or while the
+    /// viewer is waiting for a repair.
+    pub last_good_frame: Option<u32>,
 }
 
 impl ReceiverReport {
-    pub const ENCODED_LEN: usize = 8;
+    /// The original report; older hosts read only this much.
+    const BASE_LEN: usize = 8;
+    pub const ENCODED_LEN: usize = 12;
 
     pub fn encode(&self, out: &mut impl BufMut) {
         out.put_u16(self.loss_per_10k);
         out.put_u16(self.frames_abandoned);
         out.put_u16(self.frames_received);
         out.put_u16(self.rtt_tenths_ms);
+        // u32::MAX: "none" (a real frame id gets there after 166 days at 300 fps).
+        out.put_u32(self.last_good_frame.unwrap_or(u32::MAX));
     }
 
     pub fn decode(buf: &mut impl Buf) -> Option<Self> {
-        if buf.remaining() < Self::ENCODED_LEN {
+        if buf.remaining() < Self::BASE_LEN {
             return None;
         }
-        Some(Self {
+        let mut r = Self {
             loss_per_10k: buf.get_u16(),
             frames_abandoned: buf.get_u16(),
             frames_received: buf.get_u16(),
             rtt_tenths_ms: buf.get_u16(),
-        })
+            last_good_frame: None,
+        };
+        if buf.remaining() >= 4 {
+            r.last_good_frame = Some(buf.get_u32()).filter(|&f| f != u32::MAX);
+        }
+        Some(r)
     }
 
     pub fn loss_ratio(&self) -> f64 {
@@ -110,8 +124,13 @@ impl BitrateController {
     const GROW_AFTER: u32 = 2;
     /// Growth per clean second within 80% of the last choke point.
     const GROW_NEAR_CEILING: f64 = 0.02;
-    /// Clean seconds near the old choke point before we stop trusting it.
-    const CEILING_FORGET_AFTER: u32 = 30;
+    /// Where we settle under the last choke point and stay: close enough to
+    /// look sharp, far enough that ordinary wobble doesn't choke it again.
+    /// Steady quality was the owner's choice over chasing the very top.
+    const SETTLE_AT: f64 = 0.9;
+    /// Clean seconds near the old choke point before we stop trusting it
+    /// and try a little higher (the link may have got better).
+    const CEILING_FORGET_AFTER: u32 = 60;
     /// Reports after a cut in which only severe loss cuts again.
     const HOLD_REPORTS: u8 = 1;
     /// After a trim for severe radio loss, reports to wait before another.
@@ -158,6 +177,11 @@ impl BitrateController {
 
     pub fn current_kbps(&self) -> u32 {
         self.current_kbps
+    }
+
+    /// Where the link last choked, if it has (for the viewer's display).
+    pub fn ceiling_kbps(&self) -> Option<u32> {
+        self.ceiling
     }
 
     /// Lower the ceiling (user moved the slider). Takes effect at once.
@@ -249,7 +273,12 @@ impl BitrateController {
                 }
                 let grow = if near_wall { Self::GROW_NEAR_CEILING } else { Self::GROW };
                 let step = (f64::from(self.current_kbps) * grow).max(250.0);
-                (f64::from(self.current_kbps) + step) as u32
+                let next = f64::from(self.current_kbps) + step;
+                match self.ceiling {
+                    // Settled: hold just under the wall rather than creeping into it.
+                    Some(c) => next.min((f64::from(c) * Self::SETTLE_AT).max(f64::from(self.current_kbps))) as u32,
+                    None => next as u32,
+                }
             } else {
                 self.current_kbps
             }
@@ -273,6 +302,7 @@ mod tests {
             frames_abandoned: abandoned,
             frames_received: 60,
             rtt_tenths_ms: if lossy { 400 } else { 50 },
+            last_good_frame: None,
         }
     }
 
@@ -353,6 +383,7 @@ mod tests {
             frames_abandoned: if loss > 0.0 { 9 } else { 0 },
             frames_received: 60,
             rtt_tenths_ms: rtt,
+            last_good_frame: None,
         }
     }
 
@@ -377,7 +408,13 @@ mod tests {
     fn a_big_delay_jump_trims_even_without_loss() {
         let mut c = settled(40_000, 2_000, 80_000);
         // 5 ms quiet RTT, then 120 ms with no loss (the other-room Wi-Fi log).
-        let r = ReceiverReport { loss_per_10k: 0, frames_abandoned: 0, frames_received: 60, rtt_tenths_ms: 1200 };
+        let r = ReceiverReport {
+            loss_per_10k: 0,
+            frames_abandoned: 0,
+            frames_received: 60,
+            rtt_tenths_ms: 1200,
+            last_good_frame: None,
+        };
         assert_eq!(c.on_report(&r), Some(34_000));
         // A small wobble (12 ms) is left alone.
         let mut c = settled(40_000, 2_000, 80_000);
@@ -451,7 +488,7 @@ mod tests {
         let mut c = settled(3_000, 2_000, 4_000);
         assert_eq!(c.on_report(&report(50.0, 20)), Some(2_000));
         assert_eq!(c.on_report(&report(50.0, 20)), None);
-        for _ in 0..40 {
+        for _ in 0..100 {
             c.on_report(&report(0.0, 0));
         }
         assert_eq!(c.current_kbps(), 4_000);

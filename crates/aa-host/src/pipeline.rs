@@ -1,9 +1,12 @@
 //! The capture → encode thread and the input-injection thread.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use aa_core::video::Codec;
+use aa_core::share::ShareTarget;
+use aa_core::video::{Codec, Resolution};
 
 use aa_core::input::InputEvent;
 use aa_platform::{EncodedFrame, InputInjector, PlatformError, ScreenCapture, VideoEncoder, VirtualGamepad};
@@ -30,7 +33,31 @@ pub struct PipelineControl {
     pub shutdown: AtomicBool,
     /// Why the screen can't be shown right now ("PC is locked"), for the
     /// viewer; the network task forwards changes.
-    pub screen_status: std::sync::Mutex<Option<&'static str>>,
+    pub screen_status: Mutex<Option<&'static str>>,
+    /// Frames per second to send (the frame-rate ladder's choice); 0 = as
+    /// many as the screen makes.
+    pub target_fps: AtomicU16,
+    /// Largest picture the viewer wants (its Resolution setting); `None` =
+    /// full size. `max_res_changed` tells the capture thread to apply it.
+    pub max_res: Mutex<Option<Resolution>>,
+    pub max_res_changed: AtomicBool,
+    /// A new choice of what to share, for the capture thread to apply.
+    pub share: Mutex<Option<ShareTarget>>,
+    /// The same, for the sound thread.
+    pub audio_share: Mutex<Option<ShareTarget>>,
+    /// The same, for the input thread: `Some(None)` = whole screen,
+    /// `Some(Some(t))` = keep the viewer inside `t`.
+    #[allow(clippy::option_option)] // "no news" vs "no limit" vs "this limit"
+    pub input_limit: Mutex<Option<Option<ShareTarget>>>,
+    /// Size of the picture actually being sent (after sharing and scaling).
+    pub out_res: Mutex<Option<Resolution>>,
+    /// The viewer can resume from a repair frame (negotiated).
+    pub loss_recovery: AtomicBool,
+    /// The viewer lost something: repair from a long-term reference if the
+    /// encoder can, else send a keyframe.
+    pub recovery: AtomicBool,
+    /// The viewer's newest good frame (`u32::MAX`: no news).
+    pub last_good: AtomicU32,
 }
 
 /// Sentinel for `PipelineControl::codec`: no change requested.
@@ -46,7 +73,17 @@ impl Default for PipelineControl {
             fec_permille: AtomicU32::new((aa_core::wire::FEC_RATIO * 1000.0) as u32),
             codec: AtomicU8::new(NO_CODEC),
             shutdown: AtomicBool::new(false),
-            screen_status: std::sync::Mutex::new(None),
+            screen_status: Mutex::new(None),
+            target_fps: AtomicU16::new(0),
+            max_res: Mutex::new(None),
+            max_res_changed: AtomicBool::new(false),
+            share: Mutex::new(None),
+            audio_share: Mutex::new(None),
+            input_limit: Mutex::new(None),
+            out_res: Mutex::new(None),
+            loss_recovery: AtomicBool::new(false),
+            recovery: AtomicBool::new(false),
+            last_good: AtomicU32::new(u32::MAX),
         }
     }
 }
@@ -91,6 +128,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
     let mut encode_failures = 0u32;
     let mut capture_failures = 0u32;
     let mut current_codec = initial_codec;
+    // What the encoder was built for: picture size and frame rate.
     let mut enc_res = capture.resolution();
     let mut enc_fps = capture.refresh_rate_hz();
     // Last bitrate applied, to give a rebuilt encoder the same target.
@@ -116,6 +154,24 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
     let mut still_since = Instant::now();
     let mut refined = 0u8;
     let mut skipped_in_row = 0u32;
+    // Frame-rate limit: a 200 Hz screen makes 200 pictures a second, but
+    // the connection may only afford 90 at full sharpness (the ladder in
+    // the network task decides). Pictures that come early are held back;
+    // the newest held one goes out when its turn comes, so the last
+    // movement is never lost.
+    let mut next_due = Instant::now();
+    let mut held = false;
+    // Long-term references the viewer hasn't confirmed yet: (wire frame
+    // id, encoder token).
+    let mut ltr_pending: VecDeque<(u32, i64)> = VecDeque::new();
+    // What is shared and how big, so a rebuilt capture gets the same.
+    let mut sharing = ShareTarget::Screen;
+    let mut max_size: Option<Resolution> = None;
+    let mut rebuilt = false;
+    // Sharing just one app failed (it closed, or this computer can't): show
+    // nothing at all rather than the whole screen.
+    let mut share_blocked = false;
+    let mut blocked_retry = Instant::now();
 
     while !ctl.shutdown.load(Ordering::Relaxed) {
         let streaming = ctl.streaming.load(Ordering::Relaxed);
@@ -157,7 +213,43 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
             continue;
         }
 
-        let reason = capture.unavailable_reason();
+        // What to share changed (the person here, or a full-access viewer),
+        // or the capture was rebuilt and must be told again.
+        let new_share = ctl.share.lock().expect("share").take();
+        let retry = share_blocked && blocked_retry.elapsed() > Duration::from_secs(3);
+        if retry {
+            blocked_retry = Instant::now();
+        }
+        let new_share = new_share.or_else(|| (rebuilt || retry).then(|| sharing.clone()));
+        if rebuilt {
+            capture.set_max_size(max_size);
+            rebuilt = false;
+        }
+        if let Some(target) = new_share {
+            sharing = target.clone();
+            match capture.set_share(&target) {
+                Ok(()) => {
+                    tracing::info!(sharing = target.label(), "now sharing");
+                    share_blocked = false;
+                }
+                Err(e) => {
+                    tracing::warn!(sharing = target.label(), "could not share just that ({e}); showing nothing");
+                    share_blocked = !target.is_screen();
+                }
+            }
+            last_frame = None;
+            ctl.force_keyframe.store(true, Ordering::Relaxed);
+        }
+        if ctl.max_res_changed.swap(false, Ordering::Relaxed) {
+            max_size = *ctl.max_res.lock().expect("max res");
+            capture.set_max_size(max_size);
+        }
+
+        let reason = if share_blocked {
+            Some("The chosen app or window can't be shown right now, so nothing is shown")
+        } else {
+            capture.unavailable_reason()
+        };
         if reason != status {
             status = reason;
             if let Some(r) = reason {
@@ -171,12 +263,34 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
             }
         }
 
-        let frame = match capture.next_frame(frame_timeout) {
+        // Frame rate the connection affords, never above what the screen makes.
+        let refresh = capture.refresh_rate_hz().max(1);
+        let target = ctl.target_fps.load(Ordering::Relaxed);
+        let fps_now = if target == 0 { refresh } else { target.min(refresh) };
+        let interval = Duration::from_secs_f64(1.0 / f64::from(fps_now));
+
+        // While a picture is held back, wait only until its turn.
+        let wait =
+            if held { next_due.saturating_duration_since(Instant::now()).min(frame_timeout) } else { frame_timeout };
+        let frame = match capture.next_frame(wait) {
             Ok(Some(f)) => {
                 capture_failures = 0;
                 still_since = Instant::now();
                 refined = 0;
                 last_frame = Some(f.clone());
+                // Early: hold it; a newer picture may replace it before its turn.
+                // (1 ms of slack so a 60 Hz screen isn't cut to 59.)
+                if Instant::now() + Duration::from_millis(1) < next_due {
+                    held = true;
+                    continue;
+                }
+                held = false;
+                f
+            }
+            Ok(None) if held && Instant::now() >= next_due => {
+                // The held picture's turn: nothing newer came.
+                held = false;
+                let Some(f) = last_frame.clone() else { continue };
                 f
             }
             Ok(None) => {
@@ -184,7 +298,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
                 let still = still_since.elapsed();
                 let due =
                     REFINE_AFTER_MS.get(usize::from(refined)).is_some_and(|&ms| still > Duration::from_millis(ms));
-                let Some(mut f) = last_frame.clone().filter(|_| due) else { continue };
+                let Some(mut f) = last_frame.clone().filter(|_| due && !held) else { continue };
                 // Encoders insist on time moving forward between frames.
                 f.capture_ts_us += still.as_micros() as u64;
                 refined += 1;
@@ -192,7 +306,9 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
             }
             Err(PlatformError::DeviceLost(why)) => {
                 tracing::warn!("capture device lost ({why}); rebuilding the video pipeline");
-                rebuild_pipeline(&mut capture, &mut factory, &mut encoder, &mut rebuild, ctl);
+                rebuilt = rebuild_pipeline(&mut capture, &mut factory, &mut encoder, &mut rebuild, ctl);
+                last_frame = None;
+                held = false;
                 continue;
             }
             Err(e) => {
@@ -204,46 +320,100 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
                 if capture_failures >= CAPTURE_GIVE_UP {
                     tracing::warn!("capture keeps failing; rebuilding the video pipeline");
                     capture_failures = 0;
-                    rebuild_pipeline(&mut capture, &mut factory, &mut encoder, &mut rebuild, ctl);
+                    rebuilt = rebuild_pipeline(&mut capture, &mut factory, &mut encoder, &mut rebuild, ctl);
+                    last_frame = None;
+                    held = false;
                 }
                 continue;
             }
         };
+        if share_blocked {
+            continue;
+        }
+        // Keep a steady beat; after a pause, start the beat again from now.
+        let now = Instant::now();
+        next_due = if now > next_due + interval { now + interval } else { next_due + interval };
 
-        // The screen changed size or refresh rate (display settings, a
-        // monitor plugged in, lid closed onto an external screen), or the
-        // encoder was dropped: build one for what the screen is now.
-        let fps_now = capture.refresh_rate_hz();
-        if encoder.is_none() || frame.resolution != enc_res || fps_now != enc_fps {
-            if encoder.is_some() {
-                tracing::info!(res = ?frame.resolution, fps = fps_now, "screen changed; rebuilding encoder");
+        // The size we send: the picture as captured, fitted inside the
+        // viewer's Resolution setting when the capture doesn't scale itself.
+        let out_res = match *ctl.max_res.lock().expect("max res") {
+            Some(max) if !capture.scales_itself() => aa_core::capability::fit_within(frame.resolution, max),
+            _ => frame.resolution,
+        };
+        *ctl.out_res.lock().expect("out res") = Some(out_res);
+
+        // The frame rate changed: tell the encoder (a Mac does that on the
+        // fly; a PC encoder is rebuilt at the new rate).
+        if fps_now != enc_fps {
+            if let Some(enc) = encoder.as_mut().filter(|_| out_res == enc_res) {
+                if enc.set_frame_rate(fps_now) {
+                    tracing::info!(fps = fps_now, "frame rate changed");
+                    enc_fps = fps_now;
+                } else {
+                    tracing::info!(fps = fps_now, "frame rate changed; new encoder");
+                    encoder = None;
+                }
             }
-            match factory.as_mut().map(|f| f(current_codec, frame.resolution, fps_now)) {
+        }
+
+        // The picture changed size (display settings, sharing one window,
+        // the viewer's setting) or the encoder was dropped: build one for
+        // what we send now.
+        if encoder.is_none() || out_res != enc_res || fps_now != enc_fps {
+            if encoder.is_some() {
+                tracing::info!(res = ?out_res, fps = fps_now, "picture changed; rebuilding encoder");
+            }
+            match factory.as_mut().map(|f| f(current_codec, out_res, fps_now)) {
                 Some(Ok(mut e)) => {
                     if kbps_now != 0 {
                         let _ = e.set_bitrate_kbps(kbps_now);
                     }
                     encoder = Some(e);
-                    enc_res = frame.resolution;
+                    enc_res = out_res;
                     enc_fps = fps_now;
                     encode_failures = 0;
+                    ltr_pending.clear();
                     ctl.force_keyframe.store(true, Ordering::Relaxed);
                 }
                 Some(Err(e)) => {
-                    tracing::error!("could not build an encoder for {:?} @ {fps_now} Hz: {e}", frame.resolution);
+                    tracing::error!("could not build an encoder for {out_res:?} @ {fps_now} fps: {e}");
                     encoder = None;
                     std::thread::sleep(Duration::from_millis(500));
                     continue;
                 }
                 None => {
                     // No factory (fixed pipeline): carry on with what we have.
-                    enc_res = frame.resolution;
+                    enc_res = out_res;
                     enc_fps = fps_now;
                 }
             }
         }
         let Some(enc) = encoder.as_mut() else { continue };
 
+        // The viewer confirmed frames up to `good`: their long-term
+        // references may be built on from now on.
+        let good = ctl.last_good.swap(u32::MAX, Ordering::Relaxed);
+        if good != u32::MAX && !ltr_pending.is_empty() {
+            let mut confirmed = Vec::new();
+            while let Some(&(id, token)) = ltr_pending.front() {
+                if aa_core::wire::is_newer(id, good) {
+                    break;
+                }
+                confirmed.push(token);
+                ltr_pending.pop_front();
+            }
+            if !confirmed.is_empty() {
+                enc.acknowledge(&confirmed);
+            }
+        }
+        if ctl.recovery.swap(false, Ordering::Relaxed) {
+            // Unconfirmed references may be among what was lost: never
+            // build on them.
+            ltr_pending.clear();
+            if !enc.request_recovery() {
+                ctl.intra_refresh.store(true, Ordering::Relaxed);
+            }
+        }
         if ctl.intra_refresh.swap(false, Ordering::Relaxed) {
             if let Err(e) = enc.request_intra_refresh() {
                 tracing::warn!("intra refresh request failed: {e}");
@@ -267,6 +437,16 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
                 skipped_in_row = 0;
                 packet.meta.frame_id = next_frame_id;
                 next_frame_id = next_frame_id.wrapping_add(1);
+                if packet.meta.is_keyframe {
+                    ltr_pending.clear();
+                }
+                if let Some(token) = packet.ltr_token {
+                    ltr_pending.push_back((packet.meta.frame_id, token));
+                    // Bounded: a viewer that never confirms (an old one) mustn't grow this.
+                    while ltr_pending.len() > 64 {
+                        ltr_pending.pop_front();
+                    }
+                }
                 if tx.try_send(packet).is_err() {
                     tracing::debug!("network busy, dropped a frame");
                 }
@@ -287,7 +467,8 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
                 if encode_failures >= ENCODE_GIVE_UP {
                     tracing::warn!("encoder keeps failing; rebuilding the video pipeline");
                     encode_failures = 0;
-                    rebuild_pipeline(&mut capture, &mut factory, &mut encoder, &mut rebuild, ctl);
+                    rebuilt = rebuild_pipeline(&mut capture, &mut factory, &mut encoder, &mut rebuild, ctl);
+                    last_frame = None;
                 } else if encode_failures % ENCODE_REBUILD == 0 {
                     tracing::warn!("encoder keeps failing; building a new one");
                     encoder = None;
@@ -367,11 +548,27 @@ pub fn audio_thread(
     let mut frame_no: u16 = 0;
     let started = std::time::Instant::now();
     let mut failures = 0u32;
+    // Sharing one app on a system that can't separate its sound: send none
+    // rather than everything (nothing should slip out that wasn't chosen).
+    let mut silenced = false;
 
     while !ctl.shutdown.load(Ordering::Relaxed) {
         if !ctl.streaming.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(50));
             continue;
+        }
+        let new_share = ctl.audio_share.lock().expect("audio share").take();
+        if let Some(target) = new_share {
+            silenced = match capture.set_share(&target) {
+                Ok(only_that_app) => !target.is_screen() && !only_that_app,
+                Err(e) => {
+                    tracing::warn!("could not limit the sound to {} ({e})", target.label());
+                    !target.is_screen()
+                }
+            };
+            if silenced {
+                tracing::info!("sound is off while sharing {}: this system can't send one app's sound", target.label());
+            }
         }
         let has_sound = match capture.next_frame(&mut pcm) {
             Ok(s) => s,
@@ -385,7 +582,7 @@ pub fn audio_thread(
             }
         };
         failures = 0;
-        if !has_sound {
+        if !has_sound || silenced {
             // Keep the sequence contiguous so the player doesn't conceal
             // "losses" that were silence; it simply gets nothing to play.
             continue;
@@ -415,8 +612,13 @@ pub fn input_thread(
     mut gamepad: Option<Box<dyn VirtualGamepad>>,
     mut rx: mpsc::Receiver<InputEvent>,
     rumble_tx: &mpsc::Sender<aa_core::input::Rumble>,
+    ctl: &PipelineControl,
 ) {
     loop {
+        // Sharing changed: keep the viewer inside the shared app (or not).
+        if let Some(limit) = ctl.input_limit.lock().expect("limit").take() {
+            injector.set_limit(limit.as_ref());
+        }
         // With virtual controllers, wake every 2 ms to pass on rumble the
         // game sent them; without, just wait for input.
         let ev = if gamepad.is_some() {

@@ -27,6 +27,52 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::hid_scancode::hid_to_scancode;
 use crate::{InputInjector, PlatformError, Result};
+use aa_core::share::ShareTarget;
+
+/// Keeping a viewer inside one shared app or window.
+#[derive(Debug)]
+struct Limit {
+    target: ShareTarget,
+    dropped_buttons: Vec<MouseButton>,
+    dropped_keys: Vec<u16>,
+    /// The shared window's frame on screen, re-read every few hundred ms.
+    frame: Option<(RECT, std::time::Instant)>,
+}
+
+impl Limit {
+    fn window_frame(&mut self) -> Option<RECT> {
+        let ShareTarget::Window { id, .. } = self.target else { return None };
+        if let Some((r, at)) = self.frame {
+            if at.elapsed() < std::time::Duration::from_millis(300) {
+                return Some(r);
+            }
+        }
+        let hwnd = windows::Win32::Foundation::HWND(id as usize as *mut std::ffi::c_void);
+        let r = super::share::frame_of(hwnd)?;
+        self.frame = Some((r, std::time::Instant::now()));
+        Some(r)
+    }
+}
+
+/// HID usages of modifier keys (Ctrl, Shift, Alt, Windows; left and right).
+fn is_modifier(usage: u16) -> bool {
+    (0xE0..=0xE7).contains(&usage)
+}
+
+/// Keys that would leave the shared app or show the rest of the PC: the
+/// Windows key (Start, and every Win+ shortcut), Alt+Tab, Alt+Esc,
+/// Ctrl+Esc, Ctrl+Shift+Esc (Task Manager), Print Screen.
+fn escapes_the_app(usage: u16, held: &[u16]) -> bool {
+    let ctrl = held.iter().any(|k| matches!(k, 0xE0 | 0xE4));
+    let alt = held.iter().any(|k| matches!(k, 0xE2 | 0xE6));
+    match usage {
+        0xE3 | 0xE7 => true, // Windows key
+        0x2B => alt,         // Tab
+        0x29 => alt || ctrl, // Esc
+        0x46 => true,        // Print Screen
+        _ => false,
+    }
+}
 
 #[derive(Debug)]
 pub struct SendInputInjector {
@@ -42,6 +88,7 @@ pub struct SendInputInjector {
     /// Keys (HID usage) and buttons currently down, for `ReleaseAll`.
     held_keys: Vec<u16>,
     held_buttons: Vec<MouseButton>,
+    limit: Option<Limit>,
 }
 
 impl SendInputInjector {
@@ -76,14 +123,25 @@ impl SendInputInjector {
             last_pos: None,
             held_keys: Vec::new(),
             held_buttons: Vec::new(),
+            limit: None,
         })
     }
 
     /// Stream-normalised (0..=65535 over the captured output) → screen pixels.
-    fn to_pixels(&self, x: u16, y: u16) -> (i32, i32) {
+    fn to_pixels(&mut self, x: u16, y: u16) -> (i32, i32) {
         // The captured screen as it is *now*: resolution changes and display
         // switches move it, and a stale rectangle sends clicks to the wrong place.
-        let o = super::capture::current_output_rect().unwrap_or(self.output);
+        let screen = super::capture::current_output_rect().unwrap_or(self.output);
+        // Sharing one window: the picture is that window (cut to the screen).
+        let o = match self.limit.as_mut().and_then(Limit::window_frame) {
+            Some(w) => RECT {
+                left: w.left.max(screen.left),
+                top: w.top.max(screen.top),
+                right: w.right.min(screen.right),
+                bottom: w.bottom.min(screen.bottom),
+            },
+            None => screen,
+        };
         let ow = f64::from(o.right - o.left);
         let oh = f64::from(o.bottom - o.top);
         let px = f64::from(o.left) + f64::from(x) / 65535.0 * ow;
@@ -133,8 +191,65 @@ impl SendInputInjector {
     }
 }
 
+impl SendInputInjector {
+    /// Sharing one app: may this event go through? Presses outside the app
+    /// (and their releases) are dropped, typing only reaches the app while
+    /// it is in front, and app-switching keys never pass.
+    fn allowed(&mut self, event: &InputEvent) -> bool {
+        let pos = self.last_pos;
+        let held = self.held_keys.clone();
+        let Some(l) = self.limit.as_mut() else { return true };
+        let point_ok = |l: &Limit| pos.is_none_or(|(x, y)| super::share::point_allowed(&l.target, x, y));
+        match *event {
+            InputEvent::MouseButton { button, pressed: true } => {
+                let ok = point_ok(l);
+                if !ok && !l.dropped_buttons.contains(&button) {
+                    l.dropped_buttons.push(button);
+                }
+                ok
+            }
+            InputEvent::MouseButton { button, pressed: false } => {
+                let dropped = l.dropped_buttons.contains(&button);
+                l.dropped_buttons.retain(|b| *b != button);
+                !dropped
+            }
+            InputEvent::MouseScroll { .. } => point_ok(l),
+            InputEvent::Key { hid_usage, pressed: true } => {
+                let ok = (is_modifier(hid_usage) || super::share::foreground_allowed(&l.target))
+                    && !escapes_the_app(hid_usage, &held);
+                if !ok && !l.dropped_keys.contains(&hid_usage) {
+                    l.dropped_keys.push(hid_usage);
+                }
+                ok
+            }
+            InputEvent::Key { hid_usage, pressed: false } => {
+                let dropped = l.dropped_keys.contains(&hid_usage);
+                l.dropped_keys.retain(|k| *k != hid_usage);
+                !dropped
+            }
+            _ => true,
+        }
+    }
+}
+
 impl InputInjector for SendInputInjector {
+    fn set_limit(&mut self, limit: Option<&ShareTarget>) {
+        self.limit = limit.filter(|t| !t.is_screen()).map(|t| Limit {
+            target: t.clone(),
+            dropped_buttons: Vec::new(),
+            dropped_keys: Vec::new(),
+            frame: None,
+        });
+        match &self.limit {
+            Some(l) => tracing::info!(app = l.target.label(), "the viewer can only use the shared app"),
+            None => tracing::info!("the viewer can use the whole PC"),
+        }
+    }
+
     fn inject(&mut self, event: InputEvent) -> Result<()> {
+        if !self.allowed(&event) {
+            return Ok(());
+        }
         // Bookkeeping for ReleaseAll.
         match event {
             InputEvent::Key { hid_usage, pressed: true } => {

@@ -16,6 +16,7 @@
 
 use std::time::{Duration, Instant};
 
+use aa_core::share::ShareTarget;
 use aa_core::video::{PixelFormat, Resolution};
 use bytes::BytesMut;
 use windows::core::Interface;
@@ -27,6 +28,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     D3D11_USAGE_STAGING,
 };
+use windows::Win32::Graphics::Direct3D11::{ID3D11RenderTargetView, D3D11_BIND_RENDER_TARGET, D3D11_BOX};
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
@@ -69,6 +71,12 @@ pub struct DxgiCapture {
     /// When re-grabbing the screen started failing for reasons other than
     /// the two above; past a limit we ask for a full rebuild.
     failing_since: Option<Instant>,
+    /// Sharing one app or window (see share.rs): what, where it is on
+    /// screen (re-read every 50 ms), and the picture we build from it.
+    share: ShareTarget,
+    region: Option<super::share::Region>,
+    region_at: Instant,
+    share_tex: Option<(ID3D11Texture2D, ID3D11RenderTargetView, Resolution)>,
 }
 
 /// Where the captured screen sits on the virtual desktop, shared with the
@@ -210,6 +218,10 @@ impl DxgiCapture {
                 locked,
                 no_display: false,
                 failing_since: None,
+                share: ShareTarget::Screen,
+                region: None,
+                region_at: Instant::now(),
+                share_tex: None,
             })
         }
     }
@@ -262,6 +274,81 @@ impl DxgiCapture {
         // SAFETY: desc is fully initialised; out-pointer is valid.
         unsafe { device.CreateTexture2D(&desc, None, Some(&mut tex)) }.map_err(|e| win(e, "CreateTexture2D"))?;
         tex.ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("CreateTexture2D returned nothing")))
+    }
+
+    /// A texture of `res` we can paint black and copy the shared parts into.
+    fn share_texture(&mut self, res: Resolution) -> Result<(ID3D11Texture2D, ID3D11RenderTargetView)> {
+        if let Some((t, v, r)) = &self.share_tex {
+            if *r == res {
+                return Ok((t.clone(), v.clone()));
+            }
+        }
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: res.width,
+            Height: res.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        // SAFETY: desc fully initialised; out-pointers valid.
+        unsafe {
+            let mut tex = None;
+            self.device.CreateTexture2D(&desc, None, Some(&mut tex)).map_err(|e| win(e, "CreateTexture2D(share)"))?;
+            let tex = tex.ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("no share texture")))?;
+            let mut view = None;
+            self.device
+                .CreateRenderTargetView(&tex, None, Some(&mut view))
+                .map_err(|e| win(e, "CreateRenderTargetView"))?;
+            let view = view.ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("no render target view")))?;
+            self.share_tex = Some((tex.clone(), view.clone(), res));
+            Ok((tex, view))
+        }
+    }
+
+    /// Build the shared app's picture from the whole-screen frame `src`:
+    /// black, with only the shared app's visible parts copied in.
+    fn compose_share(&mut self, src: &ID3D11Texture2D) -> Result<(ID3D11Texture2D, Resolution)> {
+        if self.region.is_none() || self.region_at.elapsed() > Duration::from_millis(50) {
+            self.region = super::share::region_for(&self.share, self.desktop_rect);
+            self.region_at = Instant::now();
+        }
+        let full = RECT { left: 0, top: 0, right: self.res.width as i32, bottom: self.res.height as i32 };
+        let region = self.region.clone().unwrap_or(super::share::Region { crop: None, keep: Vec::new() });
+        let crop = region.crop.unwrap_or(full);
+        let size = Resolution::new((crop.right - crop.left).max(2) as u32, (crop.bottom - crop.top).max(2) as u32);
+        let (tex, view) = self.share_texture(size)?;
+        // SAFETY: GPU copies between textures on our device; boxes are
+        // clipped to both textures first.
+        unsafe {
+            self.context.ClearRenderTargetView(&view, &[0.0, 0.0, 0.0, 1.0]);
+            for k in &region.keep {
+                let l = k.left.max(crop.left).max(0);
+                let t = k.top.max(crop.top).max(0);
+                let r = k.right.min(crop.right).min(full.right);
+                let b = k.bottom.min(crop.bottom).min(full.bottom);
+                if r <= l || b <= t {
+                    continue;
+                }
+                let bx =
+                    D3D11_BOX { left: l as u32, top: t as u32, front: 0, right: r as u32, bottom: b as u32, back: 1 };
+                self.context.CopySubresourceRegion(
+                    &tex,
+                    0,
+                    (l - crop.left) as u32,
+                    (t - crop.top) as u32,
+                    0,
+                    src,
+                    0,
+                    Some(&bx),
+                );
+            }
+        }
+        Ok((tex, size))
     }
 
     /// Recreate the duplication after it was lost (mode change, lock
@@ -386,6 +473,26 @@ impl ScreenCapture for DxgiCapture {
         let capture_ts_us = self.started.elapsed().as_micros() as u64;
         let res = self.res;
 
+        if self.gpu_tex.is_some() && !self.share.is_screen() {
+            // SAFETY: the resource is the duplication's texture; we copy out
+            // of it, then release the frame exactly once.
+            let composed = unsafe {
+                let tex: ID3D11Texture2D = resource.cast().map_err(|e| win(e, "ID3D11Texture2D"))?;
+                let r = self.compose_share(&tex);
+                drop(tex);
+                drop(resource);
+                let Some(dup) = self.dup.as_ref() else { return Ok(None) };
+                dup.ReleaseFrame().map_err(|e| win(e, "ReleaseFrame"))?;
+                r?
+            };
+            return Ok(Some(CapturedFrame {
+                buffer: FrameBuffer::Gpu { api: GpuApi::D3D11, handle: composed.0.as_raw() as usize },
+                format: PixelFormat::Bgra8,
+                resolution: composed.1,
+                capture_ts_us,
+            }));
+        }
+
         if let Some(gpu_tex) = &self.gpu_tex {
             // SAFETY: GPU→GPU copy into a texture we own, then release the
             // duplication frame. The pointer handed out is valid until the
@@ -443,5 +550,16 @@ impl ScreenCapture for DxgiCapture {
 
     fn refresh_rate_hz(&self) -> u16 {
         self.refresh_hz
+    }
+
+    fn set_share(&mut self, target: &ShareTarget) -> Result<()> {
+        if !target.is_screen() && self.gpu_tex.is_none() {
+            return Err(PlatformError::Unavailable(
+                "sharing one app needs the graphics chip's encoder, and this PC is using the slow fallback".into(),
+            ));
+        }
+        self.share = target.clone();
+        self.region = None;
+        Ok(())
     }
 }

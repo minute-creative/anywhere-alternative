@@ -46,16 +46,16 @@ use windows::Win32::Media::MediaFoundation::{
     CODECAPI_AVLowLatencyMode, ICodecAPI, IMFActivate, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFSample,
     IMFTransform, METransformHaveOutput, METransformNeedInput, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer,
     MFCreateMediaType, MFCreateSample, MFMediaType_Video, MFNominalRange_0_255, MFNominalRange_16_235,
-    MFSampleExtension_CleanPoint, MFStartup, MFTEnumEx, MFVideoFormat_ARGB32, MFVideoFormat_H264, MFVideoFormat_HEVC,
-    MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoTransFunc_709,
+    MFSampleExtension_CleanPoint, MFStartup, MFTEnumEx, MFVideoFormat_ARGB32, MFVideoFormat_AV1, MFVideoFormat_H264,
+    MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoTransFunc_709,
     MFVideoTransferMatrix_BT709, MFSTARTUP_NOSOCKET, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
     MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT, MF_E_NO_EVENTS_AVAILABLE,
     MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT,
     MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE,
-    MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX,
-    MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+    MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE,
+    MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
@@ -91,6 +91,8 @@ fn variant_bool(b: bool) -> VARIANT {
 pub enum HwCodec {
     H264,
     Hevc,
+    /// Intel Arc / Core Ultra, NVIDIA RTX 40+, AMD RX 7000+.
+    Av1,
 }
 
 impl HwCodec {
@@ -98,12 +100,14 @@ impl HwCodec {
         match self {
             HwCodec::H264 => MFVideoFormat_H264,
             HwCodec::Hevc => MFVideoFormat_HEVC,
+            HwCodec::Av1 => MFVideoFormat_AV1,
         }
     }
     fn as_codec(self) -> Codec {
         match self {
             HwCodec::H264 => Codec::H264,
             HwCodec::Hevc => Codec::Hevc,
+            HwCodec::Av1 => Codec::Av1,
         }
     }
 }
@@ -123,8 +127,14 @@ pub struct MfEncoder {
     input_id: u32,
     output_id: u32,
     output_provides_samples: bool,
+    /// Size of the pictures coming in (the screen, or the shared window).
+    src_res: Resolution,
+    /// Size of the pictures going out (the viewer's Resolution setting).
     res: Resolution,
     fps: u16,
+    /// AV1's sequence header, from the output type, for keyframes that
+    /// arrive without one (the Mac decoder needs it in front).
+    seq_header: Option<Vec<u8>>,
     codec: HwCodec,
     name: String,
     next_id: u32,
@@ -401,8 +411,10 @@ impl MfEncoder {
                 input_id,
                 output_id,
                 output_provides_samples,
+                src_res: res,
                 res,
                 fps,
+                seq_header: None,
                 codec,
                 name,
                 next_id: 0,
@@ -414,6 +426,60 @@ impl MfEncoder {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// New input size (a shared window resized, sharing switched on or
+    /// off): a new input texture and converter, same encoder.
+    fn reshape(&mut self, src: Resolution) -> Result<()> {
+        if self.converter.is_none() && src != self.res {
+            return Err(PlatformError::Backend(anyhow::anyhow!(
+                "this GPU can't resize pictures; encoder must be reopened"
+            )));
+        }
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: src.width,
+            Height: src.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        // SAFETY: desc fully initialised; out-pointer valid.
+        let input_tex = unsafe {
+            let mut tex = None;
+            self.device.CreateTexture2D(&desc, None, Some(&mut tex)).map_err(|e| win(e, "CreateTexture2D(input)"))?;
+            tex.ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("no input texture")))?
+        };
+        if self.converter.is_some() {
+            self.converter = Some(super::convert::NvConverter::scaled(
+                &self.device,
+                &self.context,
+                &input_tex,
+                src,
+                self.res,
+                self.fps,
+            )?);
+        }
+        self.input_tex = input_tex;
+        self.src_res = src;
+        tracing::info!(from = ?src, to = ?self.res, "encoder input size");
+        Ok(())
+    }
+
+    /// The sequence header the encoder put in its output type, if any.
+    fn output_sequence_header(&self) -> Option<Vec<u8>> {
+        // SAFETY: COM queries on our own MFT; buffer sized from GetBlobSize.
+        unsafe {
+            let t = self.mft.GetOutputCurrentType(self.output_id).ok()?;
+            let n = t.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER).ok()? as usize;
+            let mut buf = vec![0u8; n];
+            t.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut buf, None).ok()?;
+            aa_core::av1::sequence_header(&buf).map(<[u8]>::to_vec)
+        }
     }
 
     /// `GetEvent` with a deadline. Hardware MFTs occasionally stop emitting
@@ -531,8 +597,8 @@ impl MfEncoder {
 
 impl VideoEncoder for MfEncoder {
     fn encode(&mut self, frame: &CapturedFrame, force_keyframe: bool) -> Result<EncodedFrame> {
-        if frame.resolution != self.res {
-            return Err(PlatformError::Backend(anyhow::anyhow!("resolution changed; encoder must be reopened")));
+        if frame.resolution != self.src_res {
+            self.reshape(frame.resolution)?;
         }
         if frame.format != PixelFormat::Bgra8 {
             return Err(PlatformError::Backend(anyhow::anyhow!("MF encoder path expects BGRA capture")));
@@ -584,22 +650,33 @@ impl VideoEncoder for MfEncoder {
             // Low-latency encoders return the frame right away; if this one
             // holds a frame of lookahead we get the previous frame's data,
             // which is still correct ordering for the wire.
-            let (data, keyframe) = match self.pull_output()? {
+            let (mut data, keyframe) = match self.pull_output()? {
                 Some(x) => x,
                 None => (Bytes::new(), false),
             };
+            if self.codec == HwCodec::Av1 && keyframe && aa_core::av1::sequence_header(&data).is_none() {
+                if self.seq_header.is_none() {
+                    self.seq_header = self.output_sequence_header();
+                }
+                if let Some(h) = &self.seq_header {
+                    let mut with = Vec::with_capacity(h.len() + data.len());
+                    with.extend_from_slice(h);
+                    with.extend_from_slice(&data);
+                    data = Bytes::from(with);
+                }
+            }
 
             let id = self.next_id;
             self.next_id += 1;
-            Ok(EncodedFrame {
-                meta: EncodedFrameMeta {
+            Ok(EncodedFrame::new(
+                EncodedFrameMeta {
                     frame_id: id,
                     capture_ts_us: frame.capture_ts_us,
                     is_keyframe: keyframe,
                     codec: self.codec.as_codec(),
                 },
                 data,
-            })
+            ))
         }
     }
 

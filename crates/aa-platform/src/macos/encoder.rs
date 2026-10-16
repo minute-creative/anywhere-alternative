@@ -44,6 +44,10 @@ use objc2_video_toolbox::{
     kVTVideoEncoderSpecification_EnableLowLatencyRateControl, VTCompressionSession, VTEncodeInfoFlags,
     VTSessionSetProperty,
 };
+use objc2_video_toolbox::{
+    kVTCompressionPropertyKey_EnableLTR, kVTEncodeFrameOptionKey_AcknowledgedLTRTokens,
+    kVTEncodeFrameOptionKey_ForceLTRRefresh, kVTSampleAttachmentKey_RequireLTRAcknowledgementToken,
+};
 
 use crate::{CapturedFrame, EncodedFrame, FrameBuffer, GpuApi, PlatformError, Result, VideoEncoder};
 
@@ -54,7 +58,27 @@ fn os_err(status: i32, what: &str) -> PlatformError {
 /// Where the output callback leaves the encoded frame.
 #[derive(Default)]
 struct Slot {
-    out: Option<std::result::Result<(Vec<u8>, bool), i32>>,
+    /// Annex-B bytes, keyframe?, long-term reference token.
+    out: Option<std::result::Result<(Vec<u8>, bool, Option<i64>), i32>>,
+}
+
+/// The long-term reference token VideoToolbox attached to this frame, if
+/// it made one (only with long-term references switched on).
+fn ltr_token(sample: &CMSampleBuffer) -> Option<i64> {
+    // SAFETY: reading the attachments of a sample valid for this callback;
+    // the array holds one CFDictionary per sample.
+    unsafe {
+        let arr = sample.sample_attachments_array(false)?;
+        let arr = CFRetained::as_ptr(&arr).as_ptr() as *const c_void;
+        if super::wininfo::CFArrayGetCount(arr) < 1 {
+            return None;
+        }
+        let dict = super::wininfo::CFArrayGetValueAtIndex(arr, 0);
+        if dict.is_null() {
+            return None;
+        }
+        super::wininfo::number(dict, kVTSampleAttachmentKey_RequireLTRAcknowledgementToken)
+    }
 }
 
 pub struct VtEncoder {
@@ -63,6 +87,15 @@ pub struct VtEncoder {
     codec: Codec,
     resolution: Resolution,
     key_next: bool,
+    /// Long-term references are on: a loss can be repaired with a small
+    /// frame built on one the viewer confirmed, instead of a whole picture.
+    ltr: bool,
+    /// Confirmations to hand to the encoder with the next frame.
+    acked: Vec<i64>,
+    /// At least one reference has been confirmed this session.
+    any_acked: bool,
+    /// Next frame: repair from a confirmed reference.
+    refresh_next: bool,
 }
 
 // SAFETY: the session is only used from the capture thread that owns this
@@ -171,11 +204,12 @@ unsafe extern "C-unwind" fn on_encoded(
                     let st =
                         unsafe { block.copy_data_bytes(0, len, NonNull::new(avcc.as_mut_ptr().cast()).expect("vec")) };
                     if st == 0 {
-                        Ok(to_annex_b(codec, &avcc, || {
+                        let (data, key) = to_annex_b(codec, &avcc, || {
                             unsafe { sample.format_description() }
                                 .map(|f| parameter_sets(codec, &f))
                                 .unwrap_or_default()
-                        }))
+                        });
+                        Ok((data, key, ltr_token(sample)))
                     } else {
                         Err(st)
                     }
@@ -253,7 +287,23 @@ impl VtEncoder {
             set(&session, kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2);
             set(&session, kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2);
         }
-        let mut enc = Self { session, slot, codec, resolution, key_next: true };
+        // Long-term references (macOS 14+, low-latency mode only). Off by
+        // AA_NO_LTR=1, for comparing.
+        // SAFETY: static key; boolean value.
+        let ltr = low_latency_on
+            && std::env::var_os("AA_NO_LTR").is_none()
+            && set(&session, unsafe { kVTCompressionPropertyKey_EnableLTR }, CFBoolean::new(true)) == 0;
+        let mut enc = Self {
+            session,
+            slot,
+            codec,
+            resolution,
+            key_next: true,
+            ltr,
+            acked: Vec::new(),
+            any_acked: false,
+            refresh_next: false,
+        };
         enc.set_bitrate_kbps(kbps)?;
         tracing::info!(
             ?codec,
@@ -261,6 +311,7 @@ impl VtEncoder {
             fps,
             kbps,
             low_latency = low_latency_on,
+            loss_repair = ltr,
             "encoder: VideoToolbox (media engine)"
         );
         Ok(enc)
@@ -286,11 +337,30 @@ impl VideoEncoder for VtEncoder {
         // SAFETY: the capture keeps this pixel buffer alive until the next frame.
         let pixels: &CVPixelBuffer = unsafe { pixels.as_ref() };
         let key = force_keyframe || std::mem::take(&mut self.key_next);
-        let props = key.then(|| {
-            // SAFETY: static key from VideoToolbox.
-            let k: &CFString = unsafe { kVTEncodeFrameOptionKey_ForceKeyFrame };
-            CFDictionary::<CFString, CFBoolean>::from_slices(&[k], &[CFBoolean::new(true)])
-        });
+        let refresh = !key && std::mem::take(&mut self.refresh_next);
+        let tokens: Vec<CFRetained<CFNumber>> = self.acked.drain(..).map(CFNumber::new_i64).collect();
+        let token_array = (!tokens.is_empty()).then(|| objc2_core_foundation::CFArray::from_retained_objects(&tokens));
+        let props = {
+            let yes: &CFType = CFBoolean::new(true);
+            let mut keys: Vec<&CFString> = Vec::new();
+            let mut values: Vec<&CFType> = Vec::new();
+            // SAFETY: static keys from VideoToolbox.
+            unsafe {
+                if key {
+                    keys.push(kVTEncodeFrameOptionKey_ForceKeyFrame);
+                    values.push(yes);
+                }
+                if refresh {
+                    keys.push(kVTEncodeFrameOptionKey_ForceLTRRefresh);
+                    values.push(yes);
+                }
+                if let Some(a) = token_array.as_ref() {
+                    keys.push(kVTEncodeFrameOptionKey_AcknowledgedLTRTokens);
+                    values.push(a);
+                }
+            }
+            (!keys.is_empty()).then(|| CFDictionary::<CFString, CFType>::from_slices(&keys, &values))
+        };
         self.slot.lock().expect("slot").out = None;
         // SAFETY: valid session and pixel buffer; times are plain values.
         let status = unsafe {
@@ -314,7 +384,7 @@ impl VideoEncoder for VtEncoder {
             return Err(os_err(status, "encode"));
         }
         match self.slot.lock().expect("slot").out.take() {
-            Some(Ok((data, is_keyframe))) => Ok(EncodedFrame {
+            Some(Ok((data, is_keyframe, token))) => Ok(EncodedFrame {
                 meta: EncodedFrameMeta {
                     frame_id: 0,
                     capture_ts_us: frame.capture_ts_us,
@@ -322,6 +392,8 @@ impl VideoEncoder for VtEncoder {
                     codec: self.codec,
                 },
                 data: Bytes::from(data),
+                ltr_token: token,
+                recovery: refresh && !is_keyframe,
             }),
             // -1: the encoder dropped the frame itself. The next frame still
             // follows on from the last one it did send, so no fresh picture
@@ -353,6 +425,32 @@ impl VideoEncoder for VtEncoder {
         // VideoToolbox has no gradual refresh; a keyframe does the job.
         self.key_next = true;
         Ok(())
+    }
+
+    fn set_frame_rate(&mut self, fps: u16) -> bool {
+        // SAFETY: static key; plain number.
+        let key = unsafe { kVTCompressionPropertyKey_ExpectedFrameRate };
+        set(&self.session, key, &CFNumber::new_i32(i32::from(fps))) == 0
+    }
+
+    fn supports_recovery(&self) -> bool {
+        self.ltr
+    }
+
+    fn acknowledge(&mut self, tokens: &[i64]) {
+        if self.ltr && !tokens.is_empty() {
+            self.acked.extend_from_slice(tokens);
+            self.any_acked = true;
+        }
+    }
+
+    fn request_recovery(&mut self) -> bool {
+        if self.ltr && self.any_acked {
+            self.refresh_next = true;
+            true
+        } else {
+            false
+        }
     }
 }
 

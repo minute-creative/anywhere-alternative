@@ -43,9 +43,10 @@ pub fn run() -> Vec<Check> {
         });
         v.push(Check {
             name: "HEVC Video Extensions",
-            why: "Sharper video from a Mac (otherwise H.264 is used)",
+            why: "Sharper picture for less data when watching another computer (otherwise H.264, ~40% more data)",
             ok: has_hevc_extension(),
-            url: "ms-windows-store://pdp/?ProductId=9NMZLZ57R3T7",
+            // The free "from Device Manufacturer" edition.
+            url: "ms-windows-store://pdp/?ProductId=9N4WGH0Z6VHQ",
         });
     }
     v.push(Check {
@@ -65,13 +66,17 @@ pub fn run() -> Vec<Check> {
     v
 }
 
-/// The Store's HEVC add-on lives in `WindowsApps` under a known prefix.
+/// Can this PC decode HEVC? Asked of Windows' video decoders directly (the
+/// Store add-on, or one built into the graphics driver, both count).
 fn has_hevc_extension() -> bool {
-    let root = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
-    // The folder is private to Windows; if we can't look, don't nag.
-    std::fs::read_dir(Path::new(&root).join("WindowsApps")).map_or(true, |d| {
-        d.flatten().any(|e| e.file_name().to_string_lossy().starts_with("Microsoft.HEVCVideoExtension"))
-    })
+    #[cfg(target_os = "windows")]
+    {
+        aa_platform::windows::decoder::available_codecs().contains(&aa_core::video::Codec::Hevc)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
+    }
 }
 
 /// Open a web page (or Store link) in the default browser.

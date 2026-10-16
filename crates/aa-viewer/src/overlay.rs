@@ -58,6 +58,11 @@ pub struct Overlay {
     pub open: bool,
     /// Shown for a few seconds after connecting so the hotkey is discoverable.
     hint_until: Option<std::time::Instant>,
+    /// Things the panel asked for (full access: what to share); the window
+    /// sends them to the session after drawing.
+    pub requests: Vec<crate::link::ViewerCommand>,
+    /// The share list was asked for since the panel opened.
+    asked_list: bool,
 }
 
 impl std::fmt::Debug for Overlay {
@@ -99,6 +104,8 @@ impl Overlay {
             renderer,
             open: false,
             hint_until: Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+            requests: Vec::new(),
+            asked_list: false,
         }
     }
 
@@ -120,12 +127,13 @@ impl Overlay {
     pub fn toggle(&mut self) {
         self.open = !self.open;
         self.hint_until = None;
+        self.asked_list = false;
     }
 
     /// Build the UI for this frame and draw it. Call inside an open render
     /// pass whose target is the surface texture. Returns the settings after
     /// any edits the user made.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn draw(
         &mut self,
         window: &Window,
@@ -145,6 +153,13 @@ impl Overlay {
 
         let raw = self.state.take_egui_input(window);
         self.ctx.begin_pass(raw);
+        let info = crate::link::host_info();
+        let codec = info.codec.map_or(String::new(), |c| format!("  {}", codec_name(c)));
+        let fps_line = if info.target_fps > 0 && u32::from(info.target_fps) != stats.fps {
+            format!("{}/{} fps", stats.fps, info.target_fps)
+        } else {
+            format!("{} fps", stats.fps)
+        };
 
         if show_hint {
             egui::Area::new(egui::Id::new("hint")).anchor(egui::Align2::CENTER_TOP, [0.0, 16.0]).show(
@@ -165,9 +180,17 @@ impl Overlay {
                         // One line, never wrapped next to the screen edge.
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                         ui.monospace(format!(
-                            "{} fps  {:.1} Mbps  {:.0} ms  {:.1}% loss",
-                            stats.fps, stats.mbps, stats.rtt_ms, stats.loss_pct
+                            "{fps_line}{codec}  {:.1} Mbps  {:.0} ms  {:.1}% loss",
+                            stats.mbps, stats.rtt_ms, stats.loss_pct
                         ));
+                        if !info.sharing.is_empty() && info.sharing != "Whole screen" {
+                            ui.monospace(format!("Sharing: {}", info.sharing));
+                        }
+                        for n in &info.notes {
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                            ui.set_max_width(360.0);
+                            ui.label(egui::RichText::new(n).color(egui::Color32::from_rgb(180, 83, 9)));
+                        }
                     });
                 },
             );
@@ -195,11 +218,48 @@ impl Overlay {
                     ui.checkbox(&mut settings.mute_host, format!("Mute {other} speakers (sound plays here only)"));
                     ui.add(egui::Slider::new(&mut settings.volume_boost_db, 0.0..=18.0).text("Volume boost (dB)"));
                     ui.checkbox(&mut settings.send_mic, format!("Send my microphone to the {other}"));
+                    if info.full_access {
+                        ui.add_space(8.0);
+                        ui.heading("What to show");
+                        if !self.asked_list {
+                            self.requests.push(crate::link::ViewerCommand::ShareList);
+                            self.asked_list = true;
+                        }
+                        ui.label(format!(
+                            "Showing: {}",
+                            if info.sharing.is_empty() { "Whole screen" } else { &info.sharing }
+                        ));
+                        let mut chosen = None;
+                        egui::ComboBox::from_id_salt("share").selected_text("Choose…").width(300.0).show_ui(ui, |ui| {
+                            if ui.selectable_label(false, "Whole screen").clicked() {
+                                chosen = Some(aa_core::share::ShareTarget::Screen);
+                            }
+                            for t in &info.shareables {
+                                let label = match t {
+                                    aa_core::share::ShareTarget::App { .. } => format!("App: {}", t.label()),
+                                    aa_core::share::ShareTarget::Window { .. } => format!("Window: {}", t.label()),
+                                    aa_core::share::ShareTarget::Screen => continue,
+                                };
+                                if ui.selectable_label(false, label).clicked() {
+                                    chosen = Some(t.clone());
+                                }
+                            }
+                        });
+                        if ui.small_button("Refresh list").clicked() {
+                            self.requests.push(crate::link::ViewerCommand::ShareList);
+                        }
+                        if let Some(t) = chosen {
+                            self.requests.push(crate::link::ViewerCommand::SetShare(t));
+                        }
+                    }
                     ui.add_space(8.0);
                     ui.monospace(format!(
-                        "{} fps  {:.1} Mbps  {:.0} ms RTT  {:.1}% loss",
-                        stats.fps, stats.mbps, stats.rtt_ms, stats.loss_pct
+                        "{fps_line}{codec}  {:.1} Mbps  {:.0} ms RTT  {:.1}% loss",
+                        stats.mbps, stats.rtt_ms, stats.loss_pct
                     ));
+                    for n in &info.notes {
+                        ui.label(egui::RichText::new(n).color(egui::Color32::from_rgb(180, 83, 9)));
+                    }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(format!("{} to close", Self::hotkey_label())).weak());
@@ -251,5 +311,13 @@ impl Overlay {
         } else {
             "Ctrl+Shift+S"
         }
+    }
+}
+
+fn codec_name(c: aa_core::video::Codec) -> &'static str {
+    match c {
+        aa_core::video::Codec::Av1 => "AV1",
+        aa_core::video::Codec::Hevc => "HEVC",
+        aa_core::video::Codec::H264 => "H.264",
     }
 }

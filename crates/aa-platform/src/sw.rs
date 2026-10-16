@@ -111,15 +111,10 @@ impl VideoEncoder for SwEncoder {
 
         let id = self.next_id;
         self.next_id += 1;
-        Ok(EncodedFrame {
-            meta: EncodedFrameMeta {
-                frame_id: id,
-                capture_ts_us: frame.capture_ts_us,
-                is_keyframe,
-                codec: Codec::H264,
-            },
+        Ok(EncodedFrame::new(
+            EncodedFrameMeta { frame_id: id, capture_ts_us: frame.capture_ts_us, is_keyframe, codec: Codec::H264 },
             data,
-        })
+        ))
     }
 
     fn set_bitrate_kbps(&mut self, kbps: u32) -> Result<()> {

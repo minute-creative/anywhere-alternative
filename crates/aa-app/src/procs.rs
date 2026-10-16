@@ -145,7 +145,7 @@ impl std::fmt::Debug for Viewer {
 }
 
 /// How a viewer window should start.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)] // switches
 pub struct ViewerPrefs {
     pub fullscreen: bool,
@@ -155,9 +155,12 @@ pub struct ViewerPrefs {
     pub show_stats: bool,
     pub max_mbps: f32,
     pub volume_boost: f32,
+    pub resolution: String,
+    pub fps: String,
 }
 
 impl Viewer {
+    #[allow(clippy::needless_pass_by_value)]
     pub fn start(target: &str, label: &str, p: ViewerPrefs) -> anyhow::Result<Self> {
         let log = data_dir().join("viewer.log");
         let (out, err) = log_file(&log)?;
@@ -165,6 +168,7 @@ impl Viewer {
         let mut cmd = Command::new(&exe);
         cmd.arg(target).stdout(out).stderr(err).stdin(Stdio::null());
         cmd.args(["--max-mbps", &format!("{:.0}", p.max_mbps), "--volume-boost", &format!("{:.1}", p.volume_boost)]);
+        cmd.args(["--resolution", &p.resolution, "--fps", &p.fps]);
         for (on, flag) in [
             (p.fullscreen, "--fullscreen"),
             (p.stretch, "--stretch"),

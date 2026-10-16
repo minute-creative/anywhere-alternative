@@ -64,6 +64,20 @@ impl NvConverter {
         res: Resolution,
         fps: u16,
     ) -> Result<Self> {
+        Self::scaled(device, context, input, res, res, fps)
+    }
+
+    /// Convert *and* resize: `input` is `src` sized, the output `res`. The
+    /// same fixed-function block scales with a good filter, for free (the
+    /// viewer's Resolution setting).
+    pub fn scaled(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        input: &ID3D11Texture2D,
+        src: Resolution,
+        res: Resolution,
+        fps: u16,
+    ) -> Result<Self> {
         // SAFETY: COM calls with valid descriptors on our own device; every
         // out-parameter is checked before use.
         unsafe {
@@ -73,8 +87,8 @@ impl NvConverter {
             let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
                 InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
                 InputFrameRate: rate,
-                InputWidth: res.width,
-                InputHeight: res.height,
+                InputWidth: src.width,
+                InputHeight: src.height,
                 OutputFrameRate: rate,
                 OutputWidth: res.width,
                 OutputHeight: res.height,
@@ -129,7 +143,8 @@ impl NvConverter {
             // default, which is exactly the kind of drift we are removing.
             vctx.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
             let full = RECT { left: 0, top: 0, right: res.width as i32, bottom: res.height as i32 };
-            vctx.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&full));
+            let whole_src = RECT { left: 0, top: 0, right: src.width as i32, bottom: src.height as i32 };
+            vctx.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&whole_src));
             vctx.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&full));
             vctx.VideoProcessorSetOutputTargetRect(&processor, true, Some(&full));
 

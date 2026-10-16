@@ -747,6 +747,11 @@ impl ApplicationHandler<Wake> for App {
                 });
                 self.settings = settings;
                 self.apply_settings();
+                if let Some(o) = self.overlay.as_mut() {
+                    for r in o.requests.drain(..) {
+                        let _ = self.commands.try_send(r);
+                    }
+                }
                 // Keep repainting while the overlay or hint is visible.
                 if self.overlay.as_ref().is_some_and(|o| o.open) {
                     window.request_redraw();

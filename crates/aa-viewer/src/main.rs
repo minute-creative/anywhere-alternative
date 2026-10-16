@@ -111,6 +111,55 @@ struct Args {
     /// page (only needed once per pair of computers).
     #[arg(long)]
     pair: Option<String>,
+
+    /// Picture size: "full" (the other screen's own size), or 1440, 1080
+    /// or 720 to save data.
+    #[arg(long, default_value = "full")]
+    resolution: String,
+
+    /// Frames per second: "auto" (as many as both screens show and the
+    /// connection carries, 60 at the least) or a number to hold.
+    #[arg(long, default_value = "auto")]
+    fps: String,
+}
+
+/// The most frames a second we ever ask for (the owner's choice).
+const FPS_LIMIT: u16 = 240;
+
+/// Apply the Resolution and Frame rate settings to what we tell the host.
+fn apply_choices(caps: &mut aa_core::capability::Capabilities, args: &Args) {
+    let screen = aa_platform::display_refresh_hz();
+    let screen_cap = screen.unwrap_or(FPS_LIMIT).clamp(30, FPS_LIMIT);
+    match args.fps.trim().parse::<u16>() {
+        Ok(n) if n > 0 => {
+            if n > screen_cap {
+                tracing::info!(
+                    asked = n,
+                    screen = screen_cap,
+                    "this screen shows at most {screen_cap} frames a second; asking for that"
+                );
+            }
+            caps.max_fps = n.min(screen_cap).min(FPS_LIMIT);
+            caps.fixed_fps = true;
+        }
+        _ => {
+            caps.max_fps = screen_cap;
+            caps.fixed_fps = false;
+        }
+    }
+    if let Ok(h) = args.resolution.trim().trim_end_matches('p').parse::<u32>() {
+        // Height decides; width is generous so wide screens keep their shape.
+        caps.max_resolution = aa_core::video::Resolution::new((h * 32 / 9).min(caps.max_resolution.width), h);
+    }
+    // We can resume from a repair frame and report our last good frame.
+    caps.loss_recovery = true;
+    tracing::info!(
+        max_fps = caps.max_fps,
+        fixed = caps.fixed_fps,
+        screen_hz = screen,
+        max_res = ?caps.max_resolution,
+        "asking the host for"
+    );
 }
 
 fn main() -> anyhow::Result<()> {
@@ -208,11 +257,13 @@ fn main() -> anyhow::Result<()> {
 const RECONNECT_HEADLESS: std::time::Duration = std::time::Duration::from_secs(120);
 
 fn backends(args: &Args) -> anyhow::Result<aa_platform::ViewerBackends> {
-    if args.mock {
-        Ok(aa_platform::mock::viewer_backends(args.mock_raw)?)
+    let mut b = if args.mock {
+        aa_platform::mock::viewer_backends(args.mock_raw)?
     } else {
-        aa_platform::viewer_backends().context("real viewer backends unavailable; try --mock")
-    }
+        aa_platform::viewer_backends().context("real viewer backends unavailable; try --mock")?
+    };
+    apply_choices(&mut b.capabilities, args);
+    Ok(b)
 }
 
 /// Errors that mean "the host went away" rather than "the host said no":

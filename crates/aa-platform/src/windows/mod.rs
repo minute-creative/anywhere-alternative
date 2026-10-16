@@ -23,6 +23,7 @@ pub mod encoder;
 pub mod gamepad;
 pub mod input;
 pub mod session;
+pub mod share;
 
 use aa_core::capability::Capabilities;
 use aa_core::config::StreamConfig;
@@ -144,6 +145,8 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
             color_ranges: vec![ColorRange::Sdr],
             has_gamepad: false,
             can_emulate_gamepad,
+            fixed_fps: false,
+            loss_recovery: false,
         },
     })
 }
@@ -175,7 +178,19 @@ fn open_hardware_encoder(
         Some(enc) => (Codec::Hevc, enc),
         None => (Codec::H264, encoder::MfEncoder::new(device, context, encoder::HwCodec::H264, res, fps, kbps)?),
     };
-    let codecs = if codec == Codec::Hevc { vec![Codec::Hevc, Codec::H264] } else { vec![Codec::H264] };
+    let mut codecs = if codec == Codec::Hevc { vec![Codec::Hevc, Codec::H264] } else { vec![Codec::H264] };
+    // AV1 (Intel Arc and Core Ultra, newer NVIDIA and AMD): the same picture
+    // for about a quarter less data than HEVC. Offered first; a viewer that
+    // can't play it (only Macs from M3 on can) negotiates HEVC as before.
+    // AA_NO_AV1=1 turns it off, for comparing.
+    if std::env::var_os("AA_NO_AV1").is_none() && !encoder::list_hardware_encoders(encoder::HwCodec::Av1).is_empty() {
+        match encoder::MfEncoder::new(device, context, encoder::HwCodec::Av1, res, fps, kbps) {
+            // Last in the list: `codecs[0]` must be the encoder already loaded
+            // (HEVC); negotiation still prefers AV1 when both sides have it.
+            Ok(_) => codecs.push(Codec::Av1),
+            Err(e) => tracing::warn!("AV1 encoder is listed but would not open ({e}); not offering AV1"),
+        }
+    }
     tracing::info!(
         ?res,
         fps,
@@ -199,7 +214,7 @@ fn hw_factory(
         let hw = match codec {
             Codec::Hevc => encoder::HwCodec::Hevc,
             Codec::H264 => encoder::HwCodec::H264,
-            Codec::Av1 => return Err(crate::PlatformError::Unavailable("no AV1 encoder yet".into())),
+            Codec::Av1 => encoder::HwCodec::Av1,
         };
         let kbps = StreamConfig::suggested_bitrate_kbps(res, fps);
         let enc = encoder::MfEncoder::new(&dev, &ctx, hw, res, fps, kbps)?;
@@ -237,6 +252,17 @@ fn sw_rebuild() -> crate::PipelineFactory {
 /// Keep the PC awake and its display on while someone streams it. The
 /// request belongs to the calling thread and lasts until changed, so the
 /// capture thread (alive for the whole host run) makes it.
+/// The main screen's refresh rate.
+pub fn display_refresh_hz() -> Option<u16> {
+    use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
+    let mut mode = DEVMODEW { dmSize: std::mem::size_of::<DEVMODEW>() as u16, ..Default::default() };
+    // SAFETY: `mode` is a valid, sized DEVMODEW; a null name means the main screen.
+    #[allow(unsafe_code)]
+    let ok = unsafe { EnumDisplaySettingsW(windows::core::PCWSTR::null(), ENUM_CURRENT_SETTINGS, &mut mode) };
+    // 0 and 1 mean "the hardware default"; treat as unknown.
+    (ok.as_bool() && mode.dmDisplayFrequency > 1).then(|| u16::try_from(mode.dmDisplayFrequency).unwrap_or(u16::MAX))
+}
+
 pub fn keep_awake(on: bool) {
     use windows::Win32::System::Power::{
         SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
@@ -280,6 +306,8 @@ pub fn viewer_backends() -> Result<ViewerBackends> {
             color_ranges: vec![ColorRange::Sdr],
             has_gamepad: true,
             can_emulate_gamepad: false,
+            fixed_fps: false,
+            loss_recovery: false,
         },
     })
 }

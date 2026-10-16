@@ -37,6 +37,22 @@ pub struct MockCapture {
     frame: u32,
     next_due: Instant,
     locked: bool,
+    /// Pretend window sharing: the picture becomes a smaller "window".
+    share: aa_core::share::ShareTarget,
+    /// The viewer's Resolution setting.
+    max: Option<Resolution>,
+}
+
+/// Pretend apps and windows, so the Share page and full-access picking
+/// can be tried without a real desktop.
+pub fn shareable() -> Vec<aa_core::share::ShareTarget> {
+    use aa_core::share::ShareTarget;
+    vec![
+        ShareTarget::App { id: "test.editor".into(), name: "Test Editor".into() },
+        ShareTarget::App { id: "test.game".into(), name: "Test Game".into() },
+        ShareTarget::Window { id: 11, app: "Test Editor".into(), title: "notes.txt".into() },
+        ShareTarget::Window { id: 12, app: "Test Game".into(), title: "Test Game".into() },
+    ]
 }
 
 /// `AA_SIMULATE_CAPTURE_FAULTS=1`: on a 30 s cycle the mock screen does
@@ -58,7 +74,32 @@ fn fault_clock() -> &'static (Instant, std::sync::atomic::AtomicU64) {
 impl MockCapture {
     pub fn new(res: Resolution, fps: u16) -> Self {
         let now = Instant::now();
-        Self { res, fps, base_res: res, base_fps: fps, started: now, frame: 0, next_due: now, locked: false }
+        Self {
+            res,
+            fps,
+            base_res: res,
+            base_fps: fps,
+            started: now,
+            frame: 0,
+            next_due: now,
+            locked: false,
+            share: aa_core::share::ShareTarget::Screen,
+            max: None,
+        }
+    }
+
+    /// The size frames come out at: the screen, or half of it for a
+    /// pretend window, then fitted to the viewer's setting.
+    fn out_res(&self) -> Resolution {
+        let r = if matches!(self.share, aa_core::share::ShareTarget::Window { .. }) {
+            Resolution::new((self.res.width / 2) & !1, (self.res.height / 2) & !1)
+        } else {
+            self.res
+        };
+        match self.max {
+            Some(m) => aa_core::capability::fit_within(r, m),
+            None => r,
+        }
     }
 
     fn frame_interval(&self) -> Duration {
@@ -115,8 +156,9 @@ impl ScreenCapture for MockCapture {
         }
         self.next_due += self.frame_interval();
 
-        let w = self.res.width as usize;
-        let h = self.res.height as usize;
+        let out = self.out_res();
+        let w = out.width as usize;
+        let h = out.height as usize;
         let mut px = BytesMut::with_capacity(w * h * 4);
         let shift = (self.frame % 256) as u8;
         for y in 0..h {
@@ -135,7 +177,7 @@ impl ScreenCapture for MockCapture {
         let frame = CapturedFrame {
             buffer: FrameBuffer::Cpu(px.freeze()),
             format: PixelFormat::Bgra8,
-            resolution: self.res,
+            resolution: out,
             capture_ts_us: self.started.elapsed().as_micros() as u64,
         };
         self.frame += 1;
@@ -148,6 +190,20 @@ impl ScreenCapture for MockCapture {
 
     fn refresh_rate_hz(&self) -> u16 {
         self.fps
+    }
+
+    fn set_share(&mut self, target: &aa_core::share::ShareTarget) -> Result<()> {
+        tracing::info!(sharing = target.label(), "mock capture: now sharing");
+        self.share = target.clone();
+        Ok(())
+    }
+
+    fn set_max_size(&mut self, max: Option<Resolution>) {
+        self.max = max;
+    }
+
+    fn scales_itself(&self) -> bool {
+        true
     }
 }
 
@@ -168,15 +224,15 @@ impl VideoEncoder for MockEncoder {
         data.extend_from_slice(px);
         let id = self.next_id;
         self.next_id += 1;
-        Ok(EncodedFrame {
-            meta: EncodedFrameMeta {
+        Ok(EncodedFrame::new(
+            EncodedFrameMeta {
                 frame_id: id,
                 capture_ts_us: frame.capture_ts_us,
                 is_keyframe: true,
                 codec: Codec::H264,
             },
-            data: data.freeze(),
-        })
+            data.freeze(),
+        ))
     }
 
     fn set_bitrate_kbps(&mut self, _kbps: u32) -> Result<()> {
@@ -227,6 +283,10 @@ impl InputInjector for MockInput {
         }
         self.last = Some(event);
         Ok(())
+    }
+
+    fn set_limit(&mut self, limit: Option<&aa_core::share::ShareTarget>) {
+        tracing::info!(limit = limit.map(aa_core::share::ShareTarget::label), "mock input: control limited to");
     }
 }
 
@@ -293,6 +353,8 @@ fn mock_capabilities(res: Resolution, fps: u16) -> Capabilities {
         color_ranges: vec![ColorRange::Sdr],
         has_gamepad: true,
         can_emulate_gamepad: true,
+        fixed_fps: false,
+        loss_recovery: false,
     }
 }
 

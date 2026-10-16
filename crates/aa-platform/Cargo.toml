@@ -85,6 +85,8 @@ windows = { version = "0.62", features = [
     "Win32_System_Services",
     "Win32_System_Registry",
     "Win32_UI_Shell",
+    # Sharing one app: window frames, hidden windows.
+    "Win32_Graphics_Dwm",
     "Win32_System_Environment",
 ] }
 # Virtual Xbox 360 / DualShock 4 controllers through the ViGEmBus driver

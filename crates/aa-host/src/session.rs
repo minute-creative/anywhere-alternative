@@ -10,6 +10,8 @@ use aa_core::config::StreamConfig;
 use aa_core::control::ControlMessage;
 use aa_core::control_flow::{BitrateController, Pacer, ReceiverReport};
 use aa_core::input::InputEvent;
+use aa_core::quality::FpsLadder;
+use aa_core::share::ShareTarget;
 use aa_core::wire::{self, Header, Kind, Packet, SeqCounter};
 use aa_core::PROTOCOL_VERSION;
 use aa_platform::{EncodedFrame, HostBackends};
@@ -126,9 +128,10 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
         let p = pipeline::Pipeline { capture, encoder, codec: initial_codec, factory: encoder_factory, rebuild };
         pipeline::capture_thread(p, &cap_ctl, &frame_tx);
     })?;
+    let input_ctl = Arc::clone(&ctl);
     std::thread::Builder::new()
         .name("aa-input".into())
-        .spawn(move || pipeline::input_thread(input, gamepad, input_rx, &rumble_tx))?;
+        .spawn(move || pipeline::input_thread(input, gamepad, input_rx, &rumble_tx, &input_ctl))?;
     if let Some(audio) = audio {
         let audio_ctl = Arc::clone(&ctl);
         std::thread::Builder::new()
@@ -148,6 +151,8 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     // Floor: still legible for desktop work. Ceiling: the user's cap.
     let mut bitrate = BitrateController::new(start_kbps, 2_000, StreamConfig::default().max_bitrate_kbps);
     let pacer = Pacer::new();
+    // What is being shared, who chose it, and how fast to send.
+    let mut stream = Stream::new(fps);
 
     // --- sender task: owns pacing, shares the socket --------------------
     {
@@ -225,7 +230,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                     }
                     continue;
                 }
-                if let Err(e) = handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &seq, &mut bitrate, &video_dest, &mut speaker, &recent).await {
+                if let Err(e) = handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &seq, &mut bitrate, &video_dest, &mut speaker, &recent, &mut stream).await {
                     tracing::warn!("network send error (continuing): {e:#}");
                 }
             }
@@ -233,7 +238,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
             _ = clip_tick.tick() => {
                 // Screen status (locked, no display) to the viewer: on every
                 // change, to a newly connected viewer, and every 3 s while set.
-                let status = *ctl.screen_status.lock().expect("status");
+                let status = ctl.screen_status.lock().expect("status").or(stream.share_status);
                 let dest = viewer.as_ref().map(|v| v.addr);
                 if let Some(d) = dest {
                     let due = status.is_some() && told.2.elapsed() > Duration::from_secs(3);
@@ -276,6 +281,16 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 if viewer.is_some() && ticks % 30 == 0 {
                     set_connected(true);
                 }
+                // What the person here wants shared (the app keeps it fresh).
+                stream.follow_choice(&ctl, ticks);
+                if let Some(v) = viewer.as_ref() {
+                    let info = ControlMessage::StreamInfo {
+                        fps: stream.ladder.current(),
+                        kbps: bitrate.current_kbps(),
+                        sharing: stream.now.label(),
+                    };
+                    let _ = send_control(&socket, v.addr, &info, &seq).await;
+                }
                 if let Some(v) = viewer.as_ref().filter(|v| v.last_heard.elapsed() > VIEWER_TIMEOUT) {
                     tracing::info!(addr = %v.addr, "viewer timed out");
                     set_connected(false);
@@ -284,6 +299,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                     ctl.streaming.store(false, Ordering::Relaxed);
                     let _ = input_tx.try_send(InputEvent::ReleaseAll);
                     restore_speakers(&mut speaker);
+                    stream.viewer_left(&ctl);
                 }
             }
 
@@ -443,6 +459,7 @@ async fn handle_packet(
     video_dest: &std::sync::Mutex<Option<SocketAddr>>,
     speaker: &mut Option<Box<dyn aa_platform::audio::SpeakerControl>>,
     recent: &std::sync::Mutex<RecentPackets>,
+    stream: &mut Stream,
 ) -> anyhow::Result<()> {
     let is_current_viewer = viewer.as_ref().is_some_and(|v| v.addr == from);
 
@@ -480,6 +497,7 @@ async fn handle_packet(
                                     protocol: PROTOCOL_VERSION,
                                     negotiated,
                                     host_os: std::env::consts::OS.to_owned(),
+                                    full_access: stream.full_access,
                                 },
                                 seq,
                             )
@@ -499,7 +517,8 @@ async fn handle_packet(
                     match negotiate(host_caps, &capabilities) {
                         Ok(negotiated) => {
                             let name = socket.peer_name(from).unwrap_or_default();
-                            tracing::info!(%from, name, ?negotiated, "viewer connected");
+                            let full_access = socket.peer_full_access(from);
+                            tracing::info!(%from, name, full_access, ?negotiated, "viewer connected");
                             let codec = negotiated.codec;
                             send_control(
                                 socket,
@@ -508,6 +527,7 @@ async fn handle_packet(
                                     protocol: PROTOCOL_VERSION,
                                     negotiated,
                                     host_os: std::env::consts::OS.to_owned(),
+                                    full_access,
                                 },
                                 seq,
                             )
@@ -522,6 +542,7 @@ async fn handle_packet(
                             );
                             ctl.target_kbps.store(bitrate.current_kbps(), Ordering::Relaxed);
                             ctl.codec.store(codec as u8, Ordering::Relaxed);
+                            stream.start(ctl, &negotiated, host_caps, full_access);
                             ctl.force_keyframe.store(true, Ordering::Relaxed);
                             ctl.streaming.store(true, Ordering::Relaxed);
                         }
@@ -538,6 +559,7 @@ async fn handle_packet(
                     ctl.streaming.store(false, Ordering::Relaxed);
                     let _ = input_tx.try_send(InputEvent::ReleaseAll);
                     restore_speakers(speaker);
+                    stream.viewer_left(ctl);
                 }
                 ControlMessage::SetHostMute { muted } if is_current_viewer => {
                     if let Some(s) = speaker {
@@ -577,6 +599,19 @@ async fn handle_packet(
                     ctl.target_kbps.store(bitrate.current_kbps(), Ordering::Relaxed);
                     tracing::info!(kbps, "bitrate cap set");
                 }
+                ControlMessage::ShareList if is_current_viewer && stream.full_access => {
+                    let items = tokio::task::spawn_blocking(aa_platform::share::list).await.unwrap_or_default();
+                    let msg = ControlMessage::Shareables { items, current: stream.now.clone() };
+                    send_control(socket, from, &msg, seq).await?;
+                }
+                ControlMessage::SetShare { target } if is_current_viewer && stream.full_access => {
+                    tracing::info!(sharing = target.label(), "the viewer chose what to share");
+                    stream.viewer_choice = Some(target);
+                    stream.follow_choice(ctl, 0);
+                }
+                ControlMessage::ShareList | ControlMessage::SetShare { .. } if is_current_viewer => {
+                    tracing::info!("the viewer asked to choose what is shared, but has no full access here");
+                }
                 other => tracing::debug!(?other, "ignored control message"),
             }
         }
@@ -599,7 +634,13 @@ async fn handle_packet(
         }
 
         Kind::Nack if is_current_viewer => {
-            ctl.intra_refresh.store(true, Ordering::Relaxed);
+            // Repair from a confirmed reference when both sides can (no big
+            // fresh picture); otherwise a keyframe.
+            if ctl.loss_recovery.load(Ordering::Relaxed) {
+                ctl.recovery.store(true, Ordering::Relaxed);
+            } else {
+                ctl.intra_refresh.store(true, Ordering::Relaxed);
+            }
         }
 
         Kind::Resend if is_current_viewer => {
@@ -618,6 +659,10 @@ async fn handle_packet(
         Kind::Ack if is_current_viewer => {
             let mut payload = packet.payload.clone();
             if let Some(rep) = ReceiverReport::decode(&mut payload) {
+                if let Some(good) = rep.last_good_frame {
+                    ctl.last_good.store(good, Ordering::Relaxed);
+                }
+                let before = bitrate.current_kbps();
                 let changed = bitrate.on_report(&rep);
                 let fec_before = ctl.fec_permille.load(Ordering::Relaxed);
                 let fec_now = (bitrate.fec_ratio() * 1000.0) as u32;
@@ -630,6 +675,17 @@ async fn handle_packet(
                             "video redundancy adjusted"
                         );
                     }
+                }
+                // Frame rate the connection affords at full sharpness.
+                let res = ctl.out_res.lock().expect("out res").unwrap_or(stream.res);
+                if let Some(fps) = stream.ladder.on_bitrate(
+                    stream.codec,
+                    res,
+                    bitrate.current_kbps(),
+                    bitrate.current_kbps() >= before,
+                ) {
+                    ctl.target_fps.store(fps, Ordering::Relaxed);
+                    tracing::info!(fps, kbps = bitrate.current_kbps(), "frame rate adapted");
                 }
                 if let Some(kbps) = changed {
                     ctl.target_kbps.store(kbps, Ordering::Relaxed);
@@ -694,14 +750,17 @@ async fn sender_task(
         };
         let Some(dest) = *video_dest.lock().expect("dest") else { continue };
         let fec = f64::from(ctl.fec_permille.load(Ordering::Relaxed)) / 1000.0;
-        let slices =
-            match wire::slice_frame_with_fec_at(&frame.data, frame.meta.frame_id, frame.meta.is_keyframe, &seq, fec) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("frame too large to slice: {e}");
-                    continue;
-                }
-            };
+        let mut flags = if frame.meta.is_keyframe { wire::flags::KEYFRAME } else { 0 };
+        if frame.recovery {
+            flags |= wire::flags::RECOVERY;
+        }
+        let slices = match wire::slice_frame_with_fec_flagged(&frame.data, frame.meta.frame_id, flags, &seq, fec) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("frame too large to slice: {e}");
+                continue;
+            }
+        };
         // Burst send. Pacing a frame across the interval was tried and made
         // Wi-Fi worse: consecutive frames overlapped on the air and collided.
         // The real fix for bursts is a lower bitrate (the controller), and
@@ -798,5 +857,131 @@ fn restore_speakers(speaker: &mut Option<Box<dyn aa_platform::audio::SpeakerCont
         if let Err(e) = s.restore() {
             tracing::warn!("restoring host speakers failed: {e}");
         }
+    }
+}
+
+/// What this session shows and how fast: the share choice (the person here,
+/// or a full-access viewer), the frame-rate ladder, and the codec and size
+/// the ladder prices.
+#[derive(Debug)]
+struct Stream {
+    /// Being shown now.
+    now: ShareTarget,
+    /// The local person's last choice (from `share.json`).
+    local: ShareTarget,
+    /// A full-access viewer's pick; cleared when the person here changes
+    /// their choice (the newest decision wins) or the viewer leaves.
+    viewer_choice: Option<ShareTarget>,
+    full_access: bool,
+    /// Why the picture is empty because of sharing ("the shared app was closed").
+    share_status: Option<&'static str>,
+    ladder: FpsLadder,
+    codec: aa_core::video::Codec,
+    res: aa_core::video::Resolution,
+    /// Shared with a watcher thread that checks every few seconds whether
+    /// the shared app is still open (asking the system can take a moment,
+    /// so never on the network loop).
+    watched: Arc<std::sync::Mutex<ShareTarget>>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Stream {
+    fn new(fps: u16) -> Self {
+        let watched = Arc::new(std::sync::Mutex::new(ShareTarget::Screen));
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let (watched, closed) = (Arc::clone(&watched), Arc::clone(&closed));
+            let _ = std::thread::Builder::new().name("aa-share-watch".into()).spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(3));
+                let t = watched.lock().map(|t| t.clone()).unwrap_or_default();
+                let gone = !t.is_screen() && !aa_platform::share::still_open(&t);
+                closed.store(gone, Ordering::Relaxed);
+            });
+        }
+        Self {
+            watched,
+            closed,
+            now: ShareTarget::Screen,
+            local: ShareTarget::Screen,
+            viewer_choice: None,
+            full_access: false,
+            share_status: None,
+            ladder: FpsLadder::new(fps, false),
+            codec: aa_core::video::Codec::Hevc,
+            res: aa_core::video::Resolution::new(1920, 1080),
+        }
+    }
+
+    /// A viewer was accepted: set the frame rate, size and sharing up for it.
+    fn start(
+        &mut self,
+        ctl: &PipelineControl,
+        n: &aa_core::capability::Negotiated,
+        host: &aa_core::capability::Capabilities,
+        full_access: bool,
+    ) {
+        self.full_access = full_access;
+        self.viewer_choice = None;
+        self.codec = n.codec;
+        self.res = n.resolution;
+        self.ladder = FpsLadder::new(n.fps, n.fixed_fps);
+        ctl.target_fps.store(self.ladder.current(), Ordering::Relaxed);
+        ctl.loss_recovery.store(n.loss_recovery, Ordering::Relaxed);
+        ctl.last_good.store(u32::MAX, Ordering::Relaxed);
+        // Smaller than our screen: the viewer chose a lower Resolution.
+        let smaller =
+            n.resolution.width < host.max_resolution.width || n.resolution.height < host.max_resolution.height;
+        *ctl.max_res.lock().expect("max res") = smaller.then_some(n.resolution);
+        ctl.max_res_changed.store(true, Ordering::Relaxed);
+        tracing::info!(
+            max_fps = n.fps,
+            starting_fps = self.ladder.current(),
+            fixed = n.fixed_fps,
+            res = ?n.resolution,
+            codec = ?n.codec,
+            repairs = n.loss_recovery,
+            "stream set up"
+        );
+        // Control limits depend on who this is: apply again.
+        self.local = aa_platform::trust::share_choice();
+        self.now = self.local.clone();
+        self.apply(ctl);
+    }
+
+    fn viewer_left(&mut self, ctl: &PipelineControl) {
+        if self.viewer_choice.take().is_some() {
+            self.follow_choice(ctl, 0);
+        }
+        self.full_access = false;
+    }
+
+    /// Re-read the local choice; apply whatever should be shown now.
+    /// `tick` (seconds) spaces out the "is that app still open?" check.
+    fn follow_choice(&mut self, ctl: &PipelineControl, _tick: u64) {
+        let local = aa_platform::trust::share_choice();
+        if local != self.local {
+            self.local = local;
+            self.viewer_choice = None;
+        }
+        let want = self.viewer_choice.clone().unwrap_or_else(|| self.local.clone());
+        if want != self.now {
+            self.now = want;
+            self.apply(ctl);
+        }
+        let gone = !self.now.is_screen() && self.closed.load(Ordering::Relaxed);
+        self.share_status = gone.then_some("The shared app or window was closed on the other computer");
+    }
+
+    fn apply(&mut self, ctl: &PipelineControl) {
+        tracing::info!(sharing = self.now.label(), full_access = self.full_access, "sharing");
+        *ctl.share.lock().expect("share") = Some(self.now.clone());
+        *ctl.audio_share.lock().expect("audio share") = Some(self.now.clone());
+        let limit = (!self.now.is_screen() && !self.full_access).then(|| self.now.clone());
+        *ctl.input_limit.lock().expect("limit") = Some(limit);
+        if let Ok(mut w) = self.watched.lock() {
+            *w = self.now.clone();
+        }
+        self.closed.store(false, Ordering::Relaxed);
+        self.share_status = None;
     }
 }

@@ -1,7 +1,8 @@
 # Installs the free add-ons the setup page ticked, each from its maker:
 # winget (Windows' own package manager) for ViGEmBus, usbip-win2 and
-# Tailscale; VB-CABLE from vb-audio.com (it isn't on winget).
-# Run by the installer as administrator:  addons.ps1 controllers mic tailscale
+# Tailscale; VB-CABLE from vb-audio.com (it isn't on winget); Microsoft's
+# free HEVC Video Extensions from the Microsoft Store (through winget).
+# Run by the installer as administrator:  addons.ps1 controllers mic tailscale hevc
 # Anything that fails is skipped; the app's Extras page offers it again.
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Wanted)
 $ErrorActionPreference = 'Continue'
@@ -48,6 +49,22 @@ if ($Wanted -contains 'mic') {
             $p = Start-Process "$dir\VBCABLE_Setup_x64.exe" -ArgumentList '-i', '-h' -Wait -PassThru
             Say "VB-CABLE finished (exit $($p.ExitCode))"
         } catch { Say "VB-CABLE skipped: $_" }
+    }
+}
+if ($Wanted -contains 'hevc') {
+    $have = Get-AppxPackage -AllUsers -Name 'Microsoft.HEVCVideoExtension*' -ErrorAction SilentlyContinue
+    if (-not $have) {
+        # "HEVC Video Extensions from Device Manufacturer": the free edition.
+        # Microsoft sometimes refuses it to PCs whose maker didn't include
+        # it; the app then shows a button to the Store page instead.
+        $wg = Get-Command winget.exe -ErrorAction SilentlyContinue
+        if ($wg) {
+            Say 'installing HEVC Video Extensions'
+            & $wg.Source install --id 9N4WGH0Z6VHQ --exact --silent --source msstore `
+                --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 |
+                ForEach-Object { Say "  $_" }
+            Say "HEVC finished (exit $LASTEXITCODE)"
+        } else { Say 'winget not found; skipped HEVC' }
     }
 }
 exit 0

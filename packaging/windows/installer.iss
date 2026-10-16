@@ -28,6 +28,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Name: "controllers"; Description: "Game controllers, including the full DualSense (ViGEmBus, usbip-win2)"; GroupDescription: "Free add-ons, downloaded from their makers:"
 Name: "mic"; Description: "Microphone from your other computer (VB-CABLE)"; GroupDescription: "Free add-ons, downloaded from their makers:"
 Name: "tailscale"; Description: "Reach this PC from anywhere (Tailscale)"; GroupDescription: "Free add-ons, downloaded from their makers:"
+Name: "hevc"; Description: "Sharper picture for less data (Microsoft's HEVC Video Extensions)"; GroupDescription: "Free add-ons, downloaded from their makers:"
 
 [Files]
 Source: "..\..\target\release\anywhere.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -75,6 +76,7 @@ begin
   if WizardIsTaskSelected('controllers') then Result := Result + ' controllers';
   if WizardIsTaskSelected('mic') then Result := Result + ' mic';
   if WizardIsTaskSelected('tailscale') then Result := Result + ' tailscale';
+  if WizardIsTaskSelected('hevc') then Result := Result + ' hevc';
   Result := Trim(Result);
 end;
 

@@ -98,6 +98,10 @@ impl Kind {
 pub mod flags {
     /// This video frame is a keyframe (decodable on its own).
     pub const KEYFRAME: u8 = 1 << 0;
+    /// This video frame repairs a loss without being a whole new picture:
+    /// it only refers to a frame the viewer confirmed it has (a Mac
+    /// "long-term reference"). A viewer waiting after a loss may resume here.
+    pub const RECOVERY: u8 = 1 << 1;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,9 +198,13 @@ impl SeqCounter {
 /// for AV1). Slices are cut at byte boundaries; the decoder only sees the
 /// reassembled whole, so it never needs to know.
 pub fn slice_frame(frame: &Bytes, frame_id: u32, keyframe: bool, seq: &SeqCounter) -> Result<Vec<Bytes>, WireError> {
+    slice_frame_flagged(frame, frame_id, if keyframe { flags::KEYFRAME } else { 0 }, seq)
+}
+
+/// [`slice_frame`] with any header flags (keyframe, recovery).
+pub fn slice_frame_flagged(frame: &Bytes, frame_id: u32, flags: u8, seq: &SeqCounter) -> Result<Vec<Bytes>, WireError> {
     let slice_count = frame.len().div_ceil(MAX_PAYLOAD).max(1);
     let slice_count_u16 = u16::try_from(slice_count).map_err(|_| WireError::PayloadTooLarge(frame.len()))?;
-    let flags = if keyframe { flags::KEYFRAME } else { 0 };
 
     let mut out = Vec::with_capacity(slice_count);
     for (i, chunk) in frame.chunks(MAX_PAYLOAD).enumerate().take(slice_count) {
@@ -288,10 +296,20 @@ pub fn slice_frame_with_fec_at(
     seq: &SeqCounter,
     ratio: f64,
 ) -> Result<Vec<Bytes>, WireError> {
-    let mut out = slice_frame(frame, frame_id, keyframe, seq)?;
+    slice_frame_with_fec_flagged(frame, frame_id, if keyframe { flags::KEYFRAME } else { 0 }, seq, ratio)
+}
+
+/// [`slice_frame_with_fec_at`] with any header flags (keyframe, repair).
+pub fn slice_frame_with_fec_flagged(
+    frame: &Bytes,
+    frame_id: u32,
+    flags: u8,
+    seq: &SeqCounter,
+    ratio: f64,
+) -> Result<Vec<Bytes>, WireError> {
+    let mut out = slice_frame_flagged(frame, frame_id, flags, seq)?;
     let data: Vec<&[u8]> = out.iter().map(|d| &d[HEADER_LEN..]).collect();
     let stripes = parity_count_at(data.len(), ratio);
-    let flags = if keyframe { flags::KEYFRAME } else { 0 };
     let mut parity = Vec::with_capacity(stripes);
     for k in 0..stripes {
         let payload = stripe_parity(&data, k, stripes);
@@ -362,6 +380,8 @@ impl ResendRequest {
 pub struct CompleteFrame {
     pub frame_id: u32,
     pub keyframe: bool,
+    /// See [`flags::RECOVERY`].
+    pub recovery: bool,
     pub data: Bytes,
 }
 
@@ -379,6 +399,7 @@ pub enum Reassembly {
 #[derive(Debug, Default)]
 struct PartialFrame {
     keyframe: bool,
+    recovery: bool,
     /// Data slices in the frame; 0 until the first data slice arrives
     /// (a parity packet can get here first).
     slice_count: u16,
@@ -518,10 +539,11 @@ impl Reassembler {
             return Reassembly::Stale; // a resend of something already complete
         }
 
-        let pf = self
-            .partial
-            .entry(h.frame_id)
-            .or_insert_with(|| PartialFrame { keyframe: h.flags & flags::KEYFRAME != 0, ..PartialFrame::default() });
+        let pf = self.partial.entry(h.frame_id).or_insert_with(|| PartialFrame {
+            keyframe: h.flags & flags::KEYFRAME != 0,
+            recovery: h.flags & flags::RECOVERY != 0,
+            ..PartialFrame::default()
+        });
         if pf.requested_ms.is_some() {
             self.resent += 1;
         }
@@ -561,9 +583,15 @@ impl Reassembler {
             for s in pf.slices.into_iter().flatten() {
                 data.extend_from_slice(&s);
             }
-            let frame = CompleteFrame { frame_id: h.frame_id, keyframe: pf.keyframe, data: data.freeze() };
-            // A keyframe needs nothing before it: whatever is older is moot.
-            if frame.keyframe {
+            let frame = CompleteFrame {
+                frame_id: h.frame_id,
+                keyframe: pf.keyframe,
+                recovery: pf.recovery,
+                data: data.freeze(),
+            };
+            // A keyframe needs nothing before it, nor does a repair frame
+            // (built only on a frame the viewer has): whatever is older is moot.
+            if frame.keyframe || frame.recovery {
                 self.abandon_older_than(h.frame_id);
             }
             self.held.insert(h.frame_id, frame);

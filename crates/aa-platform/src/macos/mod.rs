@@ -33,6 +33,7 @@ pub mod input;
 
 pub mod gamepad;
 pub mod speaker;
+pub mod wininfo;
 
 /// Query what this Mac can do. Until the backends exist this reports what a
 /// current Apple Silicon machine supports so negotiation code can be tested.
@@ -46,6 +47,8 @@ pub fn probe_capabilities() -> Capabilities {
         color_ranges: vec![ColorRange::Sdr],
         has_gamepad: true,
         can_emulate_gamepad: false,
+        fixed_fps: false,
+        loss_recovery: false,
     }
 }
 
@@ -67,12 +70,14 @@ pub fn host_backends() -> Result<HostBackends> {
     // (the PC viewer today). The session switches on negotiation.
     let mut codecs = Vec::new();
     let mut encoder: Option<Box<dyn crate::VideoEncoder>> = None;
+    let mut loss_recovery = false;
     for codec in [Codec::Hevc, Codec::H264] {
         let kbps = aa_core::config::StreamConfig::suggested_bitrate_kbps(res, fps);
         match encoder::VtEncoder::new(codec, res, fps, kbps) {
             Ok(e) => {
                 codecs.push(codec);
                 if encoder.is_none() {
+                    loss_recovery = crate::VideoEncoder::supports_recovery(&e);
                     encoder = Some(Box::new(e));
                 }
             }
@@ -108,6 +113,8 @@ pub fn host_backends() -> Result<HostBackends> {
             color_ranges: vec![ColorRange::Sdr],
             has_gamepad: false,
             can_emulate_gamepad: true,
+            fixed_fps: false,
+            loss_recovery,
         },
     })
 }
@@ -141,6 +148,11 @@ pub fn viewer_backends() -> Result<ViewerBackends> {
     // decoder is built after negotiation, so probe once here.
     let hardware = decoder::VtDecoder::new(Codec::H264).is_ok();
     capabilities.codecs = if hardware { vec![Codec::Hevc, Codec::H264] } else { vec![Codec::H264] };
+    // AV1 (M3 and later): the PC's Intel chip can send it, about a quarter
+    // less data than HEVC for the same picture.
+    if hardware && decoder::av1_supported() {
+        capabilities.codecs.insert(0, Codec::Av1);
+    }
     tracing::info!(hardware, codecs = ?capabilities.codecs, "viewer decoder: VideoToolbox");
     let decoder: crate::DecoderFactory = Box::new(move |codec| -> Result<Box<dyn crate::VideoDecoder>> {
         if hardware {

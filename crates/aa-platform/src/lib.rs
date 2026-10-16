@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use aa_core::capability::Capabilities;
 use aa_core::input::{InputEvent, Rumble};
+use aa_core::share::ShareTarget;
 use aa_core::video::{Codec, EncodedFrameMeta, PixelFormat, Resolution};
 use bytes::Bytes;
 
@@ -36,6 +37,7 @@ pub mod padhub;
 pub mod padmap;
 pub mod pairing;
 pub mod playout;
+pub mod share;
 pub mod sw;
 pub mod tailscale;
 pub mod trust;
@@ -83,6 +85,20 @@ pub struct CapturedFrame {
 pub struct EncodedFrame {
     pub meta: EncodedFrameMeta,
     pub data: Bytes,
+    /// This frame is a long-term reference: once the viewer confirms it
+    /// has it, hand this token back through [`VideoEncoder::acknowledge`]
+    /// so a later loss can be repaired from it (Mac only).
+    pub ltr_token: Option<i64>,
+    /// This frame repairs a loss from a confirmed long-term reference
+    /// (the answer to [`VideoEncoder::request_recovery`]).
+    pub recovery: bool,
+}
+
+impl EncodedFrame {
+    /// A plain frame (no long-term reference business).
+    pub fn new(meta: EncodedFrameMeta, data: Bytes) -> Self {
+        Self { meta, data, ltr_token: None, recovery: false }
+    }
 }
 
 /// One decoded picture ready to present. Same storage story as capture.
@@ -144,6 +160,23 @@ pub trait ScreenCapture: Send {
     fn unavailable_reason(&self) -> Option<&'static str> {
         None
     }
+    /// Show only this app or window (or everything again). Picture size may
+    /// change; the pipeline follows `CapturedFrame::resolution`.
+    fn set_share(&mut self, target: &ShareTarget) -> Result<()> {
+        if target.is_screen() {
+            Ok(())
+        } else {
+            Err(PlatformError::NotImplemented("sharing one app or window"))
+        }
+    }
+    /// The largest picture the viewer wants (its Resolution setting), or
+    /// `None` for full size. Backends that can scale while capturing (Mac)
+    /// do it here; others leave it to the encoder.
+    fn set_max_size(&mut self, _max: Option<Resolution>) {}
+    /// Whether the picture comes out already scaled by [`Self::set_max_size`].
+    fn scales_itself(&self) -> bool {
+        false
+    }
 }
 
 /// Turns captured frames into a codec bitstream.
@@ -154,6 +187,22 @@ pub trait VideoEncoder: Send {
     /// Ask the encoder to begin an intra-refresh cycle so a viewer that lost
     /// a frame recovers within a few frames without a full keyframe spike.
     fn request_intra_refresh(&mut self) -> Result<()>;
+    /// Change the frame rate the encoder plans for. `true`: done without a
+    /// restart; `false`: the caller must build a new encoder at that rate.
+    fn set_frame_rate(&mut self, _fps: u16) -> bool {
+        false
+    }
+    /// Can this encoder repair a loss from a long-term reference?
+    fn supports_recovery(&self) -> bool {
+        false
+    }
+    /// The viewer confirmed it has these long-term references.
+    fn acknowledge(&mut self, _tokens: &[i64]) {}
+    /// Make the next frame a repair built on a confirmed long-term
+    /// reference. `false`: none is confirmed yet; ask for a keyframe instead.
+    fn request_recovery(&mut self) -> bool {
+        false
+    }
 }
 
 /// Turns a codec bitstream back into pictures.
@@ -164,6 +213,10 @@ pub trait VideoDecoder: Send {
 /// Applies viewer input to the host OS.
 pub trait InputInjector: Send {
     fn inject(&mut self, event: InputEvent) -> Result<()>;
+    /// Keep the viewer inside one app or window (clicks elsewhere and
+    /// app-switching keys are dropped; mouse positions map onto the shared
+    /// window), or `None` for the whole screen.
+    fn set_limit(&mut self, _limit: Option<&ShareTarget>) {}
 }
 
 /// Presents a virtual game controller to the host OS.
@@ -202,6 +255,23 @@ pub fn keep_awake(on: bool) {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let _ = on;
 }
+/// The main screen's refresh rate (frames per second it can show). The
+/// viewer tells the host, so it never sends frames the screen can't show.
+pub fn display_refresh_hz() -> Option<u16> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(macos::capture::main_display_mode().2)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::display_refresh_hz()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        None
+    }
+}
+
 /// Same idea on the viewer: build the decoder for the codec the host chose.
 pub type DecoderFactory = Box<dyn FnMut(Codec) -> Result<Box<dyn VideoDecoder>> + Send>;
 

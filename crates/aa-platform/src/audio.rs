@@ -164,6 +164,12 @@ pub trait AudioCapture: Send {
     /// (`FRAME_LEN_I16` interleaved i16). Returns false if nothing was
     /// playing (silence), so the host can skip sending.
     fn next_frame(&mut self, pcm: &mut [i16]) -> Result<bool>;
+    /// Send only this app's sound (or everything again). Backends that
+    /// can't separate one app's sound send nothing while one is shared,
+    /// rather than everything: nothing must slip out that wasn't chosen.
+    fn set_share(&mut self, _target: &aa_core::share::ShareTarget) -> crate::Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Control over the host's own speakers (not the stream): used to silence

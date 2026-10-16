@@ -252,6 +252,12 @@ struct Settings {
     auto_update: bool,
     /// The "finish setting up" card was answered.
     addons_offered: bool,
+    /// Watching: picture size ("full", "1440", "1080", "720").
+    resolution: String,
+    /// Watching: frames a second ("auto" or a number).
+    fps: String,
+    /// Sharing: everything, one app, or one window.
+    share_target: aa_core::share::ShareTarget,
 }
 
 impl Default for Settings {
@@ -269,6 +275,9 @@ impl Default for Settings {
             manual_address: String::new(),
             auto_update: true,
             addons_offered: false,
+            resolution: "full".into(),
+            fps: "auto".into(),
+            share_target: aa_core::share::ShareTarget::Screen,
         }
     }
 }
@@ -294,6 +303,8 @@ impl Settings {
             show_stats: self.show_stats,
             max_mbps: self.max_mbps,
             volume_boost: self.volume_boost,
+            resolution: self.resolution.clone(),
+            fps: self.fps.clone(),
         }
     }
 }
@@ -404,6 +415,10 @@ struct App {
     checks_at: Instant,
     last_poll: Instant,
     copied: Option<Instant>,
+    /// Apps and windows open here, for "What to share" (refreshed in the
+    /// background every few seconds).
+    shareables: Arc<Mutex<Vec<aa_core::share::ShareTarget>>>,
+    share_saved_at: Instant,
 }
 
 impl App {
@@ -459,7 +474,10 @@ impl App {
             checks_at: Instant::now(),
             last_poll: Instant::now(),
             copied: None,
+            shareables: Arc::default(),
+            share_saved_at: Instant::now().checked_sub(Duration::from_secs(3600)).unwrap_or_else(Instant::now),
         };
+        spawn_share_lister(Arc::clone(&app.shareables), cc.egui_ctx.clone());
         update::spawn_checker(Arc::clone(&app.updater), cc.egui_ctx.clone());
         let background = std::env::args().any(|a| a == "--background");
         // Reopened by an update: as it was (sharing or not), minimised.
@@ -574,7 +592,7 @@ impl App {
 
     /// Add-ons that can be installed for you and aren't yet.
     fn missing_addons(&self) -> usize {
-        self.checks.iter().filter(|c| !c.ok && !c.name.starts_with("HEVC")).count()
+        self.checks.iter().filter(|c| !c.ok).count()
     }
 
     fn addons_card(&mut self, ui: &mut Ui, first_run: bool) {
@@ -737,6 +755,12 @@ impl App {
         }
         self.maybe_update();
         self.check_stale_service();
+        // Keep the share choice fresh for the sharing side; a stale one (the
+        // app closed) means "whole screen".
+        if self.share_saved_at.elapsed() > Duration::from_secs(30) {
+            self.share_saved_at = Instant::now();
+            trust::save_share_choice(&self.settings.share_target);
+        }
         if self.lists_at.elapsed() > Duration::from_secs(2) {
             self.refresh_lists();
         }
@@ -1190,6 +1214,9 @@ impl App {
         });
 
         ui.add_space(12.0);
+        self.what_to_share(ui);
+
+        ui.add_space(12.0);
         card(ui, |ui| {
             section(
                 ui,
@@ -1229,9 +1256,25 @@ impl App {
                                 trust::forget_viewer(&v.key);
                                 self.paired_viewers.retain(|x| x.key != v.key);
                             }
+                            ui.add_space(10.0);
+                            let mut full = v.full_access;
+                            if toggle(ui, &mut full) {
+                                trust::set_viewer_full_access(&v.key, full);
+                                self.paired_viewers = trust::paired_viewers();
+                            }
+                            ui.label(RichText::new("Full access").small().color(MUTED))
+                                .on_hover_text("Can choose what is shared and always controls the whole computer");
                         });
                     });
                 }
+                ui.label(
+                    RichText::new(
+                        "Full access: that computer can pick what is shared from its own side, and controls the \
+                         whole computer even while you share one app.",
+                    )
+                    .small()
+                    .color(FAINT),
+                );
             }
         });
 
@@ -1294,6 +1337,92 @@ impl App {
         }
     }
 
+    /// "What to share": everything, one app or one window.
+    #[allow(clippy::items_after_statements, clippy::too_many_lines)]
+    fn what_to_share(&mut self, ui: &mut Ui) {
+        use aa_core::share::ShareTarget;
+        let list = self.shareables.lock().map(|l| l.clone()).unwrap_or_default();
+        let mut target = self.settings.share_target.clone();
+        card(ui, |ui| {
+            section(
+                ui,
+                "What to share",
+                "Share everything, or just one app or window. The other computer then sees and controls only \
+                 that, and hears only its sound.",
+            );
+            #[derive(PartialEq, Clone, Copy)]
+            enum Mode {
+                Screen,
+                App,
+                Window,
+            }
+            let mode = match &target {
+                ShareTarget::Screen => Mode::Screen,
+                ShareTarget::App { .. } => Mode::App,
+                ShareTarget::Window { .. } => Mode::Window,
+            };
+            let mut new_mode = mode;
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut new_mode, Mode::Screen, "Whole screen");
+                ui.selectable_value(&mut new_mode, Mode::App, "One app");
+                ui.selectable_value(&mut new_mode, Mode::Window, "One window");
+            });
+            if new_mode != mode {
+                let first = |want: Mode| {
+                    list.iter()
+                        .find(|t| match want {
+                            Mode::App => matches!(t, ShareTarget::App { .. }),
+                            Mode::Window => matches!(t, ShareTarget::Window { .. }),
+                            Mode::Screen => false,
+                        })
+                        .cloned()
+                };
+                target = match new_mode {
+                    Mode::Screen => ShareTarget::Screen,
+                    m => first(m).unwrap_or(ShareTarget::Screen),
+                };
+            }
+            if !target.is_screen() {
+                ui.add_space(6.0);
+                let want_windows = matches!(target, ShareTarget::Window { .. });
+                egui::ComboBox::from_id_salt("share-pick").selected_text(target.label()).width(360.0).show_ui(
+                    ui,
+                    |ui| {
+                        for t in list.iter().filter(|t| matches!(t, ShareTarget::Window { .. }) == want_windows) {
+                            if !t.is_screen() {
+                                let selected = *t == target;
+                                if ui.selectable_label(selected, t.label()).clicked() {
+                                    target = t.clone();
+                                }
+                            }
+                        }
+                    },
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "When nobody is at this computer (Anywhere closed, or after a restart), the whole screen is \
+                         shared again.",
+                    )
+                    .small()
+                    .color(FAINT),
+                );
+            } else if list.is_empty() && cfg!(target_os = "macos") {
+                ui.label(
+                    RichText::new("Apps appear here once Anywhere may record the screen (Extras → Permissions).")
+                        .small()
+                        .color(FAINT),
+                );
+            }
+        });
+        if target != self.settings.share_target {
+            self.settings.share_target = target;
+            self.settings.save();
+            trust::save_share_choice(&self.settings.share_target);
+            self.share_saved_at = Instant::now();
+        }
+    }
+
     #[allow(clippy::too_many_lines)] // one page, top to bottom
     fn settings_page(&mut self, ui: &mut Ui) {
         Self::page_header(ui, "Settings", "How connections start. You can change most of these while connected too.");
@@ -1321,6 +1450,44 @@ impl App {
             changed |= ui
                 .add(egui::Slider::new(&mut s.max_mbps, 5.0..=150.0).logarithmic(true).suffix(" Mbps").max_decimals(0))
                 .changed();
+            divider(ui);
+            ui.label(RichText::new("Resolution").color(TEXT));
+            ui.label(
+                RichText::new("Full keeps the other screen's own size. Lower uses less data.").small().color(MUTED),
+            );
+            ui.horizontal_wrapped(|ui| {
+                for (v, label) in [("full", "Full"), ("1440", "1440p"), ("1080", "1080p"), ("720", "720p")] {
+                    if ui.selectable_label(s.resolution == v, label).clicked() && s.resolution != v {
+                        v.clone_into(&mut s.resolution);
+                        changed = true;
+                    }
+                }
+            });
+            divider(ui);
+            ui.label(RichText::new("Frame rate").color(TEXT));
+            ui.label(
+                RichText::new(
+                    "Automatic: as smooth as both screens and the connection allow, never below 60. Or hold a \
+                     number (above what a screen shows, it sends that screen's most).",
+                )
+                .small()
+                .color(MUTED),
+            );
+            ui.horizontal_wrapped(|ui| {
+                for (v, label) in [
+                    ("auto", "Automatic"),
+                    ("60", "60"),
+                    ("120", "120"),
+                    ("144", "144"),
+                    ("200", "200"),
+                    ("240", "240"),
+                ] {
+                    if ui.selectable_label(s.fps == v, label).clicked() && s.fps != v {
+                        v.clone_into(&mut s.fps);
+                        changed = true;
+                    }
+                }
+            });
         });
         ui.add_space(12.0);
         card(ui, |ui| {
@@ -1619,6 +1786,20 @@ impl eframe::App for App {
 
 /// Keep the list of sharing computers fresh (every 3 s), leaving out this
 /// computer itself.
+/// Keep the list of apps and windows that could be shared up to date.
+fn spawn_share_lister(list: Arc<Mutex<Vec<aa_core::share::ShareTarget>>>, ctx: egui::Context) {
+    let _ = std::thread::Builder::new().name("share-list".into()).spawn(move || loop {
+        let items = aa_platform::share::list();
+        if let Ok(mut l) = list.lock() {
+            if *l != items {
+                *l = items;
+                ctx.request_repaint();
+            }
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    });
+}
+
 fn spawn_discovery(found: Arc<Mutex<Vec<Found>>>, ctx: egui::Context) {
     let _ = std::thread::Builder::new().name("discovery".into()).spawn(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };

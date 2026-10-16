@@ -21,7 +21,8 @@ use windows::Win32::Media::Audio::{
     IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
     AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
-    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX,
+    PROCESS_LOOPBACK_MODE, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX,
     WAVEFORMATEXTENSIBLE,
 };
 use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
@@ -54,6 +55,8 @@ pub struct WasapiLoopback {
     /// Resampler phase carried across chunks.
     resample_pos: f64,
     silent_frames: u32,
+    /// Capturing only one shared app's sound right now.
+    only_app: bool,
 }
 
 // SAFETY: used from the audio thread only.
@@ -114,6 +117,13 @@ impl WasapiLoopback {
     /// Everything-but-us process loopback: Windows mixes all other apps for
     /// us at the format we ask for, independent of the speaker device.
     pub fn process_loopback() -> Result<Self> {
+        // SAFETY: plain query.
+        Self::process_loopback_for(unsafe { GetCurrentProcessId() }, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE)
+    }
+
+    /// Process loopback around `pid`: everything except it (and its child
+    /// processes), or only it.
+    fn process_loopback_for(pid: u32, mode: PROCESS_LOOPBACK_MODE) -> Result<Self> {
         // SAFETY: the activation params and PROPVARIANT live on this stack
         // frame for the whole synchronous wait; handles come from successful calls.
         unsafe {
@@ -125,8 +135,8 @@ impl WasapiLoopback {
                         // "Everything except our own process tree": we never
                         // want to re-stream the viewer's own sound if it ever
                         // runs on the same machine.
-                        TargetProcessId: GetCurrentProcessId(),
-                        ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+                        TargetProcessId: pid,
+                        ProcessLoopbackMode: mode,
                     },
                 },
             };
@@ -256,6 +266,7 @@ impl WasapiLoopback {
                 pending: VecDeque::with_capacity(FRAME_LEN_I16 * 8),
                 resample_pos: 0.0,
                 silent_frames: 0,
+                only_app: false,
             })
         }
     }
@@ -350,6 +361,33 @@ fn to_i16(v: f32) -> i16 {
 }
 
 impl AudioCapture for WasapiLoopback {
+    fn set_share(&mut self, target: &aa_core::share::ShareTarget) -> Result<bool> {
+        let next = if target.is_screen() {
+            if !self.only_app {
+                return Ok(true); // already everything
+            }
+            Self::process_loopback()?
+        } else {
+            let pid = super::share::pid_for(target)
+                .ok_or_else(|| PlatformError::Unavailable(format!("{} has no open window", target.label())))?;
+            match Self::process_loopback_for(pid, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE) {
+                Ok(mut n) => {
+                    n.only_app = true;
+                    n
+                }
+                // Older Windows: can't take one app's sound. Say so; the
+                // host then sends none rather than everything.
+                Err(e) => {
+                    tracing::warn!("this PC can't capture just one app's sound ({e})");
+                    return Ok(false);
+                }
+            }
+        };
+        *self = next;
+        tracing::info!(sound = target.label(), "sound now from");
+        Ok(true)
+    }
+
     fn next_frame(&mut self, pcm: &mut [i16]) -> Result<bool> {
         debug_assert_eq!(pcm.len(), FRAME_LEN_I16);
         // SAFETY: event handle and clients are live for self's lifetime.
