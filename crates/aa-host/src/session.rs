@@ -761,8 +761,7 @@ impl RecentPackets {
             let index = item & !wire::ResendRequest::PARITY_BIT;
             let hit = slices.iter().find(|d| {
                 Packet::parse(Bytes::clone(d))
-                    .ok()
-                    .is_some_and(|p| (p.header.kind == Kind::VideoFec) == want_parity && p.header.slice_index == index)
+                    .is_ok_and(|p| (p.header.kind == Kind::VideoFec) == want_parity && p.header.slice_index == index)
             });
             if let Some(d) = hit {
                 out.push(d.clone());
