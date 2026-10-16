@@ -786,6 +786,15 @@ impl ApplicationHandler<Wake> for App {
                         let hid = shortcut_key(hid, self.cmd_as_ctrl, crate::link::host_is_mac());
                         let pressed = event.state == ElementState::Pressed;
                         let is_modifier = (0xE0..=0xE7).contains(&hid);
+                        if cfg!(target_os = "macos") && code == winit::keyboard::KeyCode::CapsLock {
+                            // macOS reports Caps Lock as a state, not a key:
+                            // "pressed" when the light goes on, "released"
+                            // when it goes off. Hosts toggle on a press, so
+                            // send a whole tap for every change.
+                            self.send(InputEvent::Key { hid_usage: hid, pressed: true });
+                            self.send(InputEvent::Key { hid_usage: hid, pressed: false });
+                            return;
+                        }
                         if pressed && !is_modifier && self.cmd_as_ctrl && self.cmd_held {
                             // macOS never reports the key-up of a key pressed
                             // while Cmd is down. Sent as a plain press, Cmd+C

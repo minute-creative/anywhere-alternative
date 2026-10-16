@@ -454,6 +454,18 @@ against the mock host (before: 10–18 fps, ~10 frames dropped per second):
   0 dropped at 18% loss on the mock link; at 1080p the same 27 fps the
   clean container link manages. Stats line gains `resent=`.
 
+## Day 15 — Caps Lock does nothing on the Mac (v0.4.8)
+
+Owner: Caps Lock pressed on the PC doesn't take on the Mac. Cause: Caps
+Lock on a Mac is a *state* in the HID system, not a key; a Quartz
+`kVK_CapsLock` key event is ignored. Fix: the Mac host opens the
+`IOHIDSystem` service once and flips the lock with
+`IOHIDSetModifierLockState` on each press (release ignored). The reverse
+direction had a quieter bug: a Mac *viewer* reports Caps Lock as
+"pressed" when the light goes on and "released" when it goes off, and a
+Windows host toggles on presses, so it would stick on; the viewer now
+sends a whole tap for every change. Untested on hardware (CI only).
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.

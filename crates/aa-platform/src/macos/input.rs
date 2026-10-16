@@ -44,8 +44,82 @@ const FIELD_BUTTON_NUMBER: u32 = 3;
 const FIELD_DELTA_X: u32 = 4;
 const FIELD_DELTA_Y: u32 = 5;
 
+/// USB HID usage of Caps Lock.
+const HID_CAPS_LOCK: u16 = 0x39;
+
+/// Caps Lock on a Mac is not a key event: posting `kVK_CapsLock` through
+/// Quartz does nothing, because the lock state lives in the HID system.
+/// `IOHIDSetModifierLockState` on the `IOHIDSystem` service flips it (and
+/// the keyboard's light) the way the real key does.
+mod caps_lock {
+    use std::ffi::c_void;
+
+    const IO_HID_PARAM_CONNECT_TYPE: u32 = 1;
+    /// `kIOHIDCapsLockState`.
+    const CAPS_LOCK_SELECTOR: i32 = 0;
+
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        fn IOServiceMatching(name: *const std::ffi::c_char) -> *mut c_void;
+        fn IOServiceGetMatchingService(main_port: u32, matching: *mut c_void) -> u32;
+        fn IOServiceOpen(service: u32, owning_task: u32, connect_type: u32, connect: *mut u32) -> i32;
+        fn IOServiceClose(connect: u32) -> i32;
+        fn IOObjectRelease(object: u32) -> i32;
+        fn IOHIDGetModifierLockState(handle: u32, selector: i32, state: *mut bool) -> i32;
+        fn IOHIDSetModifierLockState(handle: u32, selector: i32, state: bool) -> i32;
+    }
+    extern "C" {
+        static mach_task_self_: u32;
+    }
+
+    /// A connection to the HID system, opened once.
+    pub struct Lock(u32);
+
+    impl Lock {
+        pub fn open() -> Option<Self> {
+            // SAFETY: plain IOKit calls; the service handle is released
+            // after the connection is opened, as the API requires.
+            unsafe {
+                let matching = IOServiceMatching(c"IOHIDSystem".as_ptr());
+                if matching.is_null() {
+                    return None;
+                }
+                let service = IOServiceGetMatchingService(0, matching); // consumes `matching`
+                if service == 0 {
+                    return None;
+                }
+                let mut connect = 0u32;
+                let rc = IOServiceOpen(service, mach_task_self_, IO_HID_PARAM_CONNECT_TYPE, &mut connect);
+                IOObjectRelease(service);
+                (rc == 0 && connect != 0).then_some(Self(connect))
+            }
+        }
+
+        pub fn toggle(&self) -> bool {
+            // SAFETY: valid connection from `open`.
+            unsafe {
+                let mut on = false;
+                if IOHIDGetModifierLockState(self.0, CAPS_LOCK_SELECTOR, &mut on) != 0 {
+                    return false;
+                }
+                IOHIDSetModifierLockState(self.0, CAPS_LOCK_SELECTOR, !on) == 0
+            }
+        }
+    }
+
+    impl Drop for Lock {
+        fn drop(&mut self) {
+            // SAFETY: closing our own connection once.
+            unsafe {
+                IOServiceClose(self.0);
+            }
+        }
+    }
+}
+
 pub struct MacInput {
     source: Option<CFRetained<CGEventSource>>,
+    caps: Option<caps_lock::Lock>,
     /// Where we last put the pointer, in global display points.
     x: f64,
     y: f64,
@@ -86,6 +160,13 @@ impl MacInput {
             buttons: 0,
             keys: Vec::new(),
             clicks: ClickCounter::default(),
+            caps: {
+                let c = caps_lock::Lock::open();
+                if c.is_none() {
+                    tracing::warn!("Caps Lock cannot be toggled on this Mac (HID system not reachable)");
+                }
+                c
+            },
         })
     }
 
@@ -162,6 +243,16 @@ impl MacInput {
     }
 
     fn key(&mut self, usage: u16, pressed: bool) {
+        if usage == HID_CAPS_LOCK {
+            // Toggle on press only; the release of a toggle key means nothing.
+            if pressed {
+                match &self.caps {
+                    Some(c) if c.toggle() => {}
+                    _ => tracing::warn!("Caps Lock toggle failed"),
+                }
+            }
+            return;
+        }
         let Some(code) = hid_to_mac_keycode(usage) else { return };
         if pressed {
             if !self.keys.contains(&usage) {
