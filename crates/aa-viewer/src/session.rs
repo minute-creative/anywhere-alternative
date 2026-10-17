@@ -1,4 +1,20 @@
 //! Viewer network loop: handshake, receive video, decode, send input.
+//!
+//! In plain words: this is the watching computer's side of one connection.
+//! 1. Handshake: say hello (repeated until the host answers), learn the
+//!    agreed codec, size and frame rate.
+//! 2. Then one loop waits for whichever happens first: a packet from the
+//!    host, a command from the window (mouse, keys, settings), a microphone
+//!    or camera chunk to send, or one of several timers (resend check every
+//!    2 ms, ping every 0.5 s, report every second).
+//! 3. Video packets are put back together into frames (`wire::Reassembler`),
+//!    missing pieces are asked for again, and finished frames go to a
+//!    separate decode thread so slow decoding never delays the network.
+//! 4. Once a second a report tells the host how much was lost, so it can
+//!    raise or lower the bitrate.
+//!
+//! Debugging: the `stream` log line written every second is the best
+//! summary (see docs/CODE-GUIDE.md section 5 for what each number means).
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -191,7 +207,13 @@ pub async fn run(
         .map_err(|e| anyhow::anyhow!("no decoder for negotiated codec {:?}: {e}", negotiated.codec))?;
 
     // --- decode thread -----------------------------------------------------
-    let (frame_tx, frame_rx) = mpsc::channel::<CompleteFrame>(2);
+    // Each frame travels with a flag saying "a frame before this one never
+    // reached the decoder" (dropped because the decoder was behind, or given
+    // up by the reassembler). The flag rides in the same queue as the frames
+    // so the decode thread sees it at exactly the right moment.
+    let (frame_tx, frame_rx) = mpsc::channel::<(CompleteFrame, bool)>(2);
+    // A frame was lost and the next queued frame must carry the flag.
+    let mut gap_pending = false;
     // Set by the decode thread when it cannot continue (no reference frame);
     // the network loop turns it into a NACK so the host sends a keyframe, and
     // the decode thread skips non-keyframes until one arrives.
@@ -292,20 +314,15 @@ pub async fn run(
                             }
                             frames_this_second += 1;
                             pacing.frame();
-                            if frame_tx.try_send(frame).is_err() {
-                                // Decoder is behind; whatever it misses breaks the
-                                // reference chain, so a keyframe is needed.
-                                stats.frames_dropped += 1;
-                                need_keyframe.store(true, Ordering::Relaxed);
-                            }
+                            queue_frame(&frame_tx, frame, &mut gap_pending, &need_keyframe, &mut stats);
                         }
                         for rq in reassembler.resend_requests(now_ms) {
                             send_resend(&socket, &rq, &seq).await?;
                         }
-                        for lost in reassembler.take_abandoned() {
+                        for _lost in reassembler.take_abandoned() {
                             stats.frames_dropped += 1;
+                            gap_pending = true;
                             need_keyframe.store(true, Ordering::Relaxed);
-                            let _ = lost;
                         }
                         if need_keyframe.load(Ordering::Relaxed) && !last_nack.is_some_and(|t| t.elapsed() <= NACK_INTERVAL) {
                             send_nack(&socket, 0, &seq).await?;
@@ -407,63 +424,34 @@ pub async fn run(
             }
 
             cmd = commands.recv() => {
-                match cmd {
+                // Mouse and key events are bundled: everything already queued
+                // goes out in one datagram. A non-input command found while
+                // bundling (setting, controller report, quit) is handled right
+                // after the bundle is sent, so the order is kept.
+                let follow_up: Option<Option<ViewerCommand>> = match cmd {
                     Some(ViewerCommand::Input(first)) => {
-                        // Coalesce everything already queued into one datagram.
                         let mut batch = vec![first];
-                        while let Ok(cmd) = commands.try_recv() {
-                            let ViewerCommand::Input(ev) = cmd else {
-                                // Not an input event; handle it after this batch.
-                                match cmd {
-                                    ViewerCommand::SetMaxBitrate(kbps) => {
-                                        send_control(&socket, &ControlMessage::SetMaxBitrate { kbps }, &seq).await?;
-                                    }
-                                    ViewerCommand::SetHostMute(muted) => {
-                                        send_control(&socket, &ControlMessage::SetHostMute { muted }, &seq).await?;
-                                    }
-                                    ViewerCommand::SetMic(on) => {
-                                        manual_mic = on;
-                                        apply_mic(&mut mic, manual_mic || call_mic, &calls, start_mic);
-                                    }
-                                    ViewerCommand::ShareList => send_control(&socket, &ControlMessage::ShareList, &seq).await?,
-                                    ViewerCommand::SetShare(target) => {
-                                        send_control(&socket, &ControlMessage::SetShare { target }, &seq).await?;
-                                    }
-                                    ViewerCommand::Pad(m) => send_pad(&socket, &m, &seq).await?,
-                                    ViewerCommand::Quit => {
-                                        send_input(&socket, &batch, &seq, negotiated.gamepad).await?;
-                                        send_control(&socket, &ControlMessage::Bye, &seq).await?;
-                                        return Ok(());
-                                    }
-                                    ViewerCommand::Input(_) => unreachable!(),
+                        let mut after = None;
+                        while let Ok(next) = commands.try_recv() {
+                            match next {
+                                ViewerCommand::Input(ev) => batch.push(ev),
+                                other => {
+                                    after = Some(other);
+                                    break;
                                 }
-                                continue;
-                            };
-                            batch.push(ev);
+                            }
                             if batch.len() * InputEvent::MAX_ENCODED >= wire::MAX_PAYLOAD {
                                 break;
                             }
                         }
                         send_input(&socket, &batch, &seq, negotiated.gamepad).await?;
+                        after.map(Some)
                     }
-                    Some(ViewerCommand::SetMaxBitrate(kbps)) => {
-                        send_control(&socket, &ControlMessage::SetMaxBitrate { kbps }, &seq).await?;
-                    }
-                    Some(ViewerCommand::SetHostMute(muted)) => {
-                        send_control(&socket, &ControlMessage::SetHostMute { muted }, &seq).await?;
-                    }
-                    Some(ViewerCommand::SetMic(on)) => {
-                        manual_mic = on;
-                        apply_mic(&mut mic, manual_mic || call_mic, &calls, start_mic);
-                    }
-                    Some(ViewerCommand::ShareList) => send_control(&socket, &ControlMessage::ShareList, &seq).await?,
-                    Some(ViewerCommand::SetShare(target)) => {
-                        send_control(&socket, &ControlMessage::SetShare { target }, &seq).await?;
-                    }
-                    Some(ViewerCommand::Pad(m)) => send_pad(&socket, &m, &seq).await?,
-                    Some(ViewerCommand::Quit) | None => {
-                        tracing::info!("window closed");
-                        send_control(&socket, &ControlMessage::Bye, &seq).await?;
+                    other => Some(other),
+                };
+                if let Some(c) = follow_up {
+                    let mut mic_state = MicState { mic: &mut mic, manual: &mut manual_mic, call: call_mic, calls: &calls, start: start_mic };
+                    if handle_command(c, &socket, &seq, &mut mic_state).await? {
                         return Ok(());
                     }
                 }
@@ -527,20 +515,14 @@ pub async fn run(
                 for frame in reassembler.poll(now_ms) {
                     frames_this_second += 1;
                     pacing.frame();
-                    if frame_tx.try_send(frame).is_err() {
-                        stats.frames_dropped += 1;
-                        need_keyframe.store(true, Ordering::Relaxed);
-                    }
+                    queue_frame(&frame_tx, frame, &mut gap_pending, &need_keyframe, &mut stats);
                 }
                 for rq in reassembler.resend_requests(now_ms) {
                     send_resend(&socket, &rq, &seq).await?;
                 }
-                let mut abandoned = false;
-                for _ in reassembler.take_abandoned() {
+                for _lost in reassembler.take_abandoned() {
                     stats.frames_dropped += 1;
-                    abandoned = true;
-                }
-                if abandoned {
+                    gap_pending = true;
                     need_keyframe.store(true, Ordering::Relaxed);
                 }
                 if need_keyframe.load(Ordering::Relaxed) && !last_nack.is_some_and(|t| t.elapsed() <= NACK_INTERVAL) {
@@ -629,20 +611,54 @@ pub async fn run(
     }
 }
 
+/// Hand a finished frame to the decode thread without waiting. If the
+/// decoder is still busy (queue full) the frame is dropped; the next frame
+/// that does get queued carries the "something is missing before me" flag.
+fn queue_frame(
+    tx: &mpsc::Sender<(CompleteFrame, bool)>,
+    frame: CompleteFrame,
+    gap_pending: &mut bool,
+    need_keyframe: &AtomicBool,
+    stats: &mut StreamStats,
+) {
+    if tx.try_send((frame, *gap_pending)).is_ok() {
+        *gap_pending = false;
+    } else {
+        // Decoder is behind; whatever it misses breaks the reference chain,
+        // so a keyframe (or repair frame) is needed. Setting the shared flag
+        // here only makes the network loop ask the host at once; the decode
+        // thread learns of the gap from the flag on the next queued frame.
+        stats.frames_dropped += 1;
+        *gap_pending = true;
+        need_keyframe.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Runs on its own thread: decodes frames in order and publishes pictures.
+///
+/// `need_keyframe` is shared with the network loop. Before 0.5.8 the network
+/// loop set it when it dropped a frame, but the decoder, still finishing an
+/// older frame, could clear it a moment later; the frame after the gap was
+/// then decoded on a missing reference and the picture smeared until the
+/// next keyframe. Now the gap travels with the frames (the `bool`), so the
+/// decoder can't miss it.
 fn decode_thread(
     mut decoder: Box<dyn VideoDecoder>,
-    mut rx: mpsc::Receiver<CompleteFrame>,
+    mut rx: mpsc::Receiver<(CompleteFrame, bool)>,
     frames: Option<&FrameSlot>,
     need_keyframe: &AtomicBool,
     last_good: &AtomicU32,
 ) {
     let mut skipped = 0u32;
-    while let Some(frame) = rx.blocking_recv() {
+    while let Some((frame, after_gap)) = rx.blocking_recv() {
         // A P-frame is useless without the frames before it. After any gap,
         // wait for a keyframe or a repair frame (one built only on a frame we
         // confirmed we have); feeding the decoder garbage only makes it
         // report errors for every frame until then anyway.
         let resumes = frame.keyframe || frame.recovery;
+        if after_gap && !resumes {
+            need_keyframe.store(true, Ordering::Relaxed);
+        }
         if need_keyframe.load(Ordering::Relaxed) && !resumes {
             skipped += 1;
             continue;
@@ -672,6 +688,53 @@ fn decode_thread(
             }
         }
     }
+}
+
+/// The microphone switches `handle_command` may flip.
+struct MicState<'a> {
+    mic: &'a mut Option<(crate::audio::MicSender, mpsc::Receiver<Bytes>)>,
+    manual: &'a mut bool,
+    call: bool,
+    calls: &'a CallPrefs,
+    start: MicStart,
+}
+
+/// One command from the window other than mouse/keys. `None` means the
+/// window is gone. Returns `true` when the session should end (after
+/// telling the host goodbye).
+async fn handle_command(
+    cmd: Option<ViewerCommand>,
+    socket: &Link,
+    seq: &SeqCounter,
+    m: &mut MicState<'_>,
+) -> anyhow::Result<bool> {
+    match cmd {
+        Some(ViewerCommand::Input(events)) => {
+            // Normally bundled by the caller; sent alone if one slips through.
+            send_input(socket, &[events], seq, true).await?;
+        }
+        Some(ViewerCommand::SetMaxBitrate(kbps)) => {
+            send_control(socket, &ControlMessage::SetMaxBitrate { kbps }, seq).await?;
+        }
+        Some(ViewerCommand::SetHostMute(muted)) => {
+            send_control(socket, &ControlMessage::SetHostMute { muted }, seq).await?;
+        }
+        Some(ViewerCommand::SetMic(on)) => {
+            *m.manual = on;
+            apply_mic(m.mic, *m.manual || m.call, m.calls, m.start);
+        }
+        Some(ViewerCommand::ShareList) => send_control(socket, &ControlMessage::ShareList, seq).await?,
+        Some(ViewerCommand::SetShare(target)) => {
+            send_control(socket, &ControlMessage::SetShare { target }, seq).await?;
+        }
+        Some(ViewerCommand::Pad(msg)) => send_pad(socket, &msg, seq).await?,
+        Some(ViewerCommand::Quit) | None => {
+            tracing::info!("window closed");
+            send_control(socket, &ControlMessage::Bye, seq).await?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn monotonic_us() -> u64 {
