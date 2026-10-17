@@ -445,7 +445,7 @@ fn empty_var() -> PROPVARIANT {
 impl IMFMediaEventGenerator_Impl for Source_Impl {
     fn GetEvent(&self, flags: MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS) -> Result<IMFMediaEvent> {
         // SAFETY: plain COM call.
-        unsafe { self.queue.GetEvent(flags.0 as u32) }
+        unsafe { self.queue.GetEvent(flags.0) }
     }
     fn BeginGetEvent(&self, cb: Ref<IMFAsyncCallback>, state: Ref<IUnknown>) -> Result<()> {
         unsafe { self.queue.BeginGetEvent(cb.as_ref(), state.as_ref()) }
@@ -724,7 +724,7 @@ impl Stream {
 
 impl IMFMediaEventGenerator_Impl for Stream_Impl {
     fn GetEvent(&self, flags: MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS) -> Result<IMFMediaEvent> {
-        unsafe { self.queue.GetEvent(flags.0 as u32) }
+        unsafe { self.queue.GetEvent(flags.0) }
     }
     fn BeginGetEvent(&self, cb: Ref<IMFAsyncCallback>, state: Ref<IUnknown>) -> Result<()> {
         unsafe { self.queue.BeginGetEvent(cb.as_ref(), state.as_ref()) }

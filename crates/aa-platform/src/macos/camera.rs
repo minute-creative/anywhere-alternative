@@ -1,5 +1,5 @@
 //! A Mac camera (built-in, USB, or an iPhone through Continuity Camera)
-//! through AVFoundation, delivering 1280x720 NV12 pictures.
+//! through `AVFoundation`, delivering 1280x720 NV12 pictures.
 //!
 //! The first use shows macOS's "Anywhere would like to access the camera"
 //! question; the answer is kept in System Settings → Privacy & Security →

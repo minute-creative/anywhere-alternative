@@ -444,7 +444,7 @@ mod player {
 
     /// Names of the microphones on this computer, for the Settings list.
     /// The pretend microphones that carry sound *from* the other computer
-    /// (VB-CABLE, BlackHole) are left out: picking one would send silence.
+    /// (VB-CABLE, `BlackHole`) are left out: picking one would send silence.
     pub fn input_devices() -> Vec<String> {
         let Ok(devs) = cpal::default_host().input_devices() else { return Vec::new() };
         let mut names: Vec<String> = devs
