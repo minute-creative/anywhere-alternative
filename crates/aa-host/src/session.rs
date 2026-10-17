@@ -642,6 +642,11 @@ async fn handle_packet(
                     if let Some(v) = viewer.as_ref().filter(|v| v.addr != from) {
                         if v.addr.ip() == from.ip() && v.last_heard.elapsed() > TAKEOVER_AFTER_SILENCE {
                             tracing::info!(old = %v.addr, new = %from, "viewer reconnected");
+                            // Tidy up after the old connection as if it had left:
+                            // keys it held go up, speakers come back (the
+                            // reconnected viewer sends its mute choice again).
+                            let _ = input_tx.try_send(InputEvent::ReleaseAll);
+                            restore_speakers(speaker);
                         } else {
                             send_control(socket, from, &ControlMessage::Reject { reason: "host busy".into() }, seq)
                                 .await?;
