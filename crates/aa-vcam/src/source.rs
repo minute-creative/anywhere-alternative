@@ -132,6 +132,10 @@ impl IClassFactory_Impl for Factory_Impl {
 // IMFAttributes, passed through to a real attribute store
 // ---------------------------------------------------------------------------
 
+// SAFETY (every `unsafe` in this macro): each method forwards the caller's
+// arguments unchanged to the real attribute store we own (`$field`). Windows
+// gives us the pointers and sizes; the store reads and writes them under the
+// same contract we were called with, so we add no new risk.
 macro_rules! attributes_via {
     ($t:ty, $field:ident) => {
         impl IMFAttributes_Impl for $t {
@@ -448,12 +452,15 @@ impl IMFMediaEventGenerator_Impl for Source_Impl {
         unsafe { self.queue.GetEvent(flags.0) }
     }
     fn BeginGetEvent(&self, cb: Ref<IMFAsyncCallback>, state: Ref<IUnknown>) -> Result<()> {
+        // SAFETY: forwards to our own event queue with the caller's objects.
         unsafe { self.queue.BeginGetEvent(cb.as_ref(), state.as_ref()) }
     }
     fn EndGetEvent(&self, result: Ref<IMFAsyncResult>) -> Result<IMFMediaEvent> {
+        // SAFETY: forwards to our own event queue.
         unsafe { self.queue.EndGetEvent(result.as_ref()) }
     }
     fn QueueEvent(&self, met: u32, ext: *const GUID, hr: HRESULT, v: *const PROPVARIANT) -> Result<()> {
+        // SAFETY: forwards to our own event queue; `v` is the caller's value.
         unsafe { self.queue.QueueEventParamVar(met, ext, hr, v) }
     }
 }
@@ -724,15 +731,19 @@ impl Stream {
 
 impl IMFMediaEventGenerator_Impl for Stream_Impl {
     fn GetEvent(&self, flags: MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS) -> Result<IMFMediaEvent> {
+        // SAFETY: plain COM call on our own event queue.
         unsafe { self.queue.GetEvent(flags.0) }
     }
     fn BeginGetEvent(&self, cb: Ref<IMFAsyncCallback>, state: Ref<IUnknown>) -> Result<()> {
+        // SAFETY: forwards to our own event queue with the caller's objects.
         unsafe { self.queue.BeginGetEvent(cb.as_ref(), state.as_ref()) }
     }
     fn EndGetEvent(&self, result: Ref<IMFAsyncResult>) -> Result<IMFMediaEvent> {
+        // SAFETY: forwards to our own event queue.
         unsafe { self.queue.EndGetEvent(result.as_ref()) }
     }
     fn QueueEvent(&self, met: u32, ext: *const GUID, hr: HRESULT, v: *const PROPVARIANT) -> Result<()> {
+        // SAFETY: forwards to our own event queue; `v` is the caller's value.
         unsafe { self.queue.QueueEventParamVar(met, ext, hr, v) }
     }
 }

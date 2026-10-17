@@ -94,6 +94,7 @@ pub fn frame_of(hwnd: HWND) -> Option<RECT> {
         )
     }
     .is_ok()
+        // SAFETY: `r` is a local RECT the call fills in.
         || unsafe { GetWindowRect(hwnd, &mut r) }.is_ok();
     (ok && r.right > r.left && r.bottom > r.top).then_some(r)
 }

@@ -197,9 +197,12 @@ unsafe extern "C-unwind" fn on_encoded(
         Some(sample) => {
             // SAFETY: the sample is valid during this callback.
             let sample = unsafe { sample.as_ref() };
+            // SAFETY: reading the sample's own buffer and its length, inside
+            // the callback where both are guaranteed alive.
             match unsafe { sample.data_buffer() } {
                 None => Err(-2),
                 Some(block) => {
+                    // SAFETY: as above.
                     let len = unsafe { block.data_length() };
                     let mut avcc = vec![0u8; len];
                     // SAFETY: copying `len` bytes into a buffer of that size.
@@ -207,6 +210,7 @@ unsafe extern "C-unwind" fn on_encoded(
                         unsafe { block.copy_data_bytes(0, len, NonNull::new(avcc.as_mut_ptr().cast()).expect("vec")) };
                     if st == 0 {
                         let (data, key) = to_annex_b(codec, &avcc, || {
+                            // SAFETY: the sample is alive for this callback.
                             unsafe { sample.format_description() }
                                 .map(|f| parameter_sets(codec, &f))
                                 .unwrap_or_default()
