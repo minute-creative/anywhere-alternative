@@ -1123,9 +1123,14 @@ impl App {
             }
             ui.add_space(4.0);
             ui.label(
-                RichText::new(format!("While connected, {} opens these settings and more.", hotkey()))
-                    .small()
-                    .color(FAINT),
+                RichText::new(format!(
+                    "While connected, {} opens these settings and more; {} switches game mouse on and off \
+                     (for games that turn the camera with the mouse).",
+                    hotkey(),
+                    game_hotkey()
+                ))
+                .small()
+                .color(FAINT),
             );
         });
 
@@ -1783,9 +1788,13 @@ impl App {
             let n = self.checks.len();
             for (i, c) in self.checks.iter().enumerate() {
                 ui.horizontal(|ui| {
+                    // Leave room for the badge: a long description ran
+                    // under "Installed" (HEVC row, 0.5.6).
+                    let text_w = (ui.available_width() - 120.0).max(120.0);
                     ui.vertical(|ui| {
+                        ui.set_max_width(text_w);
                         ui.label(RichText::new(c.name).color(TEXT));
-                        ui.label(RichText::new(c.why).small().color(MUTED));
+                        ui.add(egui::Label::new(RichText::new(c.why).small().color(MUTED)).wrap());
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if c.ok {
@@ -1907,6 +1916,14 @@ fn computer_glyph(ui: &mut Ui, colour: Color32) {
     p.rect_stroke(screen, CornerRadius::same(2), Stroke::new(1.8, colour), egui::StrokeKind::Inside);
     let base = rect.center() + egui::vec2(0.0, 7.5);
     p.line_segment([base - egui::vec2(5.0, 0.0), base + egui::vec2(5.0, 0.0)], Stroke::new(1.8, colour));
+}
+
+fn game_hotkey() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Cmd+Shift+G"
+    } else {
+        "Ctrl+Shift+G"
+    }
 }
 
 fn hotkey() -> &'static str {

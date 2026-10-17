@@ -183,6 +183,11 @@ pub fn paired_host(key: &PublicKeyBytes) -> Option<PairedHost> {
 pub fn add_paired_host(name: &str, key: &PublicKeyBytes, addr: Option<&str>) {
     let hex = secure::to_hex(key);
     let mut list = paired_hosts();
+    // Same computer, new identity (Anywhere was reinstalled there): drop the
+    // old entry, which would only ever say "not answering" (0.5.6).
+    if !name.is_empty() {
+        list.retain(|h| h.key == hex || h.name != name);
+    }
     if let Some(h) = list.iter_mut().find(|h| h.key == hex) {
         name.clone_into(&mut h.name);
     } else {
@@ -276,6 +281,10 @@ pub fn add_paired_viewer(name: &str, key: &PublicKeyBytes) {
     // Re-pairing keeps the access it had.
     let full_access = list.iter().any(|v| v.key == hex && v.full_access);
     list.retain(|v| v.key != hex);
+    // Same computer re-paired with a new identity: forget the old one.
+    if !name.is_empty() {
+        list.retain(|v| v.name != name);
+    }
     list.push(PairedViewer { name: name.to_owned(), key: hex, added: now(), full_access });
     if let Ok(b) = serde_json::to_vec_pretty(&list) {
         if let Err(e) = write_private(&viewers_file(), &b) {

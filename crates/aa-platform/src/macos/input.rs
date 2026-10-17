@@ -477,6 +477,15 @@ impl InputInjector for MacInput {
                 self.moved(dx, dy);
             }
             InputEvent::MouseMoveRel { dx, dy } => {
+                // Game mouse: start from where the pointer really is. Games
+                // pull it back to the middle of the screen after every move;
+                // moving on from our own last position looked to them like
+                // a huge jump each time (the camera spun, 0.5.4).
+                if let Some(now) = CGEvent::new(None) {
+                    let at = CGEvent::location(Some(&now));
+                    self.x = at.x;
+                    self.y = at.y;
+                }
                 self.x += f64::from(dx);
                 self.y += f64::from(dy);
                 self.clamp_to_screen();

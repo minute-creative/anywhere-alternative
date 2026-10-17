@@ -18,10 +18,10 @@ use aa_platform::{DecodedFrame, FrameBuffer};
 use tokio::sync::mpsc;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, MouseButton as WinitButton, MouseScrollDelta, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton as WinitButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::PhysicalKey;
-use winit::window::{Fullscreen, Window, WindowId};
+use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::keymap::hid_usage;
 use crate::link::{FrameSlot, ViewerCommand};
@@ -457,6 +457,11 @@ pub struct App {
     /// window loses focus. Otherwise a Cmd+Tab away leaves Ctrl stuck on the
     /// host and every later click becomes Ctrl+click.
     held_keys: Vec<u16>,
+    /// Game mouse (Ctrl/Cmd+Shift+G): the pointer is captured and moves
+    /// are sent as movement, which games' mouse-look needs.
+    game_mouse: bool,
+    /// Fractions of a pixel left over from raw mouse movement.
+    mouse_rest: (f64, f64),
     /// Treat the Mac Command key as Control on the host, so Cmd+C / Cmd+V do
     /// what a Mac user expects on a Windows host.
     cmd_as_ctrl: bool,
@@ -518,6 +523,8 @@ impl App {
             rect: VideoRect::default(),
             presented: 0,
             held_keys: Vec::new(),
+            game_mouse: false,
+            mouse_rest: (0.0, 0.0),
             cmd_as_ctrl: cfg!(target_os = "macos"),
             cmd_held: false,
             reconnecting: false,
@@ -575,6 +582,29 @@ impl App {
                 tracing::warn!("input channel full; event dropped");
             }
         }
+    }
+
+    /// Game mouse on or off. On: the pointer is hidden and held in the
+    /// window, and the mouse's own movement goes to the other computer
+    /// (games turn the camera with it). Off: normal pointer.
+    fn set_game_mouse(&mut self, on: bool) {
+        self.game_mouse = on;
+        self.mouse_rest = (0.0, 0.0);
+        if let Some(w) = &self.window {
+            if on {
+                if w.set_cursor_grab(CursorGrabMode::Locked).is_err() {
+                    let _ = w.set_cursor_grab(CursorGrabMode::Confined);
+                }
+                w.set_cursor_visible(false);
+                let key = if cfg!(target_os = "macos") { "Cmd+Shift+G" } else { "Ctrl+Shift+G" };
+                w.set_title(&format!("{} — game mouse ({key} to leave)", self.title));
+            } else {
+                let _ = w.set_cursor_grab(CursorGrabMode::None);
+                w.set_cursor_visible(true);
+                w.set_title(&self.title);
+            }
+        }
+        tracing::info!(on, "game mouse");
     }
 
     fn layout(&self, res: Resolution, size: PhysicalSize<u32>) -> VideoRect {
@@ -665,6 +695,21 @@ impl ApplicationHandler<Wake> for App {
         }
     }
 
+    fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        let DeviceEvent::MouseMotion { delta: (dx, dy) } = event else { return };
+        if !self.game_mouse {
+            return;
+        }
+        let (x, y) = (self.mouse_rest.0 + dx, self.mouse_rest.1 + dy);
+        let (sx, sy) = (x.trunc(), y.trunc());
+        self.mouse_rest = (x - sx, y - sy);
+        if sx != 0.0 || sy != 0.0 {
+            #[allow(clippy::cast_possible_truncation)] // clamped to i16 first
+            let clamp = |v: f64| v.clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
+            self.send(InputEvent::MouseMoveRel { dx: clamp(sx), dy: clamp(sy) });
+        }
+    }
+
     #[allow(clippy::too_many_lines)] // one match arm per event kind
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         if let WindowEvent::ModifiersChanged(m) = &event {
@@ -691,6 +736,19 @@ impl ApplicationHandler<Wake> for App {
                         w.request_redraw();
                     }
                 }
+                return;
+            }
+            if k.state == ElementState::Pressed
+                && !k.repeat
+                && primary
+                && self.modifiers.shift_key()
+                && k.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::KeyG)
+            {
+                for hid in std::mem::take(&mut self.held_keys) {
+                    self.send(InputEvent::Key { hid_usage: hid, pressed: false });
+                }
+                self.send(InputEvent::ReleaseAll);
+                self.set_game_mouse(!self.game_mouse);
                 return;
             }
         }
@@ -768,6 +826,8 @@ impl ApplicationHandler<Wake> for App {
                     window.request_redraw();
                 }
             }
+            WindowEvent::CursorMoved { .. } if self.game_mouse => {}
+            WindowEvent::Focused(false) if self.game_mouse => self.set_game_mouse(false),
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some((x, y)) = self.rect.normalise(position.x, position.y) {
                     self.send(InputEvent::MouseMoveAbs { x, y });
