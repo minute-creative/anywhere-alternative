@@ -58,7 +58,12 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
     // Probe the display first so we know the resolution the encoder must handle.
     let probe = capture::DxgiCapture::new(0, capture::Output::Cpu)?;
     let res = probe.resolution();
-    let fps = probe.refresh_rate_hz();
+    // Laptops drop the screen to 60 Hz on battery or when idle ("dynamic
+    // refresh rate") and back to 120 when plugged in or busy. Offer the
+    // fastest the screen can do at this size, not whatever it happened to
+    // be when sharing started (owner: capped at 60 all day after a 60 Hz
+    // start, though the screen went back to 120 minutes later).
+    let fps = probe.refresh_rate_hz().max(highest_refresh_hz(res).unwrap_or(0)).min(aa_core::capability::MAX_FPS);
     let desktop_rect = probe.desktop_rect();
     drop(probe);
     let kbps = StreamConfig::suggested_bitrate_kbps(res, fps);
@@ -263,6 +268,26 @@ pub fn display_refresh_hz() -> Option<u16> {
     let ok = unsafe { EnumDisplaySettingsW(windows::core::PCWSTR::null(), ENUM_CURRENT_SETTINGS, &mut mode) };
     // 0 and 1 mean "the hardware default"; treat as unknown.
     (ok.as_bool() && mode.dmDisplayFrequency > 1).then(|| u16::try_from(mode.dmDisplayFrequency).unwrap_or(u16::MAX))
+}
+
+/// The fastest refresh the main screen offers at `res`.
+fn highest_refresh_hz(res: Resolution) -> Option<u16> {
+    use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_DISPLAY_SETTINGS_MODE};
+    let mut best = 0u32;
+    for i in 0..1000u32 {
+        let mut mode = DEVMODEW { dmSize: std::mem::size_of::<DEVMODEW>() as u16, ..Default::default() };
+        // SAFETY: `mode` is a valid, sized DEVMODEW; a null name means the main screen.
+        #[allow(unsafe_code)]
+        let ok =
+            unsafe { EnumDisplaySettingsW(windows::core::PCWSTR::null(), ENUM_DISPLAY_SETTINGS_MODE(i), &mut mode) };
+        if !ok.as_bool() {
+            break;
+        }
+        if mode.dmPelsWidth == res.width && mode.dmPelsHeight == res.height {
+            best = best.max(mode.dmDisplayFrequency);
+        }
+    }
+    (best > 1).then(|| u16::try_from(best).unwrap_or(u16::MAX))
 }
 
 pub fn keep_awake(on: bool) {
