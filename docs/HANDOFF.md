@@ -304,6 +304,25 @@ plain-language note; `docs/CODE-GUIDE.md` is the map. Bugs found and fixed:
 - Windows service: a failed installer start left "update running" behind.
 - Host: a viewer reconnecting from a new port now releases the old
   connection's keys and restores the speakers.
+Owner report, same day: PC watching the Mac lagged and froze (Elden Ring
+showcase over 100 Mbps; YouTube froze too). The PC's viewer.log of the
+last session showed 30 s at 0 fps after joining an idle Mac. Fixed in 0.5.8:
+- A viewer joining a still screen got no picture until something moved
+  (screens only hand out changed pictures; the host had none to send). The
+  capture now has `refresh()`; the host asks for a whole picture when a
+  viewer arrives, and re-encodes the last picture at once when a fresh one
+  is wanted (lost frame) on a still screen instead of waiting for motion.
+- The bitrate climbed to the 80 Mbps cap whatever the picture needed (1080p
+  60 fps HEVC is sharp at ~14 Mbps): bursts of ~140 packets a frame swamped
+  Wi-Fi. Ceiling is now twice the "sharp" rate for the negotiated size,
+  codec and frame rate (~27 Mbps for that case), under the user's cap.
+- Mac capture kept the *oldest* pictures when the encoder fell behind (a
+  full queue dropped new ones) and held 3 of SCK's 4 buffers while idle;
+  now one newest-picture slot.
+- The app keeps the previous run's log as `viewer.prev.log` /
+  `host.prev.log` (starting again used to wipe the log of a freeze).
+Ask after 0.5.8: is it smooth at 60 fps on Wi-Fi; Mbps in the corner (should
+stay well under 40 at 1080p).
 Open from before: DualSense drop on the Mac (need the new log line), Mac
 window not reopening from the Dock, softness from 1.5x scaling, "share one
 app" real test, confirm HEVC on the PC.

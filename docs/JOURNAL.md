@@ -535,6 +535,15 @@ full list). Process slip: a comparison build was put in `target-old/`
 inside the repo and `git add -A` committed it; caught before the push
 completed and amended out. Build comparisons go outside the repo.
 
+Later the owner reported lag and freezes watching the Mac (Elden Ring
+over 100 Mbps, YouTube freezing). Read the PC's viewer.log through the
+device link: the last session joined the Mac and sat at 0 fps for 30 s.
+Cause: the host only encodes when the screen hands it a changed picture,
+and a still Mac hands out none. Added `ScreenCapture::refresh` and a
+`AA_MOCK_STILL` mock to test it. The 100 Mbps came from the controller
+probing up to the user's 80 Mbps cap regardless of need; capped at twice
+the sharp rate. Also found the Mac capture queue kept the oldest frames.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.

@@ -676,10 +676,14 @@ async fn handle_packet(
                             *viewer = Some(Viewer { addr: from, last_heard: Instant::now(), welcomed: Instant::now() });
                             set_connected(true);
                             *video_dest.lock().expect("dest") = Some(from);
+                            // Ceiling: what this picture can use, not just the
+                            // user's cap (see `useful_max_kbps`).
+                            stream.useful_kbps = useful_max_kbps(&negotiated);
+                            let cap = StreamConfig::default().max_bitrate_kbps.min(stream.useful_kbps);
                             *bitrate = BitrateController::new(
                                 StreamConfig::suggested_bitrate_kbps(host_caps.max_resolution, host_caps.max_fps),
                                 2_000,
-                                StreamConfig::default().max_bitrate_kbps,
+                                cap,
                             );
                             ctl.target_kbps.store(bitrate.current_kbps(), Ordering::Relaxed);
                             ctl.codec.store(codec as u8, Ordering::Relaxed);
@@ -739,9 +743,9 @@ async fn handle_packet(
                 }
                 // The viewer moved its bitrate slider.
                 ControlMessage::SetMaxBitrate { kbps } if is_current_viewer => {
-                    bitrate.set_max_kbps(kbps);
+                    bitrate.set_max_kbps(kbps.min(stream.useful_kbps));
                     ctl.target_kbps.store(bitrate.current_kbps(), Ordering::Relaxed);
-                    tracing::info!(kbps, "bitrate cap set");
+                    tracing::info!(kbps, used = kbps.min(stream.useful_kbps), "bitrate cap set");
                 }
                 // A full-access viewer asks what could be shared, or picks something.
                 ControlMessage::ShareList if is_current_viewer && stream.full_access => {
@@ -998,6 +1002,20 @@ async fn send_control(socket: &Net, to: SocketAddr, msg: &ControlMessage, seq: &
     Ok(())
 }
 
+/// How fast to ever send, for this picture: twice what "full quality" costs
+/// at its size, codec and highest frame rate (`aa_core::quality`).
+///
+/// Before 0.5.8 the bitrate controller climbed to the viewer's cap (80 Mbps)
+/// whatever the picture needed: a 1080p 60 fps HEVC stream, sharp at about
+/// 14 Mbps, went past 100 Mbps with parity in Elden Ring. On Wi-Fi each
+/// frame then left as a burst of ~140 packets, the radio queued and dropped
+/// them, and the picture froze while the controller backed off and climbed
+/// again. Twice the sharp rate keeps fast motion clean and leaves the rest
+/// of the air for everything else (a video playing on the same Wi-Fi).
+fn useful_max_kbps(n: &aa_core::capability::Negotiated) -> u32 {
+    aa_core::quality::sharp_kbps(n.codec, n.resolution, n.fps).saturating_mul(2)
+}
+
 /// Leave a note while someone is connected, so automatic updates wait.
 fn set_connected(on: bool) {
     let path = aa_platform::update::marker::connected();
@@ -1034,6 +1052,8 @@ struct Stream {
     /// Why the picture is empty because of sharing ("the shared app was closed").
     share_status: Option<&'static str>,
     ladder: FpsLadder,
+    /// The most data a second worth sending for this viewer's picture.
+    useful_kbps: u32,
     codec: aa_core::video::Codec,
     res: aa_core::video::Resolution,
     /// Shared with a watcher thread that checks every few seconds whether
@@ -1065,6 +1085,7 @@ impl Stream {
             full_access: false,
             share_status: None,
             ladder: FpsLadder::new(fps, false),
+            useful_kbps: u32::MAX,
             codec: aa_core::video::Codec::Hevc,
             res: aa_core::video::Resolution::new(1920, 1080),
         }

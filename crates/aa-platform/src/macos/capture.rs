@@ -16,6 +16,7 @@
 
 use std::ptr::NonNull;
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aa_core::share::ShareTarget;
@@ -57,9 +58,17 @@ struct Pixels(CFRetained<CVPixelBuffer>);
 // we only read it after ScreenCaptureKit has finished writing it.
 unsafe impl Send for Pixels {}
 
+/// The newest picture, replaced by every new one. A queue kept the oldest
+/// pictures instead (a full queue dropped the *new* ones), so after any
+/// pause the host first sent stale pictures, and while no viewer was
+/// connected it held three of ScreenCaptureKit's four buffers (0.5.8).
+type Latest = Arc<Mutex<Option<(Pixels, Instant)>>>;
+
 /// What the capture callback needs.
 struct OutputIvars {
-    frames: SyncSender<(Pixels, Instant)>,
+    latest: Latest,
+    /// "A new picture is in `latest`" (holds at most one note).
+    wake: SyncSender<()>,
 }
 
 define_class!(
@@ -80,16 +89,18 @@ define_class!(
             // Frames that only say "nothing changed" carry no picture.
             // SAFETY: `sample` is valid for the duration of this callback.
             let Some(image) = (unsafe { sample.image_buffer() }) else { return };
-            // Newest wins: if the encoder is behind, drop this one rather
-            // than queue up latency.
-            let _ = self.ivars().frames.try_send((Pixels(image), Instant::now()));
+            // Newest wins: replace whatever the encoder hasn't taken yet.
+            if let Ok(mut l) = self.ivars().latest.lock() {
+                *l = Some((Pixels(image), Instant::now()));
+            }
+            let _ = self.ivars().wake.try_send(());
         }
     }
 );
 
 impl ScreenOutput {
-    fn new(frames: SyncSender<(Pixels, Instant)>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(OutputIvars { frames });
+    fn new(latest: Latest, wake: SyncSender<()>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(OutputIvars { latest, wake });
         // SAFETY: NSObject's plain init.
         unsafe { msg_send![super(this), init] }
     }
@@ -99,9 +110,14 @@ pub struct SckCapture {
     stream: Retained<SCStream>,
     _output: Retained<ScreenOutput>,
     _queue: dispatch2::DispatchRetained<DispatchQueue>,
-    frames: Receiver<(Pixels, Instant)>,
+    latest: Latest,
+    wake: Receiver<()>,
     /// The frame being encoded; its handle is only valid while held here.
+    /// Kept after encoding too, so [`ScreenCapture::refresh`] can hand it
+    /// out again when the screen is still.
     current: Option<Pixels>,
+    /// `refresh` was asked for: the next call repeats `current`.
+    repeat: bool,
     resolution: Resolution,
     refresh_hz: u16,
     started: Instant,
@@ -362,8 +378,9 @@ impl SckCapture {
             SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, &config, None)
         };
 
-        let (tx, frames) = sync_channel(2);
-        let output = ScreenOutput::new(tx);
+        let latest: Latest = Arc::default();
+        let (tx, wake) = sync_channel(1);
+        let output = ScreenOutput::new(Arc::clone(&latest), tx);
         let queue = DispatchQueue::new("aa.screen-capture", None);
         // SAFETY: the output object and queue outlive the stream (both kept in Self).
         unsafe {
@@ -392,8 +409,10 @@ impl SckCapture {
             stream,
             _output: output,
             _queue: queue,
-            frames,
+            latest,
+            wake,
             current: None,
+            repeat: false,
             resolution: Resolution::new(w as u32, h as u32),
             refresh_hz,
             started: Instant::now(),
@@ -449,17 +468,27 @@ impl Drop for SckCapture {
 
 impl ScreenCapture for SckCapture {
     fn next_frame(&mut self, timeout: Duration) -> Result<Option<CapturedFrame>> {
-        let (pixels, at) = match self.frames.recv_timeout(timeout) {
-            Ok(f) => f,
-            Err(RecvTimeoutError::Timeout) => return Ok(None),
+        // A newer picture wins over a repeat.
+        let fresh = match self.wake.recv_timeout(if self.repeat { Duration::ZERO } else { timeout }) {
+            Ok(()) => self.latest.lock().ok().and_then(|mut l| l.take()),
+            Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(PlatformError::DeviceLost("screen capture stopped".into()));
             }
         };
+        let at = match fresh {
+            Some((pixels, at)) => {
+                self.current = Some(pixels);
+                at
+            }
+            None if std::mem::take(&mut self.repeat) && self.current.is_some() => Instant::now(),
+            None => return Ok(None),
+        };
+        self.repeat = false;
+        let pixels = self.current.as_ref().expect("set above");
         let width = CVPixelBufferGetWidth(&pixels.0) as u32;
         let height = CVPixelBufferGetHeight(&pixels.0) as u32;
         let handle = CFRetained::as_ptr(&pixels.0).as_ptr() as usize;
-        self.current = Some(pixels);
         Ok(Some(CapturedFrame {
             buffer: FrameBuffer::Gpu { api: GpuApi::Metal, handle },
             format: PixelFormat::Nv12,
@@ -474,6 +503,10 @@ impl ScreenCapture for SckCapture {
 
     fn refresh_rate_hz(&self) -> u16 {
         self.refresh_hz
+    }
+
+    fn refresh(&mut self) {
+        self.repeat = true;
     }
 
     fn set_share(&mut self, target: &ShareTarget) -> Result<()> {

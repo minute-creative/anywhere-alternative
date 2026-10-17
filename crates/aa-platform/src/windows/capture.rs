@@ -404,6 +404,12 @@ impl DxgiCapture {
 }
 
 impl ScreenCapture for DxgiCapture {
+    fn refresh(&mut self) {
+        // A fresh duplication hands out the whole desktop as its first
+        // frame, changed or not. Reacquired on the next `next_frame`.
+        self.dup = None;
+    }
+
     fn unavailable_reason(&self) -> Option<&'static str> {
         if self.locked {
             Some("the PC is locked or showing a security prompt; unlock it at the PC")

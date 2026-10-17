@@ -178,6 +178,13 @@ pub trait ScreenCapture: Send {
     fn scales_itself(&self) -> bool {
         false
     }
+    /// Make the next [`Self::next_frame`] return a whole picture even if
+    /// nothing changed. Screens only hand out pictures when something
+    /// changes, so before 0.5.8 a viewer that joined a still screen saw
+    /// nothing (the owner's PC sat at 0 fps watching an idle Mac) until
+    /// something moved there. The host calls this when a viewer arrives and
+    /// when it needs a fresh picture but has none to repeat.
+    fn refresh(&mut self) {}
 }
 
 /// Turns captured frames into a codec bitstream.

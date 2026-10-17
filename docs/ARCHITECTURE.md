@@ -639,6 +639,16 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   continuity and waits for a keyframe or repair frame after any gap. A
   shared "need keyframe" flag set by one thread and cleared by another is
   not enough on its own: the decoder could clear it right after a drop.
+- **Change-driven capture needs a way to ask for a picture** (0.5.8): SCK
+  and DXGI only deliver changed pictures, so a viewer joining (or needing a
+  keyframe of) a still screen got nothing. The capture trait has
+  `refresh()`; the host calls it on join and re-encodes its last picture
+  when a keyframe is wanted.
+- **More bits than the picture can use only hurt on Wi-Fi** (0.5.8): the
+  controller probed up to the user's cap (80 Mbps, 100+ with parity) for a
+  1080p stream that is sharp at 14. Ceiling = 2x `quality::sharp_kbps`.
+- **"Newest wins" needs a slot, not a queue** (0.5.8): a full bounded
+  channel with `try_send` drops the newest item, the opposite of intent.
 
 ## 10. Measured so far
 

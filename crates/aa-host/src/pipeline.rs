@@ -162,6 +162,8 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
     let mut still_since = Instant::now();
     let mut refined = 0u8;
     let mut skipped_in_row = 0u32;
+    // Last time we asked the capture for a whole picture (see `refresh`).
+    let mut asked_refresh = Instant::now();
     // Frame-rate limit: a 200 Hz screen makes 200 pictures a second, but
     // the connection may only afford 90 at full sharpness (the ladder in
     // the network task decides). Pictures that come early are held back;
@@ -187,6 +189,13 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
         if streaming != awake {
             aa_platform::keep_awake(streaming);
             awake = streaming;
+            if streaming {
+                // A viewer just arrived: start from a whole picture of the
+                // screen as it is now, even if nothing is moving on it.
+                capture.refresh();
+                last_frame = None;
+                held = false;
+            }
         }
         // Nobody watching: sleep and use no power or graphics card.
         if !streaming {
@@ -311,10 +320,22 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
             }
             // Nothing new: maybe re-send the last picture sharper (see REFINE_AFTER_MS).
             Ok(None) => {
+                // The viewer is waiting for a fresh picture (it lost one, or
+                // just arrived). On a still screen no new picture comes, so
+                // encode the last one again now, or ask the capture for one.
+                // Before 0.5.8 the viewer stayed frozen until something on
+                // the screen moved.
+                let wanted = ctl.force_keyframe.load(Ordering::Relaxed)
+                    || ctl.intra_refresh.load(Ordering::Relaxed)
+                    || ctl.recovery.load(Ordering::Relaxed);
+                if wanted && !held && last_frame.is_none() && asked_refresh.elapsed() > Duration::from_millis(500) {
+                    capture.refresh();
+                    asked_refresh = Instant::now();
+                }
                 // Nothing changed on screen. Time to sharpen the last picture?
                 let still = still_since.elapsed();
-                let due =
-                    REFINE_AFTER_MS.get(usize::from(refined)).is_some_and(|&ms| still > Duration::from_millis(ms));
+                let due = wanted
+                    || REFINE_AFTER_MS.get(usize::from(refined)).is_some_and(|&ms| still > Duration::from_millis(ms));
                 let Some(mut f) = last_frame.clone().filter(|_| due && !held) else { continue };
                 // Encoders insist on time moving forward between frames.
                 f.capture_ts_us += still.as_micros() as u64;

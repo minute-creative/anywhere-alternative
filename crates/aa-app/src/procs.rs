@@ -33,8 +33,16 @@ fn quiet(cmd: &mut Command) -> &mut Command {
 }
 
 fn log_file(path: &Path) -> std::io::Result<(Stdio, Stdio)> {
-    // A log left by an administrator run belongs to root; ours is a new file.
-    let _ = std::fs::remove_file(path);
+    // Keep the previous run's log as `<name>.prev.log`: a freeze is usually
+    // reported after reconnecting, and starting again used to wipe the one
+    // log that showed it (0.5.8). A log left by an administrator run belongs
+    // to root; if it can't be moved it is removed, and ours is a new file.
+    if path.exists() {
+        let prev = path.with_extension("prev.log");
+        if std::fs::rename(path, &prev).is_err() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
     let f = std::fs::File::create(path)?;
     Ok((Stdio::from(f.try_clone()?), Stdio::from(f)))
 }

@@ -41,6 +41,12 @@ pub struct MockCapture {
     share: aa_core::share::ShareTarget,
     /// The viewer's Resolution setting.
     max: Option<Resolution>,
+    /// `AA_MOCK_STILL=N`: after N frames the pretend screen stops changing
+    /// and, like a real one, hands out nothing more unless asked to
+    /// [`ScreenCapture::refresh`] (tests the "viewer joins a still screen"
+    /// case).
+    still_after: Option<u32>,
+    want_refresh: bool,
 }
 
 /// Pretend apps and windows, so the Share page and full-access picking
@@ -85,6 +91,8 @@ impl MockCapture {
             locked: false,
             share: aa_core::share::ShareTarget::Screen,
             max: None,
+            still_after: std::env::var("AA_MOCK_STILL").ok().and_then(|v| v.parse().ok()),
+            want_refresh: false,
         }
     }
 
@@ -145,6 +153,11 @@ impl ScreenCapture for MockCapture {
             std::thread::sleep(timeout);
             return Ok(None);
         }
+        let still = self.still_after.is_some_and(|n| self.frame >= n);
+        if still && !std::mem::take(&mut self.want_refresh) {
+            std::thread::sleep(timeout);
+            return Ok(None);
+        }
         let now = Instant::now();
         if self.next_due > now {
             let wait = self.next_due - now;
@@ -190,6 +203,10 @@ impl ScreenCapture for MockCapture {
 
     fn refresh_rate_hz(&self) -> u16 {
         self.fps
+    }
+
+    fn refresh(&mut self) {
+        self.want_refresh = true;
     }
 
     fn set_share(&mut self, target: &aa_core::share::ShareTarget) -> Result<()> {
