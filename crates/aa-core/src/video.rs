@@ -1,5 +1,7 @@
 //! The data model of a video stream: codecs, pixel formats, frame metadata.
 
+// In plain words: the basic words for video used everywhere else: which
+// compression format (codec), how pixels are laid out, picture size.
 use serde::{Deserialize, Serialize};
 
 /// Compressed video codecs we may negotiate. Order of the enum is also our
@@ -21,6 +23,7 @@ impl Codec {
     /// All codecs, best first.
     pub const ALL: [Codec; 3] = [Codec::Av1, Codec::Hevc, Codec::H264];
 
+    // Number on the wire -> codec; unknown numbers give None.
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Codec::Av1),
@@ -67,6 +70,7 @@ impl Resolution {
         Self { width, height }
     }
 
+    // Total pixels = width x height (as a big number so 8K cannot overflow).
     pub const fn pixels(self) -> u64 {
         self.width as u64 * self.height as u64
     }

@@ -3,6 +3,10 @@
 //! These are rare and small, so they use JSON for readability. Everything
 //! on the hot path (video, input) is hand-packed binary in [`crate::wire`]
 //! and [`crate::input`].
+// In plain words: these are the "spoken" messages between the two computers:
+// hello, welcome, goodbye, "who's there?", settings changes, camera on/off.
+// Each is written as a short line of JSON text. Adding a new optional field
+// needs #[serde(default)] so older versions, which do not send it, still work.
 
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +14,8 @@ use crate::capability::{Capabilities, Negotiated};
 use crate::share::ShareTarget;
 use crate::PROTOCOL_VERSION;
 
+// Every message the computers say to each other, outside the picture, sound
+// and input streams. "type" in the JSON names which one it is.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlMessage {
@@ -110,15 +116,20 @@ pub enum ControlMessage {
     },
 }
 
+// Helpers to build, write and read a message.
 impl ControlMessage {
+    // The first thing a viewer says, stamped with this version's protocol number.
     pub fn hello(capabilities: Capabilities) -> Self {
         Self::Hello { protocol: PROTOCOL_VERSION, capabilities }
     }
 
+    // Message -> bytes to send.
     pub fn encode(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("control messages are always serialisable")
     }
 
+    // Bytes received -> message; anything that is not a valid message is an error
+    // (and ignored by the caller).
     pub fn decode(bytes: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice(bytes)
     }

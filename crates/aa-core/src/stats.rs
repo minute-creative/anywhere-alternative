@@ -17,6 +17,8 @@ impl Ewma {
         Self { value: None, alpha }
     }
 
+    // New average = old + alpha x (new sample - old): moves part of the way
+    // towards each new sample, so one odd reading does not jump the value.
     pub fn push(&mut self, sample: f64) {
         self.value = Some(match self.value {
             None => sample,
@@ -38,6 +40,7 @@ pub struct LossTracker {
 }
 
 impl LossTracker {
+    // Called for every packet received, with its sequence number.
     pub fn observe(&mut self, seq: u16) {
         self.received += 1;
         if let Some(exp) = self.expected_next {

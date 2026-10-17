@@ -21,6 +21,12 @@
 //!
 //! Encryption is applied to the whole datagram *after* this layer (stage 3),
 //! so nothing here is secret-aware.
+// In plain words: a frame (one picture) is usually far bigger than one network
+// packet, so it is cut into numbered pieces ("slices"). Each piece carries a
+// 12-byte label saying what it is, which frame it belongs to and which piece
+// it is. The viewer uses those labels to put the picture back together, notice
+// what went missing, and ask for it again. Extra "parity" pieces let it
+// rebuild one missing piece per group without asking at all.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::collections::BTreeMap;
@@ -28,10 +34,16 @@ use std::collections::BTreeMap;
 /// Safe datagram size across the public internet without fragmentation.
 /// 1500 (Ethernet) − 20 (IPv4) − 8 (UDP) leaves 1472; we stay well under to
 /// survive `PPPoE`, VPNs and IPv6-in-IPv4 tunnels.
+// Largest packet we send (header + data), in bytes.
 pub const MAX_DATAGRAM: usize = 1200;
+// Size of the label at the front of every packet (see the drawing above).
 pub const HEADER_LEN: usize = 12;
+// How much picture data fits in one packet after the label.
 pub const MAX_PAYLOAD: usize = MAX_DATAGRAM - HEADER_LEN;
 
+// What a packet carries. The number is the first byte of every packet, so
+// these numbers must never change or old and new versions stop understanding
+// each other. Add new kinds at the end with the next free number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Kind {
@@ -75,6 +87,8 @@ pub enum Kind {
     Camera = 15,
 }
 
+// Turn the first byte of a packet back into a Kind; unknown numbers (a newer
+// version, or garbage) give None and the packet is ignored.
 impl Kind {
     fn from_u8(v: u8) -> Option<Self> {
         Some(match v {
@@ -108,6 +122,7 @@ pub mod flags {
     pub const RECOVERY: u8 = 1 << 1;
 }
 
+// The 12-byte label, in the order it is written on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
     pub kind: Kind,
@@ -118,6 +133,7 @@ pub struct Header {
     pub slice_count: u16,
 }
 
+// Ways a received packet can be unreadable.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum WireError {
     #[error("datagram shorter than header")]
@@ -130,6 +146,8 @@ pub enum WireError {
     PayloadTooLarge(usize),
 }
 
+// Writing and reading the label. Numbers are written "big-endian" (most
+// significant byte first), the usual network order, on both machines.
 impl Header {
     pub fn write(&self, out: &mut impl BufMut) {
         out.put_u8(self.kind as u8);
@@ -140,16 +158,20 @@ impl Header {
         out.put_u16(self.slice_count);
     }
 
+    // Read a label from the front of a packet; refuses anything too short or
+    // with a piece number that cannot exist.
     pub fn read(buf: &mut impl Buf) -> Result<Self, WireError> {
         if buf.remaining() < HEADER_LEN {
             return Err(WireError::Truncated);
         }
+        // The real kind byte is filled in by Packet::parse, which still has it.
         let kind = Kind::from_u8(buf.get_u8()).ok_or(WireError::UnknownKind(0))?;
         let flags = buf.get_u8();
         let seq = buf.get_u16();
         let frame_id = buf.get_u32();
         let slice_index = buf.get_u16();
         let slice_count = buf.get_u16();
+        // A frame always has at least one piece, and piece numbers count from 0.
         if slice_count == 0 || slice_index >= slice_count {
             return Err(WireError::BadSlice { index: slice_index, count: slice_count });
         }
@@ -164,8 +186,10 @@ pub struct Packet {
     pub payload: Bytes,
 }
 
+// Split a received packet into its label and its data (no copying).
 impl Packet {
     pub fn parse(mut datagram: Bytes) -> Result<Self, WireError> {
+        // Remember the first byte so an "unknown kind" error can report it.
         let kind_byte = datagram.first().copied();
         let header = Header::read(&mut datagram).map_err(|e| match (e, kind_byte) {
             (WireError::UnknownKind(_), Some(k)) => WireError::UnknownKind(k),
@@ -174,6 +198,7 @@ impl Packet {
         Ok(Self { header, payload: datagram })
     }
 
+    // Glue label and data back into one packet ready to send.
     pub fn to_bytes(&self) -> Bytes {
         let mut out = BytesMut::with_capacity(HEADER_LEN + self.payload.len());
         self.header.write(&mut out);
@@ -201,11 +226,13 @@ impl SeqCounter {
 /// `frame` is the raw codec bitstream (Annex-B NAL units for H.264/HEVC, OBUs
 /// for AV1). Slices are cut at byte boundaries; the decoder only sees the
 /// reassembled whole, so it never needs to know.
+// Shortcut: a plain video frame, keyframe or not.
 pub fn slice_frame(frame: &Bytes, frame_id: u32, keyframe: bool, seq: &SeqCounter) -> Result<Vec<Bytes>, WireError> {
     slice_frame_flagged(frame, frame_id, if keyframe { flags::KEYFRAME } else { 0 }, seq)
 }
 
 /// [`slice_frame`] with any header flags (keyframe, recovery).
+// Shortcut: a video frame with any flags.
 pub fn slice_frame_flagged(frame: &Bytes, frame_id: u32, flags: u8, seq: &SeqCounter) -> Result<Vec<Bytes>, WireError> {
     slice_frame_as(Kind::Video, frame, frame_id, flags, seq)
 }
@@ -218,10 +245,13 @@ pub fn slice_frame_as(
     flags: u8,
     seq: &SeqCounter,
 ) -> Result<Vec<Bytes>, WireError> {
+    // Number of pieces = frame size divided by piece size, rounded up, at
+    // least one. More than 65,535 pieces would not fit the label: refuse.
     let slice_count = frame.len().div_ceil(MAX_PAYLOAD).max(1);
     let slice_count_u16 = u16::try_from(slice_count).map_err(|_| WireError::PayloadTooLarge(frame.len()))?;
 
     let mut out = Vec::with_capacity(slice_count);
+    // One packet per chunk: label first, then that chunk of the frame.
     for (i, chunk) in frame.chunks(MAX_PAYLOAD).enumerate().take(slice_count) {
         let header =
             Header { kind, flags, seq: seq.take(), frame_id, slice_index: i as u16, slice_count: slice_count_u16 };
@@ -244,6 +274,9 @@ pub fn slice_frame_as(
 /// frame of a few dozen slices almost never loses two in the same stripe,
 /// and the cost (8 Mbps at an 80 Mbps stream) is far cheaper than a frozen
 /// frame plus a recovery keyframe.
+// Forward error correction (FEC): extra pieces made by XOR-ing data
+// pieces together. If exactly one piece of a group is lost, XOR-ing the
+// others with the parity piece gives the lost one back, with no round trip.
 pub const FEC_RATIO: f64 = 0.10;
 /// The most redundancy we will add: one parity packet per two data
 /// packets. Past this the parity costs more airtime than it saves.
@@ -256,6 +289,8 @@ pub fn parity_count(data_slices: usize) -> usize {
 }
 
 /// Parity packets for `data_slices` at `ratio` (clamped to 0.10..=0.50).
+// Parity count = data pieces x ratio, rounded up, between 1 and the number
+// of data pieces. The ratio is held between 10% and 50%.
 pub fn parity_count_at(data_slices: usize, ratio: f64) -> usize {
     let ratio = ratio.clamp(FEC_RATIO, FEC_RATIO_MAX);
     ((data_slices as f64 * ratio).ceil() as usize).clamp(1, data_slices.max(1))
@@ -271,10 +306,14 @@ pub fn parity_count_at(data_slices: usize, ratio: f64) -> usize {
 /// Payload layout: `[u16 xor of slice lengths][xor of zero-padded data]`.
 /// The length lets us rebuild a short last slice to its exact size.
 fn stripe_parity(slices: &[&[u8]], stripe: usize, stripes: usize) -> BytesMut {
+    // Members of this stripe: every "stripes"-th piece starting at "stripe".
     let members = slices.iter().skip(stripe).step_by(stripes);
+    // Parity is as long as the longest member; shorter ones count as zero-padded.
     let width = members.clone().map(|s| s.len()).max().unwrap_or(0);
     let mut out = BytesMut::zeroed(2 + width);
     let mut len_xor = 0u16;
+    // XOR every member in. Also XOR their lengths, so the lost piece's exact
+    // length can be recovered too.
     for m in members {
         len_xor ^= m.len() as u16;
         for (o, b) in out[2..].iter_mut().zip(m.iter()) {
@@ -316,6 +355,7 @@ pub fn slice_frame_with_fec_flagged(
     seq: &SeqCounter,
     ratio: f64,
 ) -> Result<Vec<Bytes>, WireError> {
+    // First the normal data pieces, then one parity piece per stripe after them.
     let mut out = slice_frame_flagged(frame, frame_id, flags, seq)?;
     let data: Vec<&[u8]> = out.iter().map(|d| &d[HEADER_LEN..]).collect();
     let stripes = parity_count_at(data.len(), ratio);
@@ -343,12 +383,14 @@ pub fn slice_frame_with_fec_flagged(
 /// at 300 fps); comparing by distance, like TCP sequence numbers, keeps
 /// "newer" meaningful across the wrap. A plain `a > b` would make every
 /// frame after the wrap look ancient and be thrown away.
+// "a - b" wraps around like a clock; less than half way round means newer.
 pub fn is_newer(a: u32, b: u32) -> bool {
     a != b && a.wrapping_sub(b) < u32::MAX / 2
 }
 
 /// Which packets of one frame the viewer still needs. Data slices are
 /// listed by index; parity packets with the high bit set (`0x8000 | k`).
+// The viewer's "please send these pieces of frame X again".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResendRequest {
     pub frame_id: u32,
@@ -365,6 +407,7 @@ impl ResendRequest {
 
     /// Payload only; the header carries kind and `frame_id` too, but the
     /// id is repeated so the payload stands alone.
+    // Wire layout: 4-byte frame number, then 2 bytes per wanted piece.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(4 + self.items.len() * 2);
         out.extend_from_slice(&self.frame_id.to_be_bytes());
@@ -374,6 +417,7 @@ impl ResendRequest {
         out
     }
 
+    // Read a request; anything with a broken length is ignored (None).
     pub fn decode(payload: &[u8]) -> Option<Self> {
         if payload.len() < 4 || (payload.len() - 4) % 2 != 0 {
             return None;
@@ -384,6 +428,7 @@ impl ResendRequest {
     }
 }
 
+// A whole picture, ready for the decoder.
 /// A frame that has been fully received.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompleteFrame {
@@ -405,6 +450,8 @@ pub enum Reassembly {
     Stale,
 }
 
+// A frame still being collected: which pieces arrived, which parity
+// pieces arrived, and when we last heard of it or asked about it.
 #[derive(Debug, Default)]
 struct PartialFrame {
     keyframe: bool,
@@ -433,6 +480,7 @@ impl PartialFrame {
     /// Rebuild every stripe that is missing exactly one data slice and has
     /// its parity. Returns how many slices were recovered.
     fn recover(&mut self) -> u16 {
+        // Try each stripe that has its parity piece.
         let stripes = self.parity.len();
         if stripes == 0 || self.slice_count == 0 {
             return 0;
@@ -440,11 +488,15 @@ impl PartialFrame {
         let mut recovered = 0;
         for k in 0..stripes {
             let Some(parity) = self.parity[k].clone() else { continue };
+            // The data pieces of this stripe, and which of them are missing.
             let members: Vec<usize> = (k..self.slices.len()).step_by(stripes).collect();
             let missing: Vec<usize> = members.iter().copied().filter(|&i| self.slices[i].is_none()).collect();
+            // Parity can rebuild only one missing piece per stripe.
             if missing.len() != 1 || parity.len() < 2 {
                 continue;
             }
+            // Start from the parity, XOR in every piece we have: what is left is the
+            // missing piece (and its length).
             let mut len = u16::from_be_bytes([parity[0], parity[1]]);
             let mut buf = parity[2..].to_vec();
             for &i in &members {
@@ -455,6 +507,8 @@ impl PartialFrame {
                     }
                 }
             }
+            // A length longer than the parity means the pieces disagree: give up on
+            // this stripe rather than make up data.
             let len = usize::from(len);
             if len > buf.len() {
                 continue; // inconsistent parity; leave the frame to the NACK path
@@ -500,6 +554,7 @@ pub struct Reassembler {
 impl Default for Reassembler {
     fn default() -> Self {
         Self {
+            // Start empty, with a cautious 5 ms round-trip guess until measured.
             partial: BTreeMap::new(),
             held: BTreeMap::new(),
             last_delivered: None,
@@ -532,6 +587,8 @@ impl Reassembler {
     /// Tell the reassembler the current round trip so it knows how long a
     /// resend takes.
     pub fn set_rtt_ms(&mut self, rtt_ms: f64) {
+        // Grace = 2.5 x round trip: long enough for "ask" plus "resend" to
+        // finish, kept between 8 and 40 ms.
         let rtt = rtt_ms.max(0.0) as u64;
         self.rtt_ms = rtt.max(1);
         self.grace_ms = (rtt * 5 / 2).clamp(Self::GRACE_MIN_MS, Self::GRACE_MAX_MS);
@@ -543,23 +600,28 @@ impl Reassembler {
         let h = packet.header;
         debug_assert!(matches!(h.kind, Kind::Video | Kind::VideoFec | Kind::Camera));
 
+        // Pieces of a frame we already showed or gave up on: nothing to do.
         if self.last_delivered.is_some_and(|last| !is_newer(h.frame_id, last)) {
             return Reassembly::Stale;
         }
+        // Already complete and waiting its turn: this is a duplicate.
         if self.held.contains_key(&h.frame_id) {
             return Reassembly::Stale; // a resend of something already complete
         }
 
+        // Find (or start) the record for this frame.
         let pf = self.partial.entry(h.frame_id).or_insert_with(|| PartialFrame {
             keyframe: h.flags & flags::KEYFRAME != 0,
             recovery: h.flags & flags::RECOVERY != 0,
             ..PartialFrame::default()
         });
+        // Count pieces that arrive after we asked for them (shown as "resent").
         if pf.requested_ms.is_some() {
             self.resent += 1;
         }
         pf.last_packet_ms = now_ms;
 
+        // A parity piece: store it under its stripe number.
         if h.kind == Kind::VideoFec {
             if pf.parity.is_empty() {
                 pf.parity = vec![None; usize::from(h.slice_count)];
@@ -569,6 +631,7 @@ impl Reassembler {
                 return Reassembly::Stale;
             }
             pf.parity[usize::from(h.slice_index)] = Some(packet.payload);
+        // A data piece: store it once (duplicates are ignored).
         } else {
             if pf.slice_count == 0 {
                 pf.slice_count = h.slice_count;
@@ -583,10 +646,12 @@ impl Reassembler {
                 pf.received += 1;
             }
         }
+        // Still incomplete: see whether parity can fill a gap.
         if pf.slice_count > 0 && pf.received < pf.slice_count {
             self.recovered += u64::from(pf.recover());
         }
 
+        // Every piece is here: join them in order into one frame.
         if pf.slice_count > 0 && pf.received == pf.slice_count {
             let pf = self.partial.remove(&h.frame_id).expect("just inserted");
             let total: usize = pf.slices.iter().flatten().map(Bytes::len).sum();
@@ -605,6 +670,8 @@ impl Reassembler {
             if frame.keyframe || frame.recovery {
                 self.abandon_older_than(h.frame_id);
             }
+            // Park it, then hand out frames strictly in order (a P-frame is useless
+            // before the frame it builds on).
             self.held.insert(h.frame_id, frame);
             return self.deliver_next(now_ms).map_or(Reassembly::Pending, Reassembly::Complete);
         }
@@ -625,11 +692,13 @@ impl Reassembler {
     }
 
     fn abandon_older_than(&mut self, frame_id: u32) {
+        // Drop incomplete frames older than this one...
         let older: Vec<u32> = self.partial.keys().copied().filter(|&id| is_newer(frame_id, id)).collect();
         for id in older {
             self.partial.remove(&id);
             self.abandoned.push(id);
         }
+        // ...and complete ones waiting behind them.
         let older: Vec<u32> = self.held.keys().copied().filter(|&id| is_newer(frame_id, id)).collect();
         for id in older {
             self.held.remove(&id);
@@ -640,6 +709,7 @@ impl Reassembler {
     /// Hand over the oldest held frame if nothing older is still pending
     /// (or everything older has run out of grace).
     fn deliver_next(&mut self, now_ms: u64) -> Option<CompleteFrame> {
+        // The oldest complete frame waiting to be handed out.
         let next = *self.held.keys().next()?;
         // Older partial frames: still worth waiting for?
         let waiting: Vec<u32> = self.partial.keys().copied().filter(|&id| is_newer(next, id)).collect();
@@ -647,6 +717,9 @@ impl Reassembler {
         // given may not be moving (tests), or the link is a mess. Either
         // way, stop waiting.
         let backlog = self.held.len() >= Self::MAX_PARTIAL;
+        // For every older frame still missing pieces: wait for its resend unless
+        // its time is up (no packet for longer than the grace, or asked three
+        // times already and two round trips passed).
         for id in waiting {
             let pf = &self.partial[&id];
             let since = now_ms.saturating_sub(pf.last_packet_ms);
@@ -659,6 +732,7 @@ impl Reassembler {
                 return None; // give the resend a chance
             }
         }
+        // Nothing older to wait for: hand this frame out.
         let frame = self.held.remove(&next)?;
         self.last_delivered = Some(next);
         Some(frame)
@@ -679,10 +753,14 @@ impl Reassembler {
     /// has started, or nothing for a couple of ms), and again no sooner
     /// than one RTT later.
     pub fn resend_requests(&mut self, now_ms: u64) -> Vec<ResendRequest> {
+        // The newest frame we have heard of, partial or complete. Packets of a
+        // frame are sent before the next frame's, so a newer frame having started
+        // means the older one's missing pieces are really lost.
         let newest = self.partial.keys().copied().reduce(|a, b| if is_newer(a, b) { a } else { b });
         let newest_held = self.held.keys().next_back().copied();
         let mut out = Vec::new();
         for (&id, pf) in &mut self.partial {
+            // Complete frames need nothing.
             if pf.slice_count > 0 && pf.received == pf.slice_count {
                 continue; // done
             }
@@ -698,9 +776,11 @@ impl Reassembler {
             if !(later_frame_seen || quiet) {
                 continue;
             }
+            // Asked three times already: stop asking, the grace timer will decide.
             if pf.requests >= Self::MAX_REQUESTS {
                 continue;
             }
+            // Asked less than one round trip ago: the answer cannot be here yet.
             if pf.requested_ms.is_some_and(|t| now_ms.saturating_sub(t) < self.rtt_ms.max(2)) {
                 continue;
             }
@@ -717,6 +797,7 @@ impl Reassembler {
             if items.is_empty() {
                 continue;
             }
+            // Remember when and how often we asked.
             pf.requested_ms = Some(now_ms);
             pf.requests += 1;
             out.push(ResendRequest { frame_id: id, items });
@@ -730,6 +811,8 @@ impl Reassembler {
     }
 }
 
+// Tests: each one builds frames, loses or reorders pieces on purpose, and
+// checks the reassembler still produces exactly the original frame.
 #[cfg(test)]
 mod tests {
 

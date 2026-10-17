@@ -19,7 +19,7 @@
 //! ChaCha20-Poly1305: unreadable to others, and any change or replay is
 //! detected and dropped.
 //!
-//! Datagram first bytes (plain packets start with a wire `Kind`, 1-13):
+//! Datagram first bytes (plain packets start with a wire `Kind`, 1-15):
 //!
 //! ```text
 //! 0xA0 INIT      viewer → host   [viewer key 32][one-time key 32]
@@ -34,6 +34,10 @@
 //! 0xAE SEALED    both            [counter u64][ciphertext + 16-byte tag]
 //! ```
 
+// In plain words: the two computers only ever react to packets they can
+// read with keys that only they hold. A stranger on the network sees noise
+// and cannot make the host do anything, not even with recorded packets.
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -46,6 +50,8 @@ use sha2::{Digest, Sha256};
 use spake2::{Ed25519Group, Identity as SpakeId, Password, Spake2};
 use x25519_dalek::{PublicKey, StaticSecret};
 
+// The first byte of each special packet below (0xA0 and up never clash with
+// the ordinary packet kinds, which are small numbers).
 pub const INIT: u8 = 0xA0;
 pub const RESP: u8 = 0xA1;
 pub const UNKNOWN: u8 = 0xA2;
@@ -67,6 +73,8 @@ pub type PublicKeyBytes = [u8; 32];
 const SPAKE_LEN: usize = 33;
 const NAME_MAX: usize = 64;
 
+// Each computer has a permanent secret key (kept in a file, never sent) and
+// the matching public key (shared during pairing, like a phone number).
 /// This computer's permanent key pair.
 pub struct Identity {
     secret: StaticSecret,
@@ -80,10 +88,12 @@ impl std::fmt::Debug for Identity {
 }
 
 impl Identity {
+    // A brand-new random key pair (first run on this computer).
     pub fn generate() -> Self {
         Self::from_secret(random_bytes())
     }
 
+    // Rebuild the key pair from the saved secret (every later run).
     pub fn from_secret(bytes: [u8; 32]) -> Self {
         let secret = StaticSecret::from(bytes);
         let public = PublicKey::from(&secret).to_bytes();
@@ -99,6 +109,7 @@ impl Identity {
     }
 }
 
+// 32 random bytes from the operating system's secure random source.
 fn random_bytes() -> [u8; 32] {
     let mut b = [0u8; 32];
     OsRng.fill_bytes(&mut b);
@@ -107,6 +118,7 @@ fn random_bytes() -> [u8; 32] {
 
 /// A fresh six-digit pairing code.
 pub fn new_code() -> String {
+    // Any number 000000-999999, chosen at random.
     format!("{:06}", OsRng.next_u32() % 1_000_000)
 }
 
@@ -124,6 +136,7 @@ pub fn to_hex(bytes: &[u8]) -> String {
     })
 }
 
+// Read a public key written as 64 hex characters; anything else -> None.
 pub fn from_hex(s: &str) -> Option<PublicKeyBytes> {
     let s = s.trim();
     if s.len() != 64 {
@@ -142,6 +155,8 @@ pub fn fingerprint(key: &PublicKeyBytes) -> String {
     format!("{:02X}{:02X}-{:02X}{:02X}", h[0], h[1], h[2], h[3])
 }
 
+// A computer name from the network: no control characters, at most 64 bytes
+// (a hostile peer cannot inject odd text into the app or logs).
 fn clean_name(raw: &[u8]) -> String {
     let s = String::from_utf8_lossy(raw);
     let s: String = s.chars().filter(|c| !c.is_control()).collect();
@@ -156,6 +171,7 @@ fn name_bytes(name: &str) -> Vec<u8> {
     clean_name(name.as_bytes()).into_bytes()
 }
 
+// The 32 bytes starting at position "at", if the packet is long enough.
 fn key_at(d: &[u8], at: usize) -> Option<PublicKeyBytes> {
     d.get(at..at + 32)?.try_into().ok()
 }
@@ -173,6 +189,7 @@ struct ReplayWindow {
 }
 
 impl ReplayWindow {
+    // 2,048 bits = remember the last 2,048 counters; anything older is refused.
     const WORDS: usize = 32;
     const SIZE: u64 = 64 * Self::WORDS as u64; // 2048 packets: ~1/3 s of 4K video
 
@@ -182,6 +199,7 @@ impl ReplayWindow {
         w
     }
 
+    // Which 64-bit word and which bit inside it stands for counter n.
     fn bit(n: u64) -> (usize, u64) {
         let i = n % Self::SIZE;
         ((i / 64) as usize, 1u64 << (i % 64))
@@ -199,6 +217,8 @@ impl ReplayWindow {
 
     /// True the first time `n` is seen (and it isn't too old).
     fn accept(&mut self, n: u64) -> bool {
+        // A counter newer than anything seen: clear the bits it skips over and
+        // move the window forward.
         if n > self.top {
             if n - self.top >= Self::SIZE {
                 self.bits = [0; Self::WORDS];
@@ -211,6 +231,7 @@ impl ReplayWindow {
             self.top = n;
             self.set(n);
             true
+        // Older: refuse if outside the window or already seen, else mark it seen.
         } else if self.top - n >= Self::SIZE || self.is_set(n) {
             false
         } else {
@@ -237,6 +258,8 @@ impl std::fmt::Debug for Session {
 /// The handshake proof uses the last counter, which data never reaches.
 const PROOF_COUNTER: u64 = u64::MAX;
 
+// The "number used once" that ChaCha20 needs: the packet counter. Because
+// the counter never repeats within a session, neither does the nonce.
 fn nonce(counter: u64) -> Nonce {
     let mut n = [0u8; 12];
     n[4..].copy_from_slice(&counter.to_be_bytes());
@@ -255,6 +278,9 @@ impl Session {
 
     /// Encrypt one datagram.
     pub fn seal(&self, plain: &[u8]) -> Vec<u8> {
+        // Each packet gets the next counter, written in clear in front so the other
+        // side knows which nonce to use. The counter and tag byte are also checked
+        // ("aad"), so changing them breaks the seal.
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
         let mut head = [0u8; 9];
         head[0] = SEALED;
@@ -268,10 +294,12 @@ impl Session {
 
     /// Decrypt one datagram; `None` if forged, damaged or replayed.
     pub fn open(&self, d: &[u8]) -> Option<Vec<u8>> {
+        // Too short or not a sealed packet: not ours.
         if d.len() < OVERHEAD || d[0] != SEALED {
             return None;
         }
         let n = u64::from_be_bytes(d[1..9].try_into().ok()?);
+        // The proof counter is never used for data; refuse it here.
         if n == PROOF_COUNTER {
             return None;
         }
@@ -280,6 +308,8 @@ impl Session {
         self.window.lock().ok()?.accept(n).then_some(plain)
     }
 
+    // A tag over nothing, proving the sender derived the same keys (used once
+    // in the handshake).
     fn proof(&self) -> Vec<u8> {
         self.send.encrypt(&nonce(PROOF_COUNTER), Payload { msg: &[], aad: b"aa-proof" }).expect("encrypt")
     }
@@ -292,6 +322,9 @@ impl Session {
 /// Both directions' keys from the three shared secrets. Every public key
 /// is mixed in, so a session belongs to exactly these two computers.
 fn derive(dh: [[u8; 32]; 3], keys: [&PublicKeyBytes; 4]) -> ([u8; 32], [u8; 32]) {
+    // Mix the three shared secrets and all four public keys through HKDF (a
+    // standard key-stretching function) into 64 bytes: the first 32 encrypt
+    // viewer -> host, the second 32 host -> viewer.
     let mut ikm = Vec::with_capacity(96);
     for d in &dh {
         ikm.extend_from_slice(d);
@@ -338,6 +371,8 @@ pub enum Answer {
 impl Initiator {
     /// Start a connection: the datagram to send (repeat it until answered).
     pub fn start(id: &Identity) -> (Self, Vec<u8>) {
+        // Fresh one-time key for this connection only ("forward secrecy": stealing
+        // the permanent keys later does not unlock recorded sessions).
         let eph = StaticSecret::from(random_bytes());
         let eph_pub = PublicKey::from(&eph).to_bytes();
         let mut d = Vec::with_capacity(65);
@@ -349,6 +384,7 @@ impl Initiator {
 
     /// Read the host's answer. `None`: not an answer to us (ignore it).
     pub fn finish(&self, d: &[u8]) -> Option<Answer> {
+        // The first byte says which answer this is.
         match *d.first()? {
             UNKNOWN => {
                 Some(Answer::NotPaired { host_key: key_at(d, 1)?, host_name: clean_name(d.get(33..).unwrap_or(&[])) })
@@ -356,6 +392,8 @@ impl Initiator {
             RESP if d.len() == 1 + 64 + 16 => {
                 let host = key_at(d, 1)?;
                 let host_eph = key_at(d, 33)?;
+                // Three combinations of one-time and permanent keys. Only the real host
+                // (who has its permanent secret) can compute the same three.
                 let dh = [
                     self.eph.diffie_hellman(&PublicKey::from(host_eph)).to_bytes(),
                     self.eph.diffie_hellman(&PublicKey::from(host)).to_bytes(),
@@ -363,6 +401,7 @@ impl Initiator {
                 ];
                 let (v2h, h2v) = derive(dh, [&self.me, &self.eph_pub, &host, &host_eph]);
                 let s = Session::new(v2h, h2v);
+                // Accept only if the host's proof checks out with these keys.
                 s.check_proof(&d[65..]).then_some(Answer::Connected(host, s))
             }
             _ => None,
@@ -382,11 +421,13 @@ pub enum Response {
 
 /// Host side of the handshake. `None`: malformed, ignore.
 pub fn respond(id: &Identity, name: &str, d: &[u8], is_paired: impl Fn(&PublicKeyBytes) -> bool) -> Option<Response> {
+    // Not a well-formed INIT: ignore.
     if d.len() != 65 || d[0] != INIT {
         return None;
     }
     let viewer = key_at(d, 1)?;
     let viewer_eph = key_at(d, 33)?;
+    // Unknown viewer: tell it who we are so it can ask to pair.
     if !is_paired(&viewer) {
         let mut reply = vec![UNKNOWN];
         reply.extend_from_slice(&id.public);
@@ -395,12 +436,14 @@ pub fn respond(id: &Identity, name: &str, d: &[u8], is_paired: impl Fn(&PublicKe
     }
     let eph = StaticSecret::from(random_bytes());
     let eph_pub = PublicKey::from(&eph).to_bytes();
+    // The same three combinations, from the host's side (mirror image).
     let dh = [
         eph.diffie_hellman(&PublicKey::from(viewer_eph)).to_bytes(),
         id.secret.diffie_hellman(&PublicKey::from(viewer_eph)).to_bytes(),
         eph.diffie_hellman(&PublicKey::from(viewer)).to_bytes(),
     ];
     let (v2h, h2v) = derive(dh, [&viewer, &viewer_eph, &id.public, &eph_pub]);
+    // The host sends with the viewer's "receive" key and vice versa.
     let session = Session::new(h2v, v2h);
     let mut reply = Vec::with_capacity(81);
     reply.push(RESP);
@@ -417,6 +460,8 @@ pub fn respond(id: &Identity, name: &str, d: &[u8], is_paired: impl Fn(&PublicKe
 type HmacSha256 = Hmac<Sha256>;
 
 fn pair_proof(secret: &[u8], label: &[u8], viewer: &PublicKeyBytes, host: &PublicKeyBytes) -> [u8; 32] {
+    // A keyed hash binding the pairing secret to both public keys, so a
+    // meddler in the middle cannot swap in its own key.
     let mut m = <HmacSha256 as Mac>::new_from_slice(secret).expect("any key length");
     m.update(label);
     m.update(viewer);
@@ -459,6 +504,8 @@ pub enum PairError {
 
 impl PairInitiator {
     pub fn start(code: &str, id: &Identity, name: &str) -> (Self, Vec<u8>) {
+        // Step 1 (viewer): SPAKE2 message made from the typed code, plus our public
+        // key and name.
         let (v, h) = spake_ids();
         let (spake, msg) = Spake2::<Ed25519Group>::start_a(&Password::new(normalize_code(code).as_bytes()), &v, &h);
         let mut d = Vec::with_capacity(1 + SPAKE_LEN + 32 + NAME_MAX);
@@ -471,6 +518,8 @@ impl PairInitiator {
 
     /// Read `PAIR2`. Consumes the exchange (it can only be finished once).
     pub fn finish(self, d: &[u8]) -> Result<Paired, PairError> {
+        // Step 3 (viewer): read the host's answer and check its proof. A wrong
+        // code gives a different secret, so the proof does not match.
         if d.len() < 1 + SPAKE_LEN + 64 || d[0] != PAIR2 {
             return Err(PairError::Malformed);
         }
@@ -481,6 +530,7 @@ impl PairInitiator {
         if !subtle_eq(&expect, proof) {
             return Err(PairError::WrongCode);
         }
+        // Our own proof back, so the host knows we had the code too.
         let mut confirm = vec![PAIR3];
         confirm.extend_from_slice(&pair_proof(&secret, b"viewer", &self.me, &host_key));
         Ok(Paired { host_key, host_name: clean_name(&d[1 + SPAKE_LEN + 64..]), confirm })
@@ -506,6 +556,8 @@ impl std::fmt::Debug for PendingPair {
 
 /// Host: answer a `PAIR1` with the current code. `None`: malformed.
 pub fn pair_respond(code: &str, id: &Identity, name: &str, d: &[u8]) -> Option<PendingPair> {
+    // Step 2 (host): answer with its own SPAKE2 message, public key, proof
+    // and name, using the code it is showing right now.
     if d.len() < 1 + SPAKE_LEN + 32 || d[0] != PAIR1 {
         return None;
     }
@@ -530,11 +582,13 @@ pub fn pair_respond(code: &str, id: &Identity, name: &str, d: &[u8]) -> Option<P
 
 /// Host: is this `PAIR3` the right proof (so the viewer typed our code)?
 pub fn pair_confirmed(p: &PendingPair, host: &PublicKeyBytes, d: &[u8]) -> bool {
+    // Step 4 (host): the viewer's proof matches only if it typed our code.
     d.len() == 33 && d[0] == PAIR3 && subtle_eq(&pair_proof(&p.secret, b"viewer", &p.viewer_key, host), &d[1..])
 }
 
 /// Constant-time comparison (no timing hints about how much matched).
 fn subtle_eq(a: &[u8], b: &[u8]) -> bool {
+    // Compares every byte whatever happens, so the time taken reveals nothing.
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 

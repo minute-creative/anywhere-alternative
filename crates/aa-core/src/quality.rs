@@ -13,6 +13,9 @@
 //! a codec, size and frame rate; [`FpsLadder`] picks the rung from what
 //! the bitrate controller says the connection carries. No OS code, so all
 //! of it is unit-tested.
+// In plain words: the frame rate (pictures per second) drops first when the
+// network struggles, and only at 60 does the picture start to get softer.
+// This file has the numbers behind that rule.
 
 use crate::video::{Codec, Resolution};
 
@@ -38,6 +41,8 @@ fn bits_per_pixel(codec: Codec) -> f64 {
 /// more alike the closer together they are, so each extra frame is cheaper.
 /// The 0.75 power is the usual rule of thumb for screen and game content.
 pub fn sharp_kbps(codec: Codec, res: Resolution, fps: u16) -> u32 {
+    // Bits needed at 60 fps = pixels x 60 x bits-per-pixel; more frames cost
+    // less than proportionally (power 0.75). Result in kbps, 2 to 400 Mbps.
     let base = res.pixels() as f64 * 60.0 * bits_per_pixel(codec);
     let scale = (f64::from(fps.max(1)) / 60.0).powf(0.75);
     (base * scale / 1000.0).clamp(2_000.0, 400_000.0) as u32
@@ -65,6 +70,7 @@ impl FpsLadder {
 
     /// `max_fps`: the cap. `fixed`: hold exactly that (viewer picked a number).
     pub fn new(max_fps: u16, fixed: bool) -> Self {
+        // The lowest allowed is 1 frame a second (avoids dividing by zero).
         let max = max_fps.max(1);
         // Start at 60 (or the cap, if lower) and climb as the connection
         // proves itself: starting at 240 on a weak link would open with a
@@ -84,6 +90,7 @@ impl FpsLadder {
     /// The rungs we may use, fastest first. Always includes `max` itself
     /// (a 165 Hz screen gets 165, a 50 Hz one gets 50).
     fn rungs(&self) -> Vec<u16> {
+        // Steps below the screen's maximum and not below 60, plus the maximum.
         let mut r: Vec<u16> = FPS_RUNGS.iter().copied().filter(|&f| f < self.max && f >= MIN_FPS).collect();
         r.insert(0, self.max);
         r
@@ -93,12 +100,15 @@ impl FpsLadder {
     /// last report had no trouble (no cut). Returns the new frame rate if
     /// it changed.
     pub fn on_bitrate(&mut self, codec: Codec, res: Resolution, kbps: u32, clean: bool) -> Option<u16> {
+        // A fixed choice, or a screen that cannot go above 60: nothing to decide.
         if self.fixed || self.max <= MIN_FPS {
             return None;
         }
         let before = self.current;
+        // Would this frame rate look sharp at the bitrate we have (with a margin)?
         let fits = |fps: u16, share: f64| f64::from(kbps) >= f64::from(sharp_kbps(codec, res, fps)) * share;
         let rungs = self.rungs();
+        // Not enough for the current rate: drop.
         if !fits(self.current, Self::DOWN_BELOW) && self.current > MIN_FPS {
             // Straight to the fastest rung that fits (not one step a second:
             // a sudden drop in bandwidth needs a sudden answer).

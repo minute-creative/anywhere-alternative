@@ -2,8 +2,12 @@
 //!
 //! Every event is small and fixed-size so the viewer can send it the instant
 //! it happens, on its own UDP lane, never queued behind video. Encoding is
-//! hand-written rather than serde so a mouse move is exactly 13 bytes.
+//! hand-written rather than serde so a mouse move is exactly 5 bytes.
 
+// In plain words: every click, key press, scroll and controller change on the
+// viewer becomes one tiny event here, sent at once. The first byte ("tag")
+// says which kind; the rest are its numbers. Keys are sent as standard USB key
+// numbers, so a key means the same thing on a Mac and a PC keyboard.
 use bytes::{Buf, BufMut};
 
 /// Mouse buttons. Values match the wire format.
@@ -18,6 +22,7 @@ pub enum MouseButton {
 }
 
 impl MouseButton {
+    // Number from the wire -> button; anything unknown is refused.
     fn from_u8(v: u8) -> Option<Self> {
         Some(match v {
             0 => Self::Left,
@@ -133,6 +138,8 @@ pub struct Rumble {
     pub high_freq: u8,
 }
 
+// The first byte of each encoded event. Never renumber: old and new versions
+// must agree. New events get the next free number.
 mod tag {
     pub const MOUSE_MOVE_ABS: u8 = 1;
     pub const MOUSE_MOVE_REL: u8 = 2;
@@ -160,6 +167,7 @@ impl InputEvent {
     pub const MAX_ENCODED: usize = 1 + 1 + 4 + 2 * 4 + 2;
 
     pub fn encode(&self, out: &mut impl BufMut) {
+        // Write: tag first, then the event's numbers in a fixed order.
         match *self {
             Self::MouseMoveAbs { x, y } => {
                 out.put_u8(tag::MOUSE_MOVE_ABS);
@@ -212,6 +220,7 @@ impl InputEvent {
 
     pub fn decode(buf: &mut impl Buf) -> Result<Self, InputDecodeError> {
         use InputDecodeError::Truncated;
+        // Read: the tag decides how many more bytes must follow.
         if buf.remaining() < 1 {
             return Err(Truncated);
         }
@@ -225,9 +234,11 @@ impl InputEvent {
             tag::GAMEPAD_DETACH => 1,
             other => return Err(InputDecodeError::UnknownTag(other)),
         };
+        // Not enough bytes for that kind of event: refuse rather than guess.
         if buf.remaining() < need {
             return Err(Truncated);
         }
+        // Read the numbers back in exactly the order they were written.
         Ok(match t {
             tag::MOUSE_MOVE_ABS => Self::MouseMoveAbs { x: buf.get_u16(), y: buf.get_u16() },
             tag::MOUSE_MOVE_REL => Self::MouseMoveRel { dx: buf.get_i16(), dy: buf.get_i16() },

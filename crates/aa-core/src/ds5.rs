@@ -29,6 +29,10 @@
 //! Each pair travels as its own stereo Opus stream of 10 ms frames; a pair
 //! that is silent is sent empty.
 
+// In plain words: a DualSense (PS5 controller) on the viewer is copied to
+// the host byte for byte, so games see a real DualSense with all its
+// features. These are the message formats for that, and conversions between
+// the USB and Bluetooth versions of the controller's reports.
 use crate::input::GamepadState;
 
 /// Sony's USB vendor id and the two DualSense product ids.
@@ -65,6 +69,7 @@ pub enum PadMsg {
 }
 
 impl PadMsg {
+    // Each message: type number, slot (which controller), then its data.
     pub fn encode(&self) -> Vec<u8> {
         match self {
             Self::Input { slot, report } => [&[1, *slot][..], &report[..]].concat(),
@@ -81,6 +86,8 @@ impl PadMsg {
 
     /// `None` for anything malformed, unknown, or for a slot out of range.
     pub fn decode(b: &[u8]) -> Option<Self> {
+        // Read: type and slot first; refuse unknown types, slots beyond 4, and
+        // anything too short.
         let (&ty, rest) = b.split_first()?;
         let (&slot, body) = rest.split_first()?;
         if slot >= SLOTS {
@@ -104,6 +111,8 @@ impl PadMsg {
 
 /// CRC-32 (IEEE, reflected), as the DualSense uses on Bluetooth.
 pub fn crc32(seed_byte: u8, data: &[u8]) -> u32 {
+    // Standard CRC-32: a checksum the controller adds over Bluetooth so damaged
+    // reports can be spotted.
     let mut crc = !0u32;
     for &b in std::iter::once(&seed_byte).chain(data) {
         crc ^= u32::from(b);
@@ -118,6 +127,8 @@ pub fn crc32(seed_byte: u8, data: &[u8]) -> u32 {
 /// Bluetooth adds a sequence byte after the id and a CRC at the end; the
 /// controller state in between is identical to USB.
 pub fn bt_input_to_usb(bt: &[u8]) -> Option<[u8; USB_INPUT_LEN]> {
+    // A Bluetooth report must be complete, start with 0x31, and pass its
+    // checksum.
     if bt.len() < BT_REPORT_LEN || bt[0] != 0x31 {
         return None;
     }
@@ -134,6 +145,8 @@ pub fn bt_input_to_usb(bt: &[u8]) -> Option<[u8; USB_INPUT_LEN]> {
 /// A USB-layout output report (id 0x02) for a controller connected by
 /// Bluetooth: id 0x31, sequence tag, the 0x10 marker, effects, CRC.
 pub fn usb_output_to_bt(usb: &[u8; USB_OUTPUT_LEN], seq: u8) -> [u8; BT_REPORT_LEN] {
+    // Wrap the 47 effect bytes in a Bluetooth report with the sequence number
+    // and a fresh checksum (the controller ignores reports with a wrong one).
     let mut bt = [0u8; BT_REPORT_LEN];
     bt[0] = 0x31;
     bt[1] = (seq & 0x0F) << 4;
@@ -185,11 +198,14 @@ pub fn neutral_input() -> [u8; USB_INPUT_LEN] {
 pub fn usb_input_to_state(r: &[u8; USB_INPUT_LEN]) -> GamepadState {
     use crate::input::gamepad_buttons as b;
     // Byte 0 is full left/up; ours is i16 with positive = right/up.
+    // Stick bytes run 0-255 with 128 in the middle; ours run -32768..32767.
+    // Up/down is flipped ("invert") because the controller counts down as up.
     let axis = |v: u8, invert: bool| {
         let x = i32::from(v) * 256 - 32_768 + 128;
         let x = if invert { -x - 1 } else { x };
         i16::try_from(x.clamp(-32_768, 32_767)).unwrap_or(0)
     };
+    // The d-pad is one number 0-7 (up, up-right, right, ...), 8 = not pressed.
     let mut buttons = match r[8] & 0x0F {
         0 => b::DPAD_UP,
         1 => b::DPAD_UP | b::DPAD_RIGHT,
@@ -201,6 +217,7 @@ pub fn usb_input_to_state(r: &[u8; USB_INPUT_LEN]) -> GamepadState {
         7 => b::DPAD_UP | b::DPAD_LEFT,
         _ => 0,
     };
+    // (which byte, which bit, which of our buttons).
     let bits: [(usize, u8, u32); 13] = [
         (8, 0x10, b::SQUARE),
         (8, 0x20, b::CROSS),
@@ -238,6 +255,7 @@ pub fn usb_input_to_state(r: &[u8; USB_INPUT_LEN]) -> GamepadState {
 #[allow(clippy::many_single_char_names)] // r = report, s = state, as elsewhere here
 pub fn state_to_usb_input(s: &GamepadState, seq: u8) -> [u8; USB_INPUT_LEN] {
     use crate::input::gamepad_buttons as b;
+    // The reverse: our -32768..32767 back to 0-255.
     let axis = |v: i16, invert: bool| -> u8 {
         let v = i32::from(v);
         let v = if invert { -v - 1 } else { v };
@@ -252,6 +270,7 @@ pub fn state_to_usb_input(s: &GamepadState, seq: u8) -> [u8; USB_INPUT_LEN] {
     r[6] = s.right_trigger;
     r[7] = seq;
     let on = |bit: u32| s.buttons & bit != 0;
+    // Pressed d-pad directions -> the controller's 0-8 number.
     let (u, d, l, rt) = (on(b::DPAD_UP), on(b::DPAD_DOWN), on(b::DPAD_LEFT), on(b::DPAD_RIGHT));
     let hat = match (u && !d, d && !u, l && !rt, rt && !l) {
         (true, _, false, false) => 0,

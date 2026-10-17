@@ -16,6 +16,14 @@
 //! the session's quietest RTT; heavy loss (5%+) is always cut.
 //!
 //! No OS code, so this is fully unit-tested.
+// In plain words: "bitrate" is how much data per second the picture may use.
+// More looks sharper but a network can only carry so much. Once a second the
+// viewer reports how it went (pieces lost, round-trip time) and this file
+// decides: go up a little, stay, or come down. Words used below:
+// - "loss": pieces that never arrived.
+// - "RTT" (round-trip time): how long a message takes there and back. If it
+//   climbs, data is piling up in a queue somewhere: the network is full.
+// - "kbps": thousands of bits per second (1,000 kbps = 1 Mbps).
 
 use bytes::{Buf, BufMut};
 
@@ -38,6 +46,7 @@ pub struct ReceiverReport {
     pub last_good_frame: Option<u32>,
 }
 
+// Writing and reading the once-a-second report (12 bytes).
 impl ReceiverReport {
     /// The original report; older hosts read only this much.
     const BASE_LEN: usize = 8;
@@ -53,6 +62,7 @@ impl ReceiverReport {
     }
 
     pub fn decode(buf: &mut impl Buf) -> Option<Self> {
+        // Too short to be a report: ignore it.
         if buf.remaining() < Self::BASE_LEN {
             return None;
         }
@@ -63,12 +73,14 @@ impl ReceiverReport {
             rtt_tenths_ms: buf.get_u16(),
             last_good_frame: None,
         };
+        // Newer viewers add the last good frame; older ones stop after 8 bytes.
         if buf.remaining() >= 4 {
             r.last_good_frame = Some(buf.get_u32()).filter(|&f| f != u32::MAX);
         }
         Some(r)
     }
 
+    // Loss as a fraction (0.01 = 1%).
     pub fn loss_ratio(&self) -> f64 {
         f64::from(self.loss_per_10k) / 10_000.0
     }
@@ -142,6 +154,8 @@ impl BitrateController {
     const QUEUE_DELAY_TENTHS: u16 = 80;
 
     /// Has delay grown enough to say a queue is filling?
+    // The quietest RTT seen so far is the baseline; RTT well above it means a
+    // queue is building up.
     fn queue_building(&mut self, rtt: u16) -> bool {
         if rtt == 0 {
             return false; // no measurement yet
@@ -152,6 +166,7 @@ impl BitrateController {
         rtt.saturating_sub(base) > Self::QUEUE_DELAY_TENTHS.max(base / 2)
     }
 
+    // Start at start_kbps (kept between the lowest and highest allowed).
     pub fn new(start_kbps: u32, min_kbps: u32, max_kbps: u32) -> Self {
         let max_kbps = max_kbps.max(min_kbps);
         Self {
@@ -192,11 +207,13 @@ impl BitrateController {
 
     /// Feed one report. Returns the new target if it changed.
     pub fn on_report(&mut self, report: &ReceiverReport) -> Option<u32> {
+        // Step 1: read the report and update the running averages.
         let loss = report.loss_ratio();
         // Fast up, slow down: parity should grow the second loss appears and
         // linger a while after it stops.
         self.loss_avg =
             if loss > self.loss_avg { 0.5 * self.loss_avg + 0.5 * loss } else { 0.8 * self.loss_avg + 0.2 * loss };
+        // Step 2: classify what the network is doing (each rule explained below).
         let before = self.current_kbps;
         let congested = self.queue_building(report.rtt_tenths_ms);
         // Light loss only counts when delay says a queue is filling; with
@@ -230,6 +247,13 @@ impl BitrateController {
         // not change what the radio drops, so repeating it only blurs.
         let radio_held = self.hold > 0;
         self.hold = self.hold.saturating_sub(1);
+        // Step 3: decide the new bitrate. Exactly one of these branches runs:
+        // - radio loss (Wi-Fi noise): keep or keep growing; parity handles it,
+        // - severe radio loss: one gentle trim, then wait,
+        // - first seconds of a session (probing): grow fast,
+        // - loss just after a cut: wait (the old queue is still emptying),
+        // - real congestion: cut (by half if heavy, by 15% if light),
+        // - all clean: grow, slowly near the last choke point.
         let next = if radio && !heavy {
             if loss >= Self::HEAVY_LOSS {
                 self.probing = false;
@@ -283,6 +307,7 @@ impl BitrateController {
                 self.current_kbps
             }
         };
+        // Step 4: keep within the limits and report a change, if any.
         self.current_kbps = next.clamp(self.min_kbps, self.max_kbps);
         (self.current_kbps != before).then_some(self.current_kbps)
     }
@@ -525,6 +550,8 @@ impl Pacer {
 
     /// Offset from the frame's send start at which datagram `index` of
     /// `count` should go out, for a stream running at `fps`.
+    // The i-th of n pieces goes out at i/(n-1) of 75% of one frame's time,
+    // so the last piece leaves before the next frame is due.
     pub fn offset(&self, index: usize, count: usize, fps: u16) -> std::time::Duration {
         if count <= 1 || fps == 0 {
             return std::time::Duration::ZERO;

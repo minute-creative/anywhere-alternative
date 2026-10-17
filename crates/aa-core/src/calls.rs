@@ -10,6 +10,10 @@
 //! This file holds what both ends of the browser link agree on: the port,
 //! which add-ons may connect, and the message layout. No OS code.
 
+// In plain words: a call app on the watched computer (Meet in a browser, or
+// any Windows 11 app) sees "Anywhere Camera". Its pictures come from the
+// camera of the computer you sit at. This file holds the shared numbers and
+// names both ends must agree on.
 use serde::{Deserialize, Serialize};
 
 /// The WebSocket port on 127.0.0.1 the add-on connects to.
@@ -32,10 +36,13 @@ pub const EDGE_STORE_ID: Option<&str> = None;
 /// away. Safari gives each installed add-on a random origin, so any Safari
 /// add-on origin is accepted; Safari only runs add-ons the user enabled.
 pub fn origin_allowed(origin: &str) -> bool {
+    // Ignore a trailing slash some browsers add.
     let origin = origin.trim_end_matches('/');
+    // Chrome and Edge: only our known add-on ids.
     if let Some(id) = origin.strip_prefix("chrome-extension://") {
         return id == DEV_EXTENSION_ID || Some(id) == CHROME_STORE_ID || Some(id) == EDGE_STORE_ID;
     }
+    // Safari: any add-on id made of letters, digits and dashes.
     if let Some(rest) = origin.strip_prefix("safari-web-extension://") {
         return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     }
@@ -53,6 +60,7 @@ pub const FLAG_KEY: u8 = 1;
 /// A binary message: H.264 (Annex B) for video, or 10 ms of 48 kHz stereo
 /// 16-bit little-endian samples for audio.
 pub fn encode_media(kind: u8, keyframe: bool, ts_us: u64, payload: &[u8]) -> Vec<u8> {
+    // Layout: [kind][flags][8-byte timestamp][payload].
     let mut out = Vec::with_capacity(MSG_HEADER + payload.len());
     out.push(kind);
     out.push(if keyframe { FLAG_KEY } else { 0 });
@@ -82,6 +90,8 @@ pub enum BridgeMsg {
 
 /// The Windows virtual camera: a small DLL that Windows' camera service
 /// loads (`aa-vcam`), fed by the Anywhere app through shared memory.
+// Shared-memory layout between the Anywhere app and the camera DLL. Both
+// sides must use exactly these offsets.
 pub mod vcam {
     /// The DLL's class id (registered by the installer).
     pub const CLSID: u128 = 0x4aba_54b9_4410_46e2_99d7_5445_cd96_a471;

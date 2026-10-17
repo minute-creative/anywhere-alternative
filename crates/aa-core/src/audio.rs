@@ -18,6 +18,9 @@
 //! `frame_no` lets the player detect gaps and ask Opus for packet-loss
 //! concealment instead of playing silence.
 
+// In plain words: sound is cut into 10 ms pieces, each squeezed with Opus
+// (a standard sound codec) and sent with a small label: a timestamp and a
+// piece number. A missing number tells the player to fill the gap smoothly.
 use bytes::{Buf, BufMut};
 
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -41,6 +44,7 @@ pub struct AudioHeader {
     pub frame_no: u16,
 }
 
+// Label: 4-byte time, then 2-byte piece number.
 impl AudioHeader {
     pub fn write(&self, out: &mut impl BufMut) {
         out.put_u32(self.ts_ms);
@@ -71,9 +75,11 @@ impl AudioSequence {
     /// version did, so every packet after a reordered one counted as lost
     /// again and got concealed on top of the real audio.
     pub fn observe(&mut self, frame_no: u16) -> Option<u16> {
+        // How far ahead of the expected number this piece is (wrapping like a clock).
         let lost = match self.next {
             Some(n) => {
                 let gap = frame_no.wrapping_sub(n);
+                // More than half way round means it is behind: late or a duplicate.
                 if gap >= u16::MAX / 2 {
                     return None;
                 }

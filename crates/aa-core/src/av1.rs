@@ -8,6 +8,9 @@
 //! Both come from reading the sequence header, which is what this does.
 //! No OS code, so it is unit-tested here; the Mac side only calls it.
 
+// In plain words: only used when a PC sends AV1 video to a Mac. The Mac's
+// decoder needs a short description of the stream before it starts; this
+// file reads that description out of the stream itself.
 /// OBU types we care about.
 pub const OBU_SEQUENCE_HEADER: u8 = 1;
 pub const OBU_TEMPORAL_DELIMITER: u8 = 2;
@@ -22,6 +25,8 @@ pub struct Obu<'a> {
     pub payload: &'a [u8],
 }
 
+// A LEB128 number: 7 bits per byte, the top bit says "more bytes follow".
+// Up to 8 bytes; returns the value and how many bytes it used.
 fn leb128(data: &[u8]) -> Option<(u64, usize)> {
     let mut value = 0u64;
     for (i, &b) in data.iter().take(8).enumerate() {
@@ -37,6 +42,8 @@ fn leb128(data: &[u8]) -> Option<(u64, usize)> {
 pub fn obus(mut data: &[u8]) -> Vec<Obu<'_>> {
     let mut out = Vec::new();
     while let Some(&h) = data.first() {
+        // First byte of an OBU: bits 3-6 are its type, bit 2 "has an extension
+        // byte", bit 1 "has a size field".
         let kind = (h >> 3) & 0x0F;
         let has_ext = h & 0x04 != 0;
         let has_size = h & 0x02 != 0;
@@ -44,6 +51,7 @@ pub fn obus(mut data: &[u8]) -> Vec<Obu<'_>> {
         if data.len() < header_len {
             break;
         }
+        // With a size field, read it; without, the OBU runs to the end.
         let (size, size_len) = if has_size {
             match leb128(&data[header_len..]) {
                 Some((s, n)) => (usize::try_from(s).unwrap_or(usize::MAX), n),
@@ -53,6 +61,7 @@ pub fn obus(mut data: &[u8]) -> Vec<Obu<'_>> {
             (data.len() - header_len, 0)
         };
         let start = header_len + size_len;
+        // An OBU claiming to be longer than the data left is broken: stop here.
         let Some(end) = start.checked_add(size).filter(|&e| e <= data.len()) else { break };
         out.push(Obu { kind, bytes: &data[..end], payload: &data[start..end] });
         data = &data[end..];
@@ -82,12 +91,15 @@ pub fn is_keyframe(data: &[u8]) -> bool {
     sequence_header(data).is_some()
 }
 
+// Reads a byte string one bit at a time, most significant bit first, as
+// the AV1 specification describes its fields.
 struct Bits<'a> {
     data: &'a [u8],
     pos: usize,
 }
 
 impl Bits<'_> {
+    // Read the next n bits as a number.
     fn f(&mut self, n: u32) -> Option<u32> {
         let mut v = 0u32;
         for _ in 0..n {
@@ -103,6 +115,8 @@ impl Bits<'_> {
         self.f(1).map(|b| b == 1)
     }
 
+    // A variable-length number used by AV1: count leading zero bits, then read
+    // that many bits.
     fn uvlc(&mut self) -> Option<u32> {
         let mut zeros = 0;
         while !self.flag()? {
@@ -135,6 +149,9 @@ pub struct SequenceInfo {
 /// Read a sequence header OBU's payload (AV1 spec, section 5.5).
 #[allow(clippy::too_many_lines)] // the spec's field order, read top to bottom
 pub fn parse_sequence_header(payload: &[u8]) -> Option<SequenceInfo> {
+    // Fields in exactly the order of the AV1 specification. Many are only
+    // skipped (read and thrown away) to reach the ones the Mac needs: profile,
+    // level, size and colour layout. Any field running past the end gives None.
     let mut b = Bits { data: payload, pos: 0 };
     let profile = b.f(3)? as u8;
     let _still_picture = b.flag()?;
@@ -184,6 +201,7 @@ pub fn parse_sequence_header(payload: &[u8]) -> Option<SequenceInfo> {
         level = first_level;
         tier = first_tier;
     }
+    // Picture size: a 4-bit length, then that many bits, for width and height.
     let width_bits = b.f(4)? + 1;
     let height_bits = b.f(4)? + 1;
     let width = b.f(width_bits)? + 1;
@@ -212,6 +230,7 @@ pub fn parse_sequence_header(payload: &[u8]) -> Option<SequenceInfo> {
     let high_bitdepth = b.flag()?;
     let twelve_bit = profile == 2 && high_bitdepth && b.flag()?;
     let monochrome = profile != 1 && b.flag()?;
+    // Colour description: defaults mean "not specified" (2).
     let (mut cp, mut tc, mut mc) = (2, 2, 2);
     if b.flag()? {
         cp = b.f(8)?;
@@ -258,6 +277,9 @@ pub fn parse_sequence_header(payload: &[u8]) -> Option<SequenceInfo> {
 /// the sequence header OBU itself.
 pub fn av1c(seq_obu: &[u8], info: &SequenceInfo) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + seq_obu.len());
+    // Byte 1: marker bit + version. Byte 2: profile and level. Byte 3: tier,
+    // bit depth and colour layout flags. Byte 4: no presentation delay. Then the
+    // sequence header itself.
     out.push(0x81); // marker + version 1
     out.push((info.profile << 5) | (info.level & 0x1F));
     out.push(

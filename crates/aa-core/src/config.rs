@@ -42,6 +42,7 @@ impl StreamConfig {
     /// Mbps on a clean LAN in about 4 s, and a lossy link is cut back
     /// within a second of the first report.
     pub fn suggested_bitrate_kbps(res: Resolution, fps: u16) -> u32 {
+        // Pixels x frames per second x 0.05 bits, in kbps, between 2 and 150 Mbps.
         let bits_per_second = res.pixels() as f64 * f64::from(fps) * 0.05;
         (bits_per_second / 1000.0).clamp(2_000.0, 150_000.0) as u32
     }

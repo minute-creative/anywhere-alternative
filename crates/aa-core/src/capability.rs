@@ -4,6 +4,9 @@
 //! *encode*, the viewer announces what it can *decode*, and we pick the
 //! best codec both support. Everything else (resolution, fps, bitrate) is
 //! clamped to the smaller of the two sides' limits.
+// In plain words: when a viewer connects, both computers say what they can do
+// (which video formats, how big a picture, how many pictures a second). This
+// file picks the best setup that both can handle, the same way on both sides.
 
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +57,7 @@ pub struct Negotiated {
     pub loss_recovery: bool,
 }
 
+// The only way agreement can fail: no video format in common.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum NegotiationError {
     #[error("no video codec supported by both host and viewer")]
@@ -70,14 +74,19 @@ pub const MAX_FPS: u16 = 300;
 /// The negotiated resolution is the host's *actual* display resolution
 /// clamped to what the viewer can decode; we never upscale on the host.
 pub fn negotiate(host: &Capabilities, viewer: &Capabilities) -> Result<Negotiated, NegotiationError> {
+    // Codec::ALL is ordered best first (AV1, HEVC, H.264): take the first one
+    // both sides list.
     let codec = Codec::ALL
         .into_iter()
         .find(|c| host.codecs.contains(c) && viewer.codecs.contains(c))
         .ok_or(NegotiationError::NoCommonCodec)?;
 
+    // Picture size: the host's screen, shrunk if the viewer cannot handle it.
     let resolution = fit_within(host.max_resolution, viewer.max_resolution);
+    // Frame rate: the lower of the two limits, at least 1 and at most 300.
     let fps = host.max_fps.min(viewer.max_fps).clamp(1, MAX_FPS);
 
+    // HDR only if both sides can; otherwise ordinary (SDR) colours.
     let color_range =
         if host.color_ranges.contains(&ColorRange::HdrPq) && viewer.color_ranges.contains(&ColorRange::HdrPq) {
             ColorRange::HdrPq
@@ -90,6 +99,7 @@ pub fn negotiate(host: &Capabilities, viewer: &Capabilities) -> Result<Negotiate
         resolution,
         fps,
         color_range,
+        // Controllers only if the viewer has one and the host can fake one.
         gamepad: viewer.has_gamepad && host.can_emulate_gamepad,
         fixed_fps: viewer.fixed_fps,
         loss_recovery: viewer.loss_recovery && host.loss_recovery,
@@ -100,15 +110,18 @@ pub fn negotiate(host: &Capabilities, viewer: &Capabilities) -> Result<Negotiate
 /// unchanged when it already fits. Dimensions are rounded down to even
 /// numbers because 4:2:0 chroma subsampling requires it.
 pub fn fit_within(src: Resolution, bound: Resolution) -> Resolution {
+    // Already fits: keep it (made even).
     if src.width <= bound.width && src.height <= bound.height {
         return even(src);
     }
+    // Shrink by whichever side needs it more, so the shape stays the same.
     let scale_w = f64::from(bound.width) / f64::from(src.width);
     let scale_h = f64::from(bound.height) / f64::from(src.height);
     let scale = scale_w.min(scale_h);
     even(Resolution::new((f64::from(src.width) * scale).floor() as u32, (f64::from(src.height) * scale).floor() as u32))
 }
 
+// Video formats need even widths and heights: clear the lowest bit.
 fn even(r: Resolution) -> Resolution {
     Resolution::new(r.width & !1, r.height & !1)
 }

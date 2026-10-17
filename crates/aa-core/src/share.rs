@@ -55,6 +55,7 @@ impl ShareChoice {
     /// How long a choice stays valid without the app refreshing it.
     pub const FRESH_FOR_SECS: u64 = 120;
 
+    // Fresh (written by the app in the last 2 minutes): use it. Stale: whole screen.
     pub fn target_at(&self, now: u64) -> ShareTarget {
         if now.saturating_sub(self.written) <= Self::FRESH_FOR_SECS {
             self.target.clone()

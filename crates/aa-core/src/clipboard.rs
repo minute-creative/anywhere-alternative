@@ -17,6 +17,10 @@
 //! * `1` text, UTF-8
 //! * `2` image, PNG
 
+// In plain words: when you copy something, it is cut into numbered pieces
+// and sent a few hundred at a time. The other side says "got it all" or
+// "still missing pieces 7 and 12", and only those are sent again. Then it
+// puts the text or picture on its own clipboard.
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -37,6 +41,7 @@ pub enum ClipItem {
 
 impl ClipItem {
     pub fn encode(&self) -> Bytes {
+        // First byte says text (1) or picture (2), then the content.
         let (tag, data): (u8, &[u8]) = match self {
             Self::Text(t) => (1, t.as_bytes()),
             Self::Png(p) => (2, p),
@@ -48,6 +53,7 @@ impl ClipItem {
     }
 
     pub fn decode(bytes: &Bytes) -> Option<Self> {
+        // Unknown first byte or broken text: ignore the item.
         let (&tag, rest) = bytes.split_first()?;
         match tag {
             1 => String::from_utf8(rest.to_vec()).ok().map(Self::Text),
@@ -67,6 +73,7 @@ impl ClipItem {
 
 /// Cut an encoded item into datagrams for transfer `id`.
 fn datagrams(item: &Bytes, id: u32) -> Option<Vec<Bytes>> {
+    // Pieces needed, rounded up; more than 65,535 cannot be numbered: refuse.
     let count = item.len().div_ceil(MAX_PAYLOAD).max(1);
     let count = u16::try_from(count).ok()?;
     let mut out = Vec::with_capacity(usize::from(count));
@@ -85,12 +92,15 @@ fn datagrams(item: &Bytes, id: u32) -> Option<Vec<Bytes>> {
 /// Stamp a fresh sequence number into an already-built datagram, so the
 /// receiver's loss tracker sees one monotonic sequence even on resends.
 fn restamp(d: &Bytes, seq: &SeqCounter) -> Bytes {
+    // Bytes 2-3 of the label are the sequence number.
     let mut b = BytesMut::from(&d[..]);
     b[2..4].copy_from_slice(&seq.take().to_be_bytes());
     b.freeze()
 }
 
 /// Good-enough randomness for transfer ids (no dependency needed).
+// Mix the current time with a random hashing key the standard library
+// provides; enough to make ids differ between runs.
 fn random_u32() -> u32 {
     use std::hash::{BuildHasher, Hasher};
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
@@ -153,7 +163,10 @@ impl ClipSender {
     /// Call every ~100 ms: the next paced batch, or a full repeat if the
     /// receiver has gone silent.
     pub fn poll(&mut self, seq: &SeqCounter) -> Vec<Bytes> {
+        // Nothing being sent: nothing to do.
         let Some(f) = self.in_flight.as_mut() else { return Vec::new() };
+        // Everything sent once: wait for an answer; if none comes in time, send it
+        // all again (up to four times, waiting longer each time), then give up.
         if f.queue.is_empty() {
             let Some(wait) = Self::SILENT_RETRY.get(f.tries as usize) else {
                 self.in_flight = None;
@@ -165,6 +178,7 @@ impl ClipSender {
             f.tries += 1;
             f.queue = (0..u16::try_from(f.datagrams.len()).unwrap_or(u16::MAX)).collect();
         }
+        // Send the next batch of at most 350 pieces, each with a fresh sequence number.
         let n = f.queue.len().min(PACE);
         let out = f.queue.drain(..n).map(|i| restamp(&f.datagrams[usize::from(i)], seq)).collect();
         f.last_heard_or_sent = Instant::now();
@@ -180,6 +194,7 @@ impl ClipSender {
 
     /// The receiver is missing these pieces of transfer `id`.
     pub fn missing(&mut self, id: u32, pieces: &[u16]) {
+        // Queue the missing pieces again (each once), and reset the silence timer.
         let Some(f) = self.in_flight.as_mut().filter(|f| f.id == id) else { return };
         for &p in pieces {
             if usize::from(p) < f.datagrams.len() && !f.queue.contains(&p) {
@@ -245,6 +260,8 @@ impl ClipReceiver {
     const QUIET: Duration = Duration::from_millis(150);
 
     pub fn push(&mut self, packet: &Packet, seq: &SeqCounter) -> ClipEvent {
+        // A piece of a transfer we already finished: the other side missed our
+        // "got it"; answer again (once) but do not paste twice.
         let h = packet.header;
         let id = h.frame_id;
         if self.last_done.is_some_and(|(d, at)| d == id && at.elapsed() < DONE_MEMORY) {
@@ -264,19 +281,23 @@ impl ClipReceiver {
                 self.partial.remove(&oldest);
             }
         }
+        // Find or start the record for this transfer.
         let p = self.partial.entry(id).or_insert_with(|| Partial {
             slots: vec![None; usize::from(h.slice_count)],
             last_piece: Instant::now(),
             last_nack: None,
         });
+        // Pieces disagreeing about the total: ignore this one.
         if p.slots.len() != usize::from(h.slice_count) {
             return ClipEvent::Pending;
         }
         p.slots[usize::from(h.slice_index)] = Some(packet.payload.clone());
         p.last_piece = Instant::now();
+        // Still missing pieces: wait.
         if p.slots.iter().any(Option::is_none) {
             return ClipEvent::Pending;
         }
+        // Complete: join the pieces, remember it as done, and hand the item over.
         let p = self.partial.remove(&id).expect("present");
         let mut data = BytesMut::new();
         for s in p.slots.into_iter().flatten() {
@@ -295,6 +316,8 @@ impl ClipReceiver {
     pub fn poll(&mut self, seq: &SeqCounter) -> Vec<Bytes> {
         let mut out = Vec::new();
         for (&id, p) in &mut self.partial {
+            // No new piece for 150 ms and we have not just asked: list what is missing
+            // (up to 594 piece numbers fit in one reply).
             let quiet = p.last_piece.elapsed() >= Self::QUIET;
             let not_just_asked = p.last_nack.is_none_or_elapsed(Self::QUIET);
             if quiet && not_just_asked {
@@ -358,6 +381,8 @@ impl ClipSync {
     pub fn received(&mut self, packet: &Packet, seq: &SeqCounter) -> (Option<ClipItem>, Option<Bytes>) {
         match packet.header.kind {
             Kind::ClipboardAck => {
+                // An empty acknowledgement means "got everything"; otherwise it lists
+                // missing piece numbers, two bytes each.
                 let p = &packet.payload;
                 if p.is_empty() {
                     self.tx.ack(packet.header.frame_id);
