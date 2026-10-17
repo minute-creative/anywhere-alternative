@@ -17,7 +17,7 @@
 //! summary (see docs/CODE-GUIDE.md section 5 for what each number means).
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -207,13 +207,9 @@ pub async fn run(
         .map_err(|e| anyhow::anyhow!("no decoder for negotiated codec {:?}: {e}", negotiated.codec))?;
 
     // --- decode thread -----------------------------------------------------
-    // Each frame travels with a flag saying "a frame before this one never
-    // reached the decoder" (dropped because the decoder was behind, or given
-    // up by the reassembler). The flag rides in the same queue as the frames
-    // so the decode thread sees it at exactly the right moment.
-    let (frame_tx, frame_rx) = mpsc::channel::<(CompleteFrame, bool)>(2);
-    // A frame was lost and the next queued frame must carry the flag.
-    let mut gap_pending = false;
+    // Two frames of queue: enough to ride out one slow decode, small enough
+    // that a decoder which can't keep up drops frames instead of lagging.
+    let (frame_tx, frame_rx) = mpsc::channel::<CompleteFrame>(2);
     // Set by the decode thread when it cannot continue (no reference frame);
     // the network loop turns it into a NACK so the host sends a keyframe, and
     // the decode thread skips non-keyframes until one arrives.
@@ -223,9 +219,14 @@ pub async fn run(
     // none yet). Reported to the host so it can repair losses from there.
     let last_good = Arc::new(AtomicU32::new(u32::MAX));
     let decoder_good = Arc::clone(&last_good);
-    std::thread::Builder::new()
-        .name("aa-decode".into())
-        .spawn(move || decode_thread(decoder, frame_rx, frames.as_ref(), &decoder_wants_key, &decoder_good))?;
+    // Frames that never reached the decoder (counted from gaps in the frame
+    // numbers, see `decode_thread`): the "dropped" figure in the log and in
+    // the report to the host.
+    let missing = Arc::new(AtomicU64::new(0));
+    let decoder_missing = Arc::clone(&missing);
+    std::thread::Builder::new().name("aa-decode".into()).spawn(move || {
+        decode_thread(decoder, frame_rx, frames.as_ref(), &decoder_wants_key, &decoder_good, &decoder_missing);
+    })?;
 
     // --- main loop ---------------------------------------------------------
     let mut reassembler = Reassembler::default();
@@ -314,14 +315,14 @@ pub async fn run(
                             }
                             frames_this_second += 1;
                             pacing.frame();
-                            queue_frame(&frame_tx, frame, &mut gap_pending, &need_keyframe, &mut stats);
+                            queue_frame(&frame_tx, frame, &need_keyframe);
                         }
                         for rq in reassembler.resend_requests(now_ms) {
                             send_resend(&socket, &rq, &seq).await?;
                         }
-                        for _lost in reassembler.take_abandoned() {
-                            stats.frames_dropped += 1;
-                            gap_pending = true;
+                        // Counted as missing by the decode thread when the next
+                        // frame arrives; here we only ask for a fresh picture.
+                        if !reassembler.take_abandoned().is_empty() {
                             need_keyframe.store(true, Ordering::Relaxed);
                         }
                         if need_keyframe.load(Ordering::Relaxed) && !last_nack.is_some_and(|t| t.elapsed() <= NACK_INTERVAL) {
@@ -515,14 +516,12 @@ pub async fn run(
                 for frame in reassembler.poll(now_ms) {
                     frames_this_second += 1;
                     pacing.frame();
-                    queue_frame(&frame_tx, frame, &mut gap_pending, &need_keyframe, &mut stats);
+                    queue_frame(&frame_tx, frame, &need_keyframe);
                 }
                 for rq in reassembler.resend_requests(now_ms) {
                     send_resend(&socket, &rq, &seq).await?;
                 }
-                for _lost in reassembler.take_abandoned() {
-                    stats.frames_dropped += 1;
-                    gap_pending = true;
+                if !reassembler.take_abandoned().is_empty() {
                     need_keyframe.store(true, Ordering::Relaxed);
                 }
                 if need_keyframe.load(Ordering::Relaxed) && !last_nack.is_some_and(|t| t.elapsed() <= NACK_INTERVAL) {
@@ -558,6 +557,7 @@ pub async fn run(
                 let total = recv_d + lost_d;
                 let loss_1s = if total == 0 { 0.0 } else { lost_d as f64 / total as f64 };
                 let pace = pacing.take(negotiated.fps);
+                stats.frames_dropped = missing.load(Ordering::Relaxed);
                 tracing::info!(
                     fps = frames_this_second,
                     mbps = format_args!("{:.1}", bytes_this_second as f64 * 8.0 / 1e6),
@@ -612,51 +612,55 @@ pub async fn run(
 }
 
 /// Hand a finished frame to the decode thread without waiting. If the
-/// decoder is still busy (queue full) the frame is dropped; the next frame
-/// that does get queued carries the "something is missing before me" flag.
-fn queue_frame(
-    tx: &mpsc::Sender<(CompleteFrame, bool)>,
-    frame: CompleteFrame,
-    gap_pending: &mut bool,
-    need_keyframe: &AtomicBool,
-    stats: &mut StreamStats,
-) {
-    if tx.try_send((frame, *gap_pending)).is_ok() {
-        *gap_pending = false;
-    } else {
-        // Decoder is behind; whatever it misses breaks the reference chain,
-        // so a keyframe (or repair frame) is needed. Setting the shared flag
-        // here only makes the network loop ask the host at once; the decode
-        // thread learns of the gap from the flag on the next queued frame.
-        stats.frames_dropped += 1;
-        *gap_pending = true;
+/// decoder is still busy (queue full) the frame is dropped; the decode
+/// thread notices the missing number and waits for a keyframe.
+fn queue_frame(tx: &mpsc::Sender<CompleteFrame>, frame: CompleteFrame, need_keyframe: &AtomicBool) {
+    if tx.try_send(frame).is_err() {
+        // Setting the flag here only makes the network loop ask the host for
+        // a fresh picture at once; the decode thread finds (and counts) the
+        // gap itself.
         need_keyframe.store(true, Ordering::Relaxed);
     }
 }
 
 /// Runs on its own thread: decodes frames in order and publishes pictures.
 ///
-/// `need_keyframe` is shared with the network loop. Before 0.5.8 the network
-/// loop set it when it dropped a frame, but the decoder, still finishing an
-/// older frame, could clear it a moment later; the frame after the gap was
-/// then decoded on a missing reference and the picture smeared until the
-/// next keyframe. Now the gap travels with the frames (the `bool`), so the
-/// decoder can't miss it.
+/// The host numbers every frame it encodes 0, 1, 2… So a missing number
+/// means a frame never reached the decoder, whatever the reason: all its
+/// packets lost on the way, given up by the reassembler, dropped here
+/// because the decoder was behind, or dropped on the host because its
+/// network side was busy. The next frame then builds on a picture the
+/// decoder never saw, so we wait for a keyframe or repair frame instead.
+///
+/// Before 0.5.8 only the drops the network loop saw were counted, through
+/// the shared `need_keyframe` flag, which the decoder could also clear a
+/// moment later while finishing an older frame. A frame whose packets were
+/// all lost, or one the host dropped, went unnoticed: the picture smeared
+/// (decoder errors "reference lost" with `dropped=0` in the log) until the
+/// next keyframe happened to come.
 fn decode_thread(
     mut decoder: Box<dyn VideoDecoder>,
-    mut rx: mpsc::Receiver<(CompleteFrame, bool)>,
+    mut rx: mpsc::Receiver<CompleteFrame>,
     frames: Option<&FrameSlot>,
     need_keyframe: &AtomicBool,
     last_good: &AtomicU32,
+    missing: &AtomicU64,
 ) {
     let mut skipped = 0u32;
-    while let Some((frame, after_gap)) = rx.blocking_recv() {
+    // Number of the last frame that reached this thread (decoded or skipped).
+    let mut last_seen: Option<u32> = None;
+    while let Some(frame) = rx.blocking_recv() {
         // A P-frame is useless without the frames before it. After any gap,
         // wait for a keyframe or a repair frame (one built only on a frame we
         // confirmed we have); feeding the decoder garbage only makes it
         // report errors for every frame until then anyway.
         let resumes = frame.keyframe || frame.recovery;
-        if after_gap && !resumes {
+        let gap = last_seen.map_or(0, |prev| frame.frame_id.wrapping_sub(prev).wrapping_sub(1));
+        last_seen = Some(frame.frame_id);
+        // (Bounded: a huge jump is a restart, not thousands of lost frames.)
+        missing.fetch_add(u64::from(gap.min(1000)), Ordering::Relaxed);
+        let gap = gap > 0;
+        if gap && !resumes {
             need_keyframe.store(true, Ordering::Relaxed);
         }
         if need_keyframe.load(Ordering::Relaxed) && !resumes {

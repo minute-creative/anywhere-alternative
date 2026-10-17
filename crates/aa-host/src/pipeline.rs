@@ -473,6 +473,8 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
                     }
                 }
                 // The network task is behind: drop this frame rather than queue it.
+                // Its number is used up, so the viewer sees the gap and asks
+                // for a fresh picture (aa-viewer `decode_thread`, 0.5.8).
                 if tx.try_send(packet).is_err() {
                     tracing::debug!("network busy, dropped a frame");
                 }

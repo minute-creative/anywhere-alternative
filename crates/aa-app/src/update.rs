@@ -100,9 +100,9 @@ pub enum Applied {
 }
 
 /// Install `rel`. Blocking (downloads); run it off the window's thread.
-#[allow(clippy::needless_pass_by_value)]
-/// `now`: the person pressed "Update now" — the Windows service installs
+/// `now`: the person pressed "Update now": the Windows service installs
 /// even while someone is connected.
+#[allow(clippy::needless_pass_by_value)]
 pub fn apply(rel: Release, service_on: bool, now: bool) -> anyhow::Result<Applied> {
     let url = rel.url_here().ok_or_else(|| anyhow::anyhow!("no installer for this system"))?.to_owned();
     let dir = aa_platform::trust::user_dir();
