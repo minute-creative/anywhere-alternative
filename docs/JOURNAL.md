@@ -498,6 +498,25 @@ and rustup cannot download those targets here):
   dropped my loss→FEC formula, a repair frame now also ends waiting for
   older frames in the reassembler.
 
+## Day 16, later — camera and microphone for calls (v0.5.1)
+
+Owner: pick camera and mic in Google Meet and other apps on the watched
+computer, both directions. Checked options for the Mac side first: a real
+virtual camera there needs Apple's paid developer account (camera
+extensions must be signed by a registered team); owner declined, so the
+free route is an add-on in the browser that adds the devices to web pages.
+OBS (virtual camera, heavy) and NDI (known bugs) were offered; owner
+picked the add-on. PC side: Windows 11 allows a virtual camera without a
+driver (MFCreateVirtualCamera + a media source DLL), so the PC gets one
+for every app, plus the add-on too.
+
+Built it end to end. Tested the browser half in headless Chromium against
+mock host/viewer with a test picture and test tone: everything flowed
+except the H.264 decode, which open-source Chromium can't do (Chrome,
+Edge and Safari can). Found a keyframe-request storm when decoding fails
+(every frame asked for one); now checks decoder support first and asks at
+most twice a second. The Windows DLL is CI-compiled only.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.

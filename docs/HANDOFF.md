@@ -97,7 +97,47 @@ through Anywhere**; **code once, then remembered**.
 
 ## Shipped but NOT yet confirmed by the owner (ask for results first)
 
-**0.5.0 (2026-10-17), the newest — built on top of 0.4.8, CI only:**
+**0.5.1 (2026-10-17), the newest — camera and microphone for calls, CI only:**
+Owner asked: change camera and mic in Google Meet and other apps on the
+computer being watched, "flexible both ways"; no $99 Apple account, so
+for the Mac the free route is a browser add-on (owner chose it over OBS
+and NDI); Chrome/Edge via store listing (owner pays the $5 Chrome fee and
+uploads), Safari with the "Allow Unsigned Extensions" catch; camera only
+while an app uses it; laptop's built-in camera.
+- Viewer (sitting side) captures camera only when the host asks
+  (`CallDevices`), 1280x720@30 NV12 → OpenH264 baseline 2.5 Mbps →
+  `Kind::Camera` slices. Mac: AVFoundation (Info.plist
+  NSCameraUsageDescription). PC: MF source reader with advanced video
+  processing. `--camera`, `--call-mic` (name/auto/off), `--test-camera`.
+  Mic: existing Opus path, now also switched on by the host's call request.
+- Host: `aa-host/src/calls.rs` CallHub: WebSocket 127.0.0.1:7721 (Origin
+  must be our add-on: dev ID `eboaohfmengdlgbmnjailhbjjkdcfelp`, store IDs
+  in `aa_core::calls` once published, any `safari-web-extension://`).
+  Sends H.264 and 10 ms PCM; keyframe on new watcher or loss.
+- Add-on `browser-addon/`: MAIN-world `page.js` adds devices to
+  enumerateDevices/getUserMedia (also the default when the computer has no
+  camera/mic, e.g. Mac mini), WebCodecs decode → MediaStreamTrackGenerator
+  (Chrome/Edge) or canvas.captureStream (Safari); asks per site in a popup
+  window. `packaging/browser/build_addon.py` makes the unpacked folder (in
+  the app), the store zip (release asset) and the Safari variant;
+  `packaging/macos/build-safari-ext.sh` turns it into an appex in
+  Anywhere.app/Contents/PlugIns (non-fatal if Xcode step fails).
+- Tested here: Playwright Chromium with the add-on against mock host +
+  viewer: devices listed, permission window, tracks live, sound arrives,
+  camera starts/stops with the tab. Video decode NOT testable here
+  (open-source Chromium has no H.264) — first real check is the owner's.
+- Windows 11 virtual camera: `crates/aa-vcam` (cdylib, media source per
+  Microsoft's Frame Server custom media source rules, NV12+YUY2), CLSID
+  `{4ABA54B9-4410-46E2-99D7-5445CD96A471}` registered by the installer;
+  host creates the camera with MFCreateVirtualCamera (looked up at run
+  time; Windows 10 just logs and relies on the add-on); shared memory
+  `Global\AnywhereCamera` created by the DLL while an app uses it, filled
+  by the host after decoding. Entirely CI-compiled, never run.
+Ask for: viewer.log + host.log from a Meet call each way, a screenshot of
+the call's camera menu, and on the PC whether "Anywhere Camera" shows in
+the Camera app.
+
+**0.5.0 (2026-10-17) — built on top of 0.4.8, CI only:**
 Owner's rules (asked and answered 2026-10-17): quality steady rather than
 chasing the top; frame rate gives way first but never below 60, then
 sharpness (not resolution); 240 fps is the most; Resolution and Frame

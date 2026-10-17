@@ -405,6 +405,23 @@ a confirmed reference, flagged `RECOVERY`; the viewer resumes on it like a
 keyframe. Unconfirmed tokens are discarded on any repair or keyframe.
 Negotiated as `loss_recovery` (both sides must say yes).
 
+### Camera and microphone for calls (0.5.1)
+
+The sitting computer's camera/mic feed "Anywhere Camera" / "Anywhere
+Microphone" on the watched computer, only while something there uses
+them. Host `CallHub` (aa-host/src/calls.rs) tracks users (browser tabs over
+the 127.0.0.1:7721 WebSocket, the Windows virtual camera) and sends
+`CallDevices{camera,mic}` (repeated every 2 s while anything is wanted:
+control messages are unacknowledged datagrams). The viewer answers with
+`CameraState` (repeated every 2 s) and `Kind::Camera` slices (H.264
+baseline 720p30 ~2.5 Mbps, keyframe every 2 s or on `CameraKeyframe`).
+Mic reuses `Kind::Mic`; the host's MicSink also hands PCM to the hub.
+Browser add-on: see `browser-addon/` and HANDOFF. WebSocket messages:
+binary `[kind 1=video|2=audio][flags bit0=key][u64 ts µs BE][payload]`,
+JSON text `want` / `keyframe` / `status`. Origin allowlist in
+`aa_core::calls::origin_allowed`. Windows: `aa-vcam` DLL ↔ host via shared
+memory (layout in `aa_core::calls::vcam`, seqlock on OFF_SEQ).
+
 ### Codec choice
 
 `Codec::ALL` is preference order (AV1, HEVC, H.264); `negotiate` takes the
