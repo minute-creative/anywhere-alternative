@@ -338,6 +338,28 @@ Open from before: DualSense drop on the Mac (need the new log line), Mac
 window not reopening from the Dock, softness from 1.5x scaling, "share one
 app" real test, confirm HEVC on the PC.
 
+## Product direction (2026-10-18, owner decisions)
+- Run Anywhere as a product for one month, then decide go/no-go. Priority
+  is the best product; selling comes second.
+- Positioning: the Mac as host is the gap (Parsec's Mac host has no
+  controllers, mic, camera or 4:4:4). Target: people who need their Mac (and
+  PC) fully from elsewhere; creatives, agency teams, Mac owners who game.
+- Connecting from anywhere, owner's choice: **no central server**. Every
+  Anywhere computer is its own server: open a port on the router itself
+  (UPnP / NAT-PMP / PCP), IPv6 direct when available, hosts tell paired
+  computers their current outside address, and try direct paths from
+  both ends at once. Fallback when both ends are blocked: Tailscale
+  (already supported), or the Mac mini relaying for the owner's team.
+- Owner's home network (PC test 2026-10-18): public IPv4 103.206.136.131,
+  no IPv6 seen, hop 2 is 10.113.0.1 → possibly the ISP shares one address
+  (CGNAT); router WAN address not yet checked. If CGNAT and no IPv6, the
+  own-direct path can't reach this home from outside; Tailscale covers it.
+- Beta needs (agreed list): built-in connecting, signed installers (Apple
+  developer account and Windows signing still to decide), first-run setup
+  without Terminal/sudo, invite a teammate, problem-report button, clear
+  "someone is connected" notice with disconnect and view-only, opt-in
+  usage numbers.
+
 ## The app and releases (2026-10-08)
 
 People now install **Anywhere** instead of running cargo: `crates/aa-app`
