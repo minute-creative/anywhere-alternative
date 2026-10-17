@@ -58,13 +58,13 @@ fn offer_from_stores() {
         (aa_core::calls::CHROME_STORE_ID, CHROME_UPDATES, "Google/Chrome", "Software\\Google\\Chrome\\Extensions"),
         (aa_core::calls::EDGE_STORE_ID, EDGE_UPDATES, "Microsoft Edge", "Software\\Microsoft\\Edge\\Extensions"),
     ];
-    for (id, url, _mac_dir, _win_key) in wanted {
+    for (id, url, mac_dir, win_key) in wanted {
         let Some(id) = id else { continue };
+        let _ = (&mac_dir, &win_key); // each is used on one system only
         #[cfg(target_os = "macos")]
         {
             let Some(home) = std::env::var_os("HOME") else { continue };
-            let dir =
-                PathBuf::from(home).join("Library/Application Support").join(_mac_dir).join("External Extensions");
+            let dir = PathBuf::from(home).join("Library/Application Support").join(mac_dir).join("External Extensions");
             let file = dir.join(format!("{id}.json"));
             if !file.exists() {
                 let _ = std::fs::create_dir_all(&dir);
@@ -73,7 +73,7 @@ fn offer_from_stores() {
         }
         #[cfg(target_os = "windows")]
         {
-            let key = format!("HKCU\\{_win_key}\\{id}");
+            let key = format!("HKCU\\{win_key}\\{id}");
             let mut cmd = std::process::Command::new("reg");
             cmd.args(["add", &key, "/v", "update_url", "/t", "REG_SZ", "/d", url, "/f"]);
             {

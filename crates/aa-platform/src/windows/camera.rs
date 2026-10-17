@@ -25,6 +25,7 @@ use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHR
 use crate::camera::{CameraFrame, CameraSource, FPS, HEIGHT, WIDTH};
 use crate::{PlatformError, Result};
 
+#[allow(clippy::needless_pass_by_value)] // used as `.map_err(|e| win(e, ...))`
 fn win(e: windows::core::Error, what: &str) -> PlatformError {
     PlatformError::Backend(anyhow::anyhow!("{what}: {e}"))
 }

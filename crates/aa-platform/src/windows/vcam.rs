@@ -103,6 +103,9 @@ pub struct Feeder {
 unsafe impl Send for Feeder {}
 
 impl Feeder {
+    // The mapping starts on a page boundary and every field offset is a
+    // multiple of 4, so the cast is aligned.
+    #[allow(clippy::cast_ptr_alignment)]
     fn field(&self, off: usize) -> Option<&AtomicU32> {
         let (_, view) = self.map.as_ref()?;
         // SAFETY: 4-byte aligned offset inside the mapping.
