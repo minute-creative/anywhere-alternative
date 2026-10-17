@@ -54,7 +54,10 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           set -o pipefail
-          cargo build --release -p aa-app -p aa-host -p aa-viewer 2>&1 | tee build.log
+          cargo build --release -p aa-app -p aa-host -p aa-viewer -p aa-vcam 2>&1 | tee build.log
+          # The browser add-on folder the installer copies (Python is on GitHub's machines).
+          python packaging/browser/build_addon.py "$VERSION" 2>&1 | tee -a build.log
+          rm -f dist/Anywhere-*-browser-addon.zip  # the Mac job uploads the store zip
           # Inno Setup is preinstalled on GitHub's Windows machines; install
           # it only if it is missing.
           ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
@@ -97,7 +100,7 @@ jobs:
           v="${{ github.event.inputs.version }}"
           [ -z "$v" ] && v="${GITHUB_REF_NAME#v}"
           tag="v$v"
-          notes="Download **Anywhere-$v-mac.dmg** for a Mac (Apple Silicon) or **Anywhere-$v-windows-setup.exe** for Windows. See the README for first-run steps."
+          notes="Download **Anywhere-$v-mac.dmg** for a Mac (Apple Silicon) or **Anywhere-$v-windows-setup.exe** for Windows. See the README for first-run steps. **Anywhere-$v-browser-addon.zip** is the Anywhere Camera add-on for uploading to the Chrome Web Store and Edge Add-ons (the apps already include it)."
           if gh release view "$tag" -R "${{ github.repository }}" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber -R "${{ github.repository }}"
           else

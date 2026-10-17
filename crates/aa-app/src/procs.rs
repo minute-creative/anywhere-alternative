@@ -157,6 +157,8 @@ pub struct ViewerPrefs {
     pub volume_boost: f32,
     pub resolution: String,
     pub fps: String,
+    pub camera: String,
+    pub call_mic: String,
 }
 
 impl Viewer {
@@ -169,6 +171,7 @@ impl Viewer {
         cmd.arg(target).stdout(out).stderr(err).stdin(Stdio::null());
         cmd.args(["--max-mbps", &format!("{:.0}", p.max_mbps), "--volume-boost", &format!("{:.1}", p.volume_boost)]);
         cmd.args(["--resolution", &p.resolution, "--fps", &p.fps]);
+        cmd.args(["--camera", &p.camera, "--call-mic", &p.call_mic]);
         for (on, flag) in [
             (p.fullscreen, "--fullscreen"),
             (p.stretch, "--stretch"),

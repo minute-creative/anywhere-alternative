@@ -34,7 +34,17 @@ Name: "hevc"; Description: "Sharper picture for less data (Microsoft's HEVC Vide
 Source: "..\..\target\release\anywhere.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\aa-host.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\aa-viewer.exe"; DestDir: "{app}"; Flags: ignoreversion
+; "Anywhere Camera" for every app (Windows 11): loaded by Windows' camera service.
+Source: "..\..\target\release\aa_vcam.dll"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 Source: "addons.ps1"; DestDir: "{tmp}"; Flags: deleteafterinstall
+; The browser add-on for Chrome and Edge ("Load unpacked" until it is in the stores).
+Source: "..\..\dist\addon\chrome\*"; DestDir: "{app}\browser-addon"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Registry]
+; Tell Windows where the camera DLL is (its class id is in aa-core/src/calls.rs).
+Root: HKLM; Subkey: "Software\Classes\CLSID\{{4ABA54B9-4410-46E2-99D7-5445CD96A471}"; ValueType: string; ValueData: "Anywhere Camera"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Classes\CLSID\{{4ABA54B9-4410-46E2-99D7-5445CD96A471}\InprocServer32"; ValueType: string; ValueData: "{app}\aa_vcam.dll"
+Root: HKLM; Subkey: "Software\Classes\CLSID\{{4ABA54B9-4410-46E2-99D7-5445CD96A471}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Both"
 
 [Icons]
 Name: "{group}\Anywhere"; Filename: "{app}\anywhere.exe"

@@ -46,6 +46,8 @@ objc2-core-foundation = "0.3"
 objc2-core-graphics = "0.3"
 # Screen and system-sound capture (macOS 12.3+ / 13+ for sound).
 objc2-screen-capture-kit = "0.3"
+# The camera, for "Anywhere Camera" on the other computer.
+objc2-av-foundation = "0.3"
 # NSPasteboard.changeCount: tells us the clipboard changed without reading
 # it (reading a large image every poll would be wasteful).
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
@@ -88,6 +90,10 @@ windows = { version = "0.62", features = [
     # Sharing one app: window frames, hidden windows.
     "Win32_Graphics_Dwm",
     "Win32_System_Environment",
+    # "Anywhere Camera": shared memory with the camera DLL, and the
+    # Windows 11 function looked up at run time.
+    "Win32_System_Memory",
+    "Win32_System_LibraryLoader",
 ] }
 # Virtual Xbox 360 / DualShock 4 controllers through the ViGEmBus driver
 # (installed once on the PC; see windows/gamepad.rs).

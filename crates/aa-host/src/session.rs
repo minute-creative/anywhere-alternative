@@ -35,6 +35,12 @@ async fn stop_requested() {
     }
 }
 
+/// Milliseconds on a clock that only moves forward (for reassembly).
+fn monotonic_ms() -> u64 {
+    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    T0.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
 /// A viewer is considered gone if we hear nothing for this long.
 const VIEWER_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -82,6 +88,19 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     let mut clip = aa_core::clipboard::ClipSync::default();
     let mut clip_tick = tokio::time::interval(Duration::from_millis(100));
     let mut mic = MicSink::default();
+    // "Anywhere Camera" / "Anywhere Microphone": the browser add-on's link
+    // and who wants the viewer's camera and mic right now.
+    let (hub, mut wants) = crate::calls::CallHub::new();
+    hub.serve();
+    #[cfg(target_os = "windows")]
+    crate::vcam::start(hub.clone());
+    let mut camera_frames = aa_core::wire::Reassembler::default();
+    let mut camera_key_asked: Option<Instant> = None;
+    // The viewer the call devices were last set up for, and when we last
+    // told it what to send (control messages are plain datagrams, so the
+    // answer is repeated while anything is wanted).
+    let mut call_viewer: Option<SocketAddr> = None;
+    let mut calls_told = Instant::now();
     // What we last told the viewer about the screen, and when.
     let mut told: (Option<&'static str>, Option<SocketAddr>, Instant) = (None, None, Instant::now());
 
@@ -202,9 +221,37 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 }
                 if packet.header.kind == Kind::Mic {
                     if viewer.as_ref().is_some_and(|v| v.addr == from) {
-                        mic.handle(packet.payload.clone());
+                        mic.handle(packet.payload.clone(), &hub);
                     }
                     continue;
+                }
+                if packet.header.kind == Kind::Camera {
+                    if viewer.as_ref().is_some_and(|v| v.addr == from) {
+                        let now_ms = monotonic_ms();
+                        if let aa_core::wire::Reassembly::Complete(f) = camera_frames.push(packet, now_ms) {
+                            hub.frame(&f.data, f.keyframe);
+                        }
+                        for f in camera_frames.poll(now_ms) {
+                            hub.frame(&f.data, f.keyframe);
+                        }
+                        let lost = !camera_frames.take_abandoned().is_empty();
+                        if lost && camera_key_asked.map_or(true, |t| t.elapsed() > Duration::from_millis(300)) {
+                            camera_key_asked = Some(Instant::now());
+                            let _ = send_control(&socket, from, &ControlMessage::CameraKeyframe, &seq).await;
+                        }
+                    }
+                    continue;
+                }
+                if packet.header.kind == Kind::Control && viewer.as_ref().is_some_and(|v| v.addr == from) {
+                    if let Ok(ControlMessage::CameraState { name, sending, problem }) = ControlMessage::decode(&packet.payload) {
+                        if let Some(p) = &problem {
+                            tracing::warn!("the viewer's camera: {p}");
+                        } else if sending {
+                            tracing::info!(camera = name.as_deref().unwrap_or("?"), "the viewer's camera is on");
+                        }
+                        hub.set_camera(name.filter(|_| sending), problem);
+                        continue;
+                    }
                 }
                 if packet.header.kind == Kind::Pad {
                     if viewer.as_ref().is_some_and(|v| v.addr == from) {
@@ -232,6 +279,17 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 }
                 if let Err(e) = handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &seq, &mut bitrate, &video_dest, &mut speaker, &recent, &mut stream).await {
                     tracing::warn!("network send error (continuing): {e:#}");
+                }
+                let now_viewer = viewer.as_ref().map(|v| v.addr);
+                if now_viewer != call_viewer {
+                    call_viewer = now_viewer;
+                    camera_frames = aa_core::wire::Reassembler::default();
+                    hub.set_viewer(now_viewer.map(|a| socket.peer_name(a).unwrap_or_else(|| a.ip().to_string())));
+                    if let Some(a) = now_viewer {
+                        let w = hub.wanted();
+                        let _ = send_control(&socket, a, &ControlMessage::CallDevices { camera: w.camera, mic: w.mic }, &seq).await;
+                        calls_told = Instant::now();
+                    }
                 }
             }
 
@@ -274,10 +332,33 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 pads.tick();
             }
 
+            Ok(()) = wants.changed() => {
+                let w = *wants.borrow_and_update();
+                tracing::info!(camera = w.camera, mic = w.mic, "call devices wanted");
+                if let Some(v) = viewer.as_ref() {
+                    let _ = send_control(&socket, v.addr, &ControlMessage::CallDevices { camera: w.camera, mic: w.mic }, &seq).await;
+                    calls_told = Instant::now();
+                }
+            }
+
+            () = hub.keyframe.notified() => {
+                if let Some(v) = viewer.as_ref() {
+                    let _ = send_control(&socket, v.addr, &ControlMessage::CameraKeyframe, &seq).await;
+                }
+            }
+
             _ = housekeeping.tick() => {
                 // Keep the "someone is connected" note fresh (a stale one,
                 // left by a crash, stops counting after two minutes).
                 ticks += 1;
+                // Repeat what the viewer should send while anything is wanted
+                // (and for a few seconds after, so an "off" isn't lost).
+                if let Some(v) = viewer.as_ref() {
+                    let w = hub.wanted();
+                    if (w.camera || w.mic || calls_told.elapsed() < Duration::from_secs(4)) && ticks % 2 == 0 {
+                        let _ = send_control(&socket, v.addr, &ControlMessage::CallDevices { camera: w.camera, mic: w.mic }, &seq).await;
+                    }
+                }
                 if viewer.is_some() && ticks % 30 == 0 {
                     set_connected(true);
                 }
@@ -300,6 +381,10 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                     let _ = input_tx.try_send(InputEvent::ReleaseAll);
                     restore_speakers(&mut speaker);
                     stream.viewer_left(&ctl);
+                }
+                if viewer.is_none() && call_viewer.is_some() {
+                    call_viewer = None;
+                    hub.set_viewer(None);
                 }
             }
 
@@ -352,7 +437,7 @@ impl MicSink {
     /// On a Mac the free `BlackHole` driver plays the same role.
     const CABLES: [&'static str; 4] = ["CABLE Input", "Steam Streaming Microphone", "VB-Audio Virtual", "BlackHole"];
 
-    fn handle(&mut self, payload: Bytes) {
+    fn handle(&mut self, payload: Bytes, hub: &crate::calls::CallHub) {
         if !self.looked {
             self.looked = true;
             self.depack = aa_platform::audio::Depacketizer::new().ok();
@@ -381,12 +466,15 @@ impl MicSink {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(p) = self.player.as_mut() {
             p.follow();
-            depack.handle(payload, |pcm| p.push(pcm));
+            depack.handle(payload, |pcm| {
+                p.push(pcm);
+                hub.sound(pcm);
+            });
         } else {
-            depack.handle(payload, |_| {});
+            depack.handle(payload, |pcm| hub.sound(pcm));
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        depack.handle(payload, |_| {});
+        depack.handle(payload, |pcm| hub.sound(pcm));
         if self.last_report.map_or(true, |t| t.elapsed() > Duration::from_secs(5)) {
             self.last_report = Some(Instant::now());
             tracing::info!(frames = depack.frames, concealed = depack.concealed, "viewer microphone");

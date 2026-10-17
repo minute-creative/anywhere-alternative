@@ -30,6 +30,11 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
+      - name: browser add-on
+        if: runner.os == 'Linux'
+        run: |
+          for f in browser-addon/*.js; do node --check "$f"; done 2>&1 | tee build.log
+          python3 packaging/browser/build_addon.py 2>&1 | tee -a build.log
       - name: fmt
         run: cargo fmt --all -- --check 2>&1 | tee fmt.log; exit ${PIPESTATUS[0]}
       - name: clippy

@@ -16,6 +16,7 @@
 //! lands.
 
 pub mod audio;
+pub mod camera;
 pub mod capture;
 pub mod convert;
 pub mod decoder;
@@ -24,6 +25,7 @@ pub mod gamepad;
 pub mod input;
 pub mod session;
 pub mod share;
+pub mod vcam;
 
 use aa_core::capability::Capabilities;
 use aa_core::config::StreamConfig;

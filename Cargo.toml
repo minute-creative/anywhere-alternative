@@ -6,10 +6,11 @@ members = [
     "crates/aa-host",
     "crates/aa-viewer",
     "crates/aa-app",
+    "crates/aa-vcam",
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"

@@ -31,6 +31,7 @@ pub mod decoder;
 pub mod encoder;
 pub mod input;
 
+pub mod camera;
 pub mod gamepad;
 pub mod speaker;
 pub mod wininfo;

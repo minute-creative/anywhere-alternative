@@ -101,8 +101,10 @@ pub struct MicSender {
 
 impl MicSender {
     /// Start capturing; packets (audio header + Opus) arrive on the returned receiver.
+    /// `prefer`: the microphone whose name contains this ("auto" or `None`:
+    /// the system default).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub fn start() -> (Self, tokio::sync::mpsc::Receiver<Bytes>) {
+    pub fn start(prefer: Option<String>) -> (Self, tokio::sync::mpsc::Receiver<Bytes>) {
         use std::sync::atomic::Ordering;
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -110,7 +112,7 @@ impl MicSender {
         let _ = std::thread::Builder::new().name("aa-mic".into()).spawn(move || {
             use aa_core::audio::{AudioHeader, HEADER_LEN, MIC_BITRATE};
             use bytes::BufMut;
-            let mut mic = match aa_platform::audio::Mic::open() {
+            let mut mic = match aa_platform::audio::Mic::open_named(prefer) {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::warn!("microphone unavailable: {e}");
@@ -145,7 +147,7 @@ impl MicSender {
 
     /// No microphone support on this OS.
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    pub fn start() -> (Self, tokio::sync::mpsc::Receiver<Bytes>) {
+    pub fn start(_prefer: Option<String>) -> (Self, tokio::sync::mpsc::Receiver<Bytes>) {
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
         (Self { stop: std::sync::Arc::default() }, rx)
     }

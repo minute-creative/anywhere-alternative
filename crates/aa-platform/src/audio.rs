@@ -184,7 +184,13 @@ pub trait SpeakerControl: Send {
 
 pub use crate::playout::{set_boost_db, DEFAULT_BOOST_DB};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub use player::{Mic, PadSpeaker, Player};
+pub use player::{input_devices, Mic, PadSpeaker, Player};
+
+/// No microphones on this system (Linux test builds).
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn input_devices() -> Vec<String> {
+    Vec::new()
+}
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod player {
@@ -436,10 +442,28 @@ mod player {
         }
     }
 
+    /// Names of the microphones on this computer, for the Settings list.
+    /// The pretend microphones that carry sound *from* the other computer
+    /// (VB-CABLE, BlackHole) are left out: picking one would send silence.
+    pub fn input_devices() -> Vec<String> {
+        let Ok(devs) = cpal::default_host().input_devices() else { return Vec::new() };
+        let mut names: Vec<String> = devs
+            .map(|d| device_name(&d))
+            .filter(|n| {
+                let l = n.to_lowercase();
+                !n.is_empty() && !l.contains("cable") && !l.contains("blackhole") && !l.contains("steam streaming")
+            })
+            .collect();
+        names.dedup();
+        names
+    }
+
     /// The default microphone, delivering 48 kHz stereo 10 ms frames.
     /// Like the player, it follows the default input when it changes (a
     /// headset connects).
     pub struct Mic {
+        /// Use the input whose name contains this, if there is one.
+        prefer: Option<String>,
         stream: Option<cpal::Stream>,
         frames: std::sync::mpsc::Receiver<Vec<i16>>,
         tx: std::sync::mpsc::SyncSender<Vec<i16>>,
@@ -456,9 +480,17 @@ mod player {
 
     impl Mic {
         pub fn open() -> Result<Self> {
+            Self::open_named(None)
+        }
+
+        /// The microphone whose name contains `prefer` ("auto" or `None`:
+        /// whatever the system's default is, followed when it changes).
+        pub fn open_named(prefer: Option<String>) -> Result<Self> {
             // 20 frames = 200 ms of slack before we start dropping.
             let (tx, frames) = std::sync::mpsc::sync_channel(20);
+            let prefer = prefer.filter(|p| !p.is_empty() && p != "auto");
             let mut m = Self {
+                prefer,
                 stream: None,
                 frames,
                 tx,
@@ -472,8 +504,9 @@ mod player {
 
         fn reopen(&mut self) -> Result<()> {
             self.stream = None;
-            let device = cpal::default_host()
-                .default_input_device()
+            let device = self
+                .chosen()
+                .or_else(|| cpal::default_host().default_input_device())
                 .ok_or_else(|| PlatformError::Unavailable("no microphone".into()))?;
             let config = device.default_input_config().map_err(|e| err("mic config", e))?;
             let (channels, rate) = (usize::from(config.channels()), config.sample_rate());
@@ -507,11 +540,18 @@ mod player {
             Ok(())
         }
 
+        /// The preferred input, if it is plugged in.
+        fn chosen(&self) -> Option<cpal::Device> {
+            let want = self.prefer.as_ref()?.to_lowercase();
+            cpal::default_host().input_devices().ok()?.find(|d| device_name(d).to_lowercase().contains(&want))
+        }
+
         /// Next 10 ms frame, waiting up to `timeout`.
         pub fn next_frame(&mut self, timeout: Duration) -> Option<Vec<i16>> {
             if self.last_check.elapsed() >= Duration::from_secs(1) {
                 self.last_check = Instant::now();
-                let moved = cpal::default_host().default_input_device().is_some_and(|d| device_name(&d) != self.device);
+                let now = self.chosen().or_else(|| cpal::default_host().default_input_device());
+                let moved = now.is_some_and(|d| device_name(&d) != self.device);
                 if moved || self.broken.load(Ordering::Relaxed) || self.stream.is_none() {
                     if let Err(e) = self.reopen() {
                         tracing::debug!("microphone not ready: {e}");

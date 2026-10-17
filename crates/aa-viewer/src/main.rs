@@ -12,6 +12,7 @@
 //! and quick network checks use that.
 
 mod audio;
+mod camera;
 mod ds5;
 mod keymap;
 mod link;
@@ -121,6 +122,27 @@ struct Args {
     /// connection carries, 60 at the least) or a number to hold.
     #[arg(long, default_value = "auto")]
     fps: String,
+
+    /// Camera that calls on the other computer may use ("Anywhere Camera"):
+    /// part of its name, "auto" for the first one, or "off".
+    #[arg(long, default_value = "auto")]
+    camera: String,
+
+    /// Microphone for calls on the other computer ("Anywhere Microphone")
+    /// and for the overlay's mic switch: part of its name, "auto" for the
+    /// system default, or "off" (calls then get no mic from here).
+    #[arg(long, default_value = "auto")]
+    call_mic: String,
+
+    /// Send a moving test picture as the camera (tests without a camera).
+    #[arg(long)]
+    test_camera: bool,
+}
+
+/// Turn the camera and microphone choices into what a session needs.
+fn call_prefs(args: &Args) -> session::CallPrefs {
+    let on = |s: &str| (!s.eq_ignore_ascii_case("off")).then(|| s.to_owned());
+    session::CallPrefs { camera: on(&args.camera), test_camera: args.test_camera, mic: on(&args.call_mic) }
 }
 
 /// The most frames a second we ever ask for (the owner's choice).
@@ -317,6 +339,7 @@ async fn run_reconnecting(
                 Box::new(move |m: Option<String>| s(window::Wake::HostStatus(m))) as Box<dyn Fn(Option<String>) + Send>
             }),
             host_key_out: Some(std::sync::Arc::clone(&host_key)),
+            calls: call_prefs(args),
         };
         let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = std::sync::Arc::clone(&connected);

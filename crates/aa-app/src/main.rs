@@ -17,6 +17,7 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod addon;
 mod checks;
 mod procs;
 mod service;
@@ -258,6 +259,11 @@ struct Settings {
     fps: String,
     /// Sharing: everything, one app, or one window.
     share_target: aa_core::share::ShareTarget,
+    /// Camera calls on the other computer may use: part of its name,
+    /// "auto" (the first one) or "off".
+    call_camera: String,
+    /// Microphone for calls on the other computer (and the mic switch).
+    call_mic: String,
 }
 
 impl Default for Settings {
@@ -278,6 +284,8 @@ impl Default for Settings {
             resolution: "full".into(),
             fps: "auto".into(),
             share_target: aa_core::share::ShareTarget::Screen,
+            call_camera: "auto".into(),
+            call_mic: "auto".into(),
         }
     }
 }
@@ -305,6 +313,8 @@ impl Settings {
             volume_boost: self.volume_boost,
             resolution: self.resolution.clone(),
             fps: self.fps.clone(),
+            camera: self.call_camera.clone(),
+            call_mic: self.call_mic.clone(),
         }
     }
 }
@@ -419,6 +429,8 @@ struct App {
     /// background every few seconds).
     shareables: Arc<Mutex<Vec<aa_core::share::ShareTarget>>>,
     share_saved_at: Instant,
+    /// Cameras and microphones here, for "Calls on the other computer".
+    devices: Arc<Mutex<(Vec<String>, Vec<String>)>>,
 }
 
 impl App {
@@ -476,8 +488,11 @@ impl App {
             copied: None,
             shareables: Arc::default(),
             share_saved_at: Instant::now().checked_sub(Duration::from_secs(3600)).unwrap_or_else(Instant::now),
+            devices: Arc::default(),
         };
         spawn_share_lister(Arc::clone(&app.shareables), cc.egui_ctx.clone());
+        spawn_device_lister(Arc::clone(&app.devices), cc.egui_ctx.clone());
+        let _ = std::thread::Builder::new().name("addon".into()).spawn(addon::register);
         update::spawn_checker(Arc::clone(&app.updater), cc.egui_ctx.clone());
         let background = std::env::args().any(|a| a == "--background");
         // Reopened by an update: as it was (sharing or not), minimised.
@@ -1426,6 +1441,7 @@ impl App {
     #[allow(clippy::too_many_lines)] // one page, top to bottom
     fn settings_page(&mut self, ui: &mut Ui) {
         Self::page_header(ui, "Settings", "How connections start. You can change most of these while connected too.");
+        let (cameras, mics) = self.devices.lock().map(|d| d.clone()).unwrap_or_default();
         let s = &mut self.settings;
         let mut changed = false;
         card(ui, |ui| {
@@ -1502,6 +1518,19 @@ impl App {
             divider(ui);
             changed |=
                 switch_row(ui, "Mute the other computer's speakers", "Its sound plays only here.", &mut s.mute_host);
+        });
+        ui.add_space(12.0);
+        card(ui, |ui| {
+            section(
+                ui,
+                "Calls on the other computer",
+                "While you watch another computer, a call there (Google Meet, Zoom, Teams) can use this computer's \
+                 camera and microphone: pick \"Anywhere Camera\" and \"Anywhere Microphone\" in the call. They \
+                 switch on only while the call uses them.",
+            );
+            changed |= device_pick(ui, "Camera", "cam-pick", &cameras, &mut s.call_camera, "First camera");
+            divider(ui);
+            changed |= device_pick(ui, "Microphone", "mic-pick", &mics, &mut s.call_mic, "System default");
         });
         ui.add_space(12.0);
         card(ui, |ui| {
@@ -1690,6 +1719,8 @@ impl App {
             self.addons_card(ui, false);
             ui.add_space(12.0);
         }
+        browser_addon_card(ui);
+        ui.add_space(12.0);
         card(ui, |ui| {
             section(ui, "Add-ons", "");
             if self.checks.is_empty() {
@@ -1716,6 +1747,92 @@ impl App {
             }
         });
     }
+}
+
+/// One device choice: "auto", a device by name, or "off".
+fn device_pick(ui: &mut Ui, label: &str, id: &str, names: &[String], value: &mut String, auto: &str) -> bool {
+    let shown = match value.as_str() {
+        "auto" => auto.to_owned(),
+        "off" => "Off".to_owned(),
+        v => v.to_owned(),
+    };
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(TEXT));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            egui::ComboBox::from_id_salt(id).selected_text(shown).width(260.0).show_ui(ui, |ui| {
+                let mut pick = |ui: &mut Ui, v: &str, text: &str| {
+                    if ui.selectable_label(value == v, text).clicked() && value != v {
+                        v.clone_into(value);
+                        changed = true;
+                    }
+                };
+                pick(ui, "auto", auto);
+                for n in names {
+                    pick(ui, n, n);
+                }
+                pick(ui, "off", "Off (calls there can't use it)");
+            });
+        });
+    });
+    if names.is_empty() && value != "off" {
+        ui.label(RichText::new(format!("No {} found on this computer.", label.to_lowercase())).small().color(MUTED));
+    }
+    changed
+}
+
+/// Getting "Anywhere Camera" into the browsers on this computer.
+fn browser_addon_card(ui: &mut Ui) {
+    card(ui, |ui| {
+        section(
+            ui,
+            "Anywhere Camera in your browser",
+            "For calls in Chrome, Edge or Safari on this computer, while you watch it from your other computer. \
+             The add-on adds \"Anywhere Camera\" and \"Anywhere Microphone\" to every site, and asks before a \
+             site may use them.",
+        );
+        let published = aa_core::calls::CHROME_STORE_ID.is_some();
+        ui.label(RichText::new("Chrome and Edge").color(TEXT));
+        if published {
+            ui.label(
+                RichText::new("Restart Chrome or Edge, then click Enable on \"New extension added\".")
+                    .small()
+                    .color(MUTED),
+            );
+        } else {
+            for step in [
+                "1. Open the add-ons page: chrome://extensions in Chrome, edge://extensions in Edge.",
+                "2. Turn on \"Developer mode\".",
+                "3. Click \"Load unpacked\" and pick the folder below.",
+            ] {
+                ui.label(RichText::new(step).small().color(MUTED));
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if button(ui, "Show the folder", Kind::Secondary).clicked() {
+                    addon::reveal_folder();
+                }
+                if let Some(dir) = addon::folder() {
+                    if button(ui, "Copy its location", Kind::Secondary).clicked() {
+                        ui.ctx().copy_text(dir.display().to_string());
+                    }
+                } else {
+                    ui.label(RichText::new("(not included in this build)").small().color(MUTED));
+                }
+            });
+        }
+        if cfg!(target_os = "macos") {
+            divider(ui);
+            ui.label(RichText::new("Safari").color(TEXT));
+            for step in [
+                "1. Safari → Settings → Advanced: turn on \"Show features for web developers\".",
+                "2. Develop menu → \"Allow Unsigned Extensions\" (Safari asks again each time it opens).",
+                "3. Safari → Settings → Extensions: turn on Anywhere Camera.",
+            ] {
+                ui.label(RichText::new(step).small().color(MUTED));
+            }
+        }
+    });
 }
 
 /// "host:port", or a bare IP (default port).
@@ -1786,6 +1903,20 @@ impl eframe::App for App {
 
 /// Keep the list of sharing computers fresh (every 3 s), leaving out this
 /// computer itself.
+/// Keep the lists of cameras and microphones up to date (one gets plugged in).
+fn spawn_device_lister(list: Arc<Mutex<(Vec<String>, Vec<String>)>>, ctx: egui::Context) {
+    let _ = std::thread::Builder::new().name("device-list".into()).spawn(move || loop {
+        let now = (aa_platform::camera::list(), aa_platform::audio::input_devices());
+        if let Ok(mut l) = list.lock() {
+            if *l != now {
+                *l = now;
+                ctx.request_repaint();
+            }
+        }
+        std::thread::sleep(Duration::from_secs(10));
+    });
+}
+
 /// Keep the list of apps and windows that could be shared up to date.
 fn spawn_share_lister(list: Arc<Mutex<Vec<aa_core::share::ShareTarget>>>, ctx: egui::Context) {
     let _ = std::thread::Builder::new().name("share-list".into()).spawn(move || loop {

@@ -14,10 +14,13 @@
 //! Capture/encode and input injection are blocking OS calls, so each gets a
 //! dedicated OS thread; the network loop is async on tokio.
 
+mod calls;
 mod net;
 mod pipeline;
 mod session;
 mod udp;
+#[cfg(target_os = "windows")]
+mod vcam;
 
 use std::net::SocketAddr;
 

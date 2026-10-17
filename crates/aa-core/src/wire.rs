@@ -70,6 +70,9 @@ pub enum Kind {
     /// frame would otherwise be given up on, so a lost packet costs a few
     /// milliseconds instead of a keyframe.
     Resend = 14,
+    /// Viewer → host: one slice of an encoded camera frame (H.264), for
+    /// "Anywhere Camera" on the host; same slicing as `Video`, no parity.
+    Camera = 15,
 }
 
 impl Kind {
@@ -89,6 +92,7 @@ impl Kind {
             12 => Self::Mic,
             13 => Self::Pad,
             14 => Self::Resend,
+            15 => Self::Camera,
             _ => return None,
         })
     }
@@ -203,19 +207,24 @@ pub fn slice_frame(frame: &Bytes, frame_id: u32, keyframe: bool, seq: &SeqCounte
 
 /// [`slice_frame`] with any header flags (keyframe, recovery).
 pub fn slice_frame_flagged(frame: &Bytes, frame_id: u32, flags: u8, seq: &SeqCounter) -> Result<Vec<Bytes>, WireError> {
+    slice_frame_as(Kind::Video, frame, frame_id, flags, seq)
+}
+
+/// Slice a frame into packets of any frame-carrying kind (`Video`, `Camera`).
+pub fn slice_frame_as(
+    kind: Kind,
+    frame: &Bytes,
+    frame_id: u32,
+    flags: u8,
+    seq: &SeqCounter,
+) -> Result<Vec<Bytes>, WireError> {
     let slice_count = frame.len().div_ceil(MAX_PAYLOAD).max(1);
     let slice_count_u16 = u16::try_from(slice_count).map_err(|_| WireError::PayloadTooLarge(frame.len()))?;
 
     let mut out = Vec::with_capacity(slice_count);
     for (i, chunk) in frame.chunks(MAX_PAYLOAD).enumerate().take(slice_count) {
-        let header = Header {
-            kind: Kind::Video,
-            flags,
-            seq: seq.take(),
-            frame_id,
-            slice_index: i as u16,
-            slice_count: slice_count_u16,
-        };
+        let header =
+            Header { kind, flags, seq: seq.take(), frame_id, slice_index: i as u16, slice_count: slice_count_u16 };
         let mut buf = BytesMut::with_capacity(HEADER_LEN + chunk.len());
         header.write(&mut buf);
         buf.extend_from_slice(chunk);
@@ -223,7 +232,7 @@ pub fn slice_frame_flagged(frame: &Bytes, frame_id: u32, flags: u8, seq: &SeqCou
     }
     if out.is_empty() {
         // Zero-length frame: still send one header so the frame counter advances.
-        let header = Header { kind: Kind::Video, flags, seq: seq.take(), frame_id, slice_index: 0, slice_count: 1 };
+        let header = Header { kind, flags, seq: seq.take(), frame_id, slice_index: 0, slice_count: 1 };
         let mut buf = BytesMut::with_capacity(HEADER_LEN);
         header.write(&mut buf);
         out.push(buf.freeze());
@@ -530,7 +539,7 @@ impl Reassembler {
     /// in milliseconds; it is only compared with itself.
     pub fn push(&mut self, packet: Packet, now_ms: u64) -> Reassembly {
         let h = packet.header;
-        debug_assert!(matches!(h.kind, Kind::Video | Kind::VideoFec));
+        debug_assert!(matches!(h.kind, Kind::Video | Kind::VideoFec | Kind::Camera));
 
         if self.last_delivered.is_some_and(|last| !is_newer(h.frame_id, last)) {
             return Reassembly::Stale;

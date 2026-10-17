@@ -90,6 +90,24 @@ pub enum ControlMessage {
         /// What is being shared.
         sharing: String,
     },
+    /// Host → viewer: an app here is using "Anywhere Camera" / "Anywhere
+    /// Microphone" (a call started), or stopped. The viewer turns its own
+    /// camera and microphone on only while asked, and only if its settings
+    /// allow calls on the other computer to use them.
+    CallDevices { camera: bool, mic: bool },
+    /// Host → viewer: a camera frame was lost; send a fresh keyframe.
+    CameraKeyframe,
+    /// Viewer → host: whether its camera is sending, and which one.
+    CameraState {
+        /// The camera's name ("Integrated Camera"), `None` if there is none
+        /// or the settings switch it off for calls.
+        name: Option<String>,
+        /// Frames are on their way.
+        sending: bool,
+        /// Why not, in plain words, if it should and isn't.
+        #[serde(default)]
+        problem: Option<String>,
+    },
 }
 
 impl ControlMessage {

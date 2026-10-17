@@ -21,6 +21,11 @@ gethostname.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+serde_json.workspace = true
+# The local link to the browser add-on ("Anywhere Camera" in Chrome, Edge
+# and Safari): a WebSocket on 127.0.0.1 only.
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [lints]
 workspace = true

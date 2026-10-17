@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Anywhere Camera",
+  "short_name": "Anywhere",
+  "version": "0.5.1",
+  "description": "Use the camera and microphone of the computer you're watching from in Google Meet, Zoom, Teams and other calls.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArUoilheYWcl4/bGB9d40nr2U14HUVNJiL8YQUiRewO5LfyiwlcAwWyhLaWZHdWEs/bR+2juZDoz7uQ7fZn2VdNYwYtUg7RunZDNJiw3RjrXzM8sMd+Xz/NWUU8yT5+n9fcMzPpv908aYvhEZRMYdk6zT0HJps35fheNaJkXWC7zzoalNGB50C2aJEj73r5D2kQetubrvFkKwnOG5roRTde/CmMOkB5pGa8oPjnHG57B7WEn45CEbSW0hGdLlBNMWc7vUHagyOQT7G+y1TJywenGDTi9iNOgqc7uWLJCq/5GyrUeyxUl6gIiAfJr6FX+coKqBiRkLc/Ju9VDUUPtKkQIDAQAB",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["storage"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Anywhere Camera",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["page.js"],
+      "world": "MAIN",
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["relay.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page.js"],
+      "matches": ["http://*/*", "https://*/*"]
+    }
+  ]
+}

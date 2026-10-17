@@ -5,3 +5,4 @@
 tools/sim/*.log
 tools/sim/report.md
 tools/sim/chaos-report.md
+/dist

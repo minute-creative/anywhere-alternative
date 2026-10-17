@@ -18,6 +18,7 @@
 
 pub mod audio;
 pub mod av1;
+pub mod calls;
 pub mod capability;
 pub mod clipboard;
 pub mod config;

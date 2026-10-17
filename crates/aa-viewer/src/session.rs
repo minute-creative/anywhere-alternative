@@ -17,6 +17,18 @@ use tokio::sync::mpsc;
 
 use crate::link::{FrameSlot, ViewerCommand};
 
+/// What calls on the other computer may use from this one (Settings →
+/// "Camera and microphone for calls"). `None`: switched off.
+#[derive(Debug, Clone, Default)]
+pub struct CallPrefs {
+    /// Camera name to prefer ("auto": the first one), or `None` for off.
+    pub camera: Option<String>,
+    /// Send the moving test picture instead of a camera (`--test-camera`).
+    pub test_camera: bool,
+    /// Microphone name to prefer ("auto": the system default), or `None`.
+    pub mic: Option<String>,
+}
+
 /// Whether the session starts with the microphone on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicStart {
@@ -70,6 +82,8 @@ pub struct Options {
     /// Filled in with the host's key once the secure handshake succeeds
     /// (lets a reconnect find the same computer at a new address).
     pub host_key_out: Option<Arc<std::sync::Mutex<Option<aa_core::secure::PublicKeyBytes>>>>,
+    /// Camera and microphone for calls on the host.
+    pub calls: CallPrefs,
 }
 
 /// Runs the whole session. `commands` carries input and settings from the
@@ -91,6 +105,7 @@ pub async fn run(
         on_connected,
         on_status,
         host_key_out,
+        calls,
     } = opts;
     let mut last_status: Option<String> = None;
     tracing::info!("connecting to {host}");
@@ -214,12 +229,24 @@ pub async fn run(
     // Microphone to the PC, while switched on in the overlay (or --mic).
     let mut mic: Option<(crate::audio::MicSender, mpsc::Receiver<Bytes>)> = match start_mic {
         MicStart::Off => None,
-        MicStart::Real => Some(crate::audio::MicSender::start()),
+        MicStart::Real => Some(crate::audio::MicSender::start(calls.mic.clone())),
         MicStart::Tone => Some(crate::audio::MicSender::start_tone()),
     };
     if mic.is_some() {
         tracing::info!("sending this machine's microphone to the host");
     }
+    // The mic is on while the overlay switch says so, or while a call on the
+    // host uses "Anywhere Microphone" (and Settings allow it).
+    let mut manual_mic = start_mic != MicStart::Off;
+    let mut call_mic = false;
+    // The camera, only while a call on the host uses "Anywhere Camera".
+    let mut camera: Option<(crate::camera::CameraSender, mpsc::Receiver<crate::camera::CameraEvent>)> = None;
+    let mut camera_frame_id: u32 = 0;
+    // What we last told the host about the camera, repeated every couple of
+    // seconds (control messages are plain datagrams and may be lost).
+    let mut camera_state: Option<(ControlMessage, Instant)> = None;
+    // A camera that failed is retried at most every 10 seconds.
+    let mut camera_failed: Option<Instant> = None;
 
     // AA_SIMULATE_LOSS=18: test switch that throws away 18% of incoming
     // datagrams at random, like a radio dropping packets at flat delay.
@@ -330,6 +357,38 @@ pub async fn run(
                                 i.sharing = current.label();
                             });
                         }
+                        Ok(ControlMessage::CallDevices { camera: want_camera, mic: want_mic }) => {
+                            let retry_ok = camera_failed.map_or(true, |t| t.elapsed() > Duration::from_secs(10));
+                            if want_camera && camera.is_none() && retry_ok {
+                                if let Some(prefer) = calls.camera.clone() {
+                                    tracing::info!("a call on the other computer wants this camera");
+                                    camera = Some(crate::camera::CameraSender::start(prefer, calls.test_camera));
+                                } else {
+                                    let msg = ControlMessage::CameraState {
+                                        name: None,
+                                        sending: false,
+                                        problem: Some(format!(
+                                            "the camera is switched off for calls in Anywhere's settings on {}",
+                                            aa_platform::trust::computer_name()
+                                        )),
+                                    };
+                                    send_control(&socket, &msg, &seq).await?;
+                                    camera_state = Some((msg, Instant::now()));
+                                }
+                            } else if !want_camera && camera.is_some() {
+                                camera = None;
+                                let msg = ControlMessage::CameraState { name: None, sending: false, problem: None };
+                                send_control(&socket, &msg, &seq).await?;
+                                camera_state = Some((msg, Instant::now()));
+                            }
+                            call_mic = want_mic && calls.mic.is_some();
+                            apply_mic(&mut mic, manual_mic || call_mic, &calls, start_mic);
+                        }
+                        Ok(ControlMessage::CameraKeyframe) => {
+                            if let Some((c, _)) = camera.as_ref() {
+                                c.keyframe();
+                            }
+                        }
                         Ok(ControlMessage::HostStatus { message }) if message != last_status => {
                             if let Some(m) = &message {
                                 tracing::info!("host: {m}");
@@ -362,7 +421,10 @@ pub async fn run(
                                     ViewerCommand::SetHostMute(muted) => {
                                         send_control(&socket, &ControlMessage::SetHostMute { muted }, &seq).await?;
                                     }
-                                    ViewerCommand::SetMic(on) => set_mic(&mut mic, on),
+                                    ViewerCommand::SetMic(on) => {
+                                        manual_mic = on;
+                                        apply_mic(&mut mic, manual_mic || call_mic, &calls, start_mic);
+                                    }
                                     ViewerCommand::ShareList => send_control(&socket, &ControlMessage::ShareList, &seq).await?,
                                     ViewerCommand::SetShare(target) => {
                                         send_control(&socket, &ControlMessage::SetShare { target }, &seq).await?;
@@ -390,7 +452,10 @@ pub async fn run(
                     Some(ViewerCommand::SetHostMute(muted)) => {
                         send_control(&socket, &ControlMessage::SetHostMute { muted }, &seq).await?;
                     }
-                    Some(ViewerCommand::SetMic(on)) => set_mic(&mut mic, on),
+                    Some(ViewerCommand::SetMic(on)) => {
+                        manual_mic = on;
+                        apply_mic(&mut mic, manual_mic || call_mic, &calls, start_mic);
+                    }
                     Some(ViewerCommand::ShareList) => send_control(&socket, &ControlMessage::ShareList, &seq).await?,
                     Some(ViewerCommand::SetShare(target)) => {
                         send_control(&socket, &ControlMessage::SetShare { target }, &seq).await?;
@@ -414,6 +479,33 @@ pub async fn run(
                     }
                     // Mic thread ended (no microphone, or permission refused).
                     None => mic = None,
+                }
+            }
+
+            event = async { camera.as_mut().expect("guarded").1.recv().await }, if camera.is_some() => {
+                match event {
+                    Some(crate::camera::CameraEvent::Frame { data, keyframe }) => {
+                        let flags = if keyframe { wire::flags::KEYFRAME } else { 0 };
+                        if let Ok(slices) = wire::slice_frame_as(Kind::Camera, &data, camera_frame_id, flags, &seq) {
+                            for s in &slices {
+                                socket.send(s).await?;
+                            }
+                        }
+                        camera_frame_id = camera_frame_id.wrapping_add(1);
+                    }
+                    Some(crate::camera::CameraEvent::Started(name)) => {
+                        let msg = ControlMessage::CameraState { name: Some(name), sending: true, problem: None };
+                        send_control(&socket, &msg, &seq).await?;
+                        camera_state = Some((msg, Instant::now()));
+                    }
+                    Some(crate::camera::CameraEvent::Failed(why)) => {
+                        let msg = ControlMessage::CameraState { name: None, sending: false, problem: Some(why) };
+                        send_control(&socket, &msg, &seq).await?;
+                        camera_state = Some((msg, Instant::now()));
+                        camera_failed = Some(Instant::now());
+                        camera = None;
+                    }
+                    None => camera = None,
                 }
             }
 
@@ -470,6 +562,12 @@ pub async fn run(
             }
 
             _ = report.tick() => {
+                if let Some((msg, at)) = camera_state.as_mut() {
+                    if at.elapsed() >= Duration::from_secs(2) {
+                        send_control(&socket, msg, &seq).await?;
+                        *at = Instant::now();
+                    }
+                }
                 let recv_d = stats.loss.received - last_received;
                 // Saturating: a late packet *returns* a loss, so the total can dip
                 // below last second's. Plain subtraction wrapped to ~2^64 and the host
@@ -660,11 +758,21 @@ impl<T> TimeoutContext<T> for Result<T, tokio::time::error::Elapsed> {
 }
 
 /// Switch the microphone on or off (dropping the sender closes the mic).
-fn set_mic(mic: &mut Option<(crate::audio::MicSender, mpsc::Receiver<Bytes>)>, on: bool) {
+fn apply_mic(
+    mic: &mut Option<(crate::audio::MicSender, mpsc::Receiver<Bytes>)>,
+    on: bool,
+    calls: &CallPrefs,
+    start: MicStart,
+) {
     if on && mic.is_none() {
         tracing::info!("sending this machine's microphone to the host");
-        *mic = Some(crate::audio::MicSender::start());
-    } else if !on {
+        *mic = Some(if start == MicStart::Tone {
+            crate::audio::MicSender::start_tone()
+        } else {
+            crate::audio::MicSender::start(calls.mic.clone())
+        });
+    } else if !on && mic.is_some() {
+        tracing::info!("microphone no longer sent");
         *mic = None;
     }
 }

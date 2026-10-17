@@ -26,6 +26,7 @@ use aa_core::video::{Codec, EncodedFrameMeta, PixelFormat, Resolution};
 use bytes::Bytes;
 
 pub mod audio;
+pub mod camera;
 pub mod clipboard;
 pub mod discover;
 pub mod ds5dev;

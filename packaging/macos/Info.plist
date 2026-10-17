@@ -16,6 +16,8 @@
   <key>NSLocalNetworkUsageDescription</key>
   <string>Anywhere finds and connects to your other computers on your home network.</string>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Anywhere sends your microphone to the computer you are viewing, when you turn that on.</string>
+  <string>Anywhere sends your microphone to the computer you are viewing, when you turn that on or a call there uses Anywhere Microphone.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>Anywhere sends your camera to the computer you are viewing while a call there uses Anywhere Camera.</string>
 </dict>
 </plist>
