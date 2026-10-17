@@ -173,8 +173,12 @@ fn apply_choices(caps: &mut aa_core::capability::Capabilities, args: &Args) {
         // Height decides; width is generous so wide screens keep their shape.
         caps.max_resolution = aa_core::video::Resolution::new((h * 32 / 9).min(caps.max_resolution.width), h);
     }
-    // We can resume from a repair frame and report our last good frame.
-    caps.loss_recovery = true;
+    // We can resume from a repair frame and report our last good frame —
+    // on a Mac. Windows' decoders mis-handle a repair frame that refers back
+    // past skipped frames: parts of the picture stayed garbled until they
+    // changed (PC watching the Mac, 0.5.6). There a loss asks for a fresh
+    // keyframe instead: a bigger frame, but always a clean picture.
+    caps.loss_recovery = cfg!(target_os = "macos");
     tracing::info!(
         max_fps = caps.max_fps,
         fixed = caps.fixed_fps,
