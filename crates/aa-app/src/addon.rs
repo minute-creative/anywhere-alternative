@@ -27,7 +27,11 @@ pub fn folder() -> Option<PathBuf> {
         // Running from the source tree.
         dir.join("../../dist/addon/chrome"),
     ];
-    candidates.into_iter().find(|p| p.join("manifest.json").exists()).and_then(|p| p.canonicalize().ok())
+    let dir = candidates.into_iter().find(|p| p.join("manifest.json").exists())?.canonicalize().ok()?;
+    // Windows writes canonical paths as "\\?\C:\…", which Chrome's folder
+    // picker and Explorer don't understand: use the ordinary form.
+    let text = dir.to_string_lossy();
+    Some(text.strip_prefix(r"\\?\").map_or_else(|| dir.clone(), PathBuf::from))
 }
 
 /// The Safari extension inside the Mac app, if this build has one.

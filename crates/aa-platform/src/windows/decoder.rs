@@ -418,6 +418,35 @@ impl MfDecoder {
 }
 
 /// Which codecs this PC can decode in hardware-assisted Media Foundation.
+/// Is any HEVC decoder registered with Windows (the Store's HEVC Video
+/// Extensions, or one from the graphics driver)? Only lists them, opens
+/// nothing: cheap enough to ask now and then without stalling anything.
+/// (0.5.1 checked by opening real decoders every 10 seconds on the app's
+/// window thread; that made the app blink.)
+pub fn hevc_decoder_installed() -> bool {
+    use windows::Win32::Media::MediaFoundation::{
+        IMFActivate, MFMediaType_Video, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_REGISTER_TYPE_INFO,
+    };
+    // SAFETY: standard MF enumeration; the returned array is CoTaskMem we free.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let _ = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+        let input = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_HEVC };
+        let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
+        let mut count = 0u32;
+        let flags =
+            MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+        let ok = MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, flags, Some(&input), None, &mut list, &mut count).is_ok();
+        if !list.is_null() {
+            for i in 0..count as usize {
+                drop((*list.add(i)).take());
+            }
+            CoTaskMemFree(Some(list.cast()));
+        }
+        ok && count > 0
+    }
+}
+
 pub fn available_codecs() -> Vec<Codec> {
     [Codec::Hevc, Codec::H264].into_iter().filter(|c| MfDecoder::new(*c, true).is_ok()).collect()
 }

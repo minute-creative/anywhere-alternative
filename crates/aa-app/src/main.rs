@@ -369,6 +369,7 @@ enum Bg {
     Service(Result<(), String>),
     Updated(Result<update::Applied, String>),
     Addons(Result<(), String>),
+    Checks(Vec<checks::Check>),
 }
 
 /// "Type the code shown on <name>".
@@ -423,6 +424,8 @@ struct App {
     viewer_note: Option<(String, bool)>,
     checks: Vec<checks::Check>,
     checks_at: Instant,
+    /// A re-check is running in the background.
+    checks_busy: bool,
     last_poll: Instant,
     copied: Option<Instant>,
     /// Apps and windows open here, for "What to share" (refreshed in the
@@ -484,6 +487,7 @@ impl App {
             viewer_note: None,
             checks: checks::run(),
             checks_at: Instant::now(),
+            checks_busy: false,
             last_poll: Instant::now(),
             copied: None,
             shareables: Arc::default(),
@@ -605,9 +609,12 @@ impl App {
         self.spawn(|_| Bg::Addons(service::install_addons().map_err(|e| e.to_string())));
     }
 
-    /// Add-ons that can be installed for you and aren't yet.
+    /// Add-ons that can be installed for you and aren't yet. HEVC is left
+    /// out: Microsoft sometimes refuses the free edition to a PC, and then
+    /// the "Install" card would never go away; it has its own "Get it"
+    /// button in the list below.
     fn missing_addons(&self) -> usize {
-        self.checks.iter().filter(|c| !c.ok).count()
+        self.checks.iter().filter(|c| !c.ok && !c.name.starts_with("HEVC")).count()
     }
 
     fn addons_card(&mut self, ui: &mut Ui, first_run: bool) {
@@ -695,9 +702,13 @@ impl App {
                         self.update_error = Some(format!("The update didn't install: {e}"));
                     }
                 }
+                Bg::Checks(c) => {
+                    self.checks = c;
+                    self.checks_busy = false;
+                }
                 Bg::Addons(r) => {
                     self.addons_busy = false;
-                    self.checks = checks::run();
+                    self.checks_at = Instant::now().checked_sub(Duration::from_secs(60)).unwrap_or_else(Instant::now);
                     self.addons_note = Some(match r {
                         Ok(()) => ("Add-ons installed.".to_owned(), false),
                         Err(e) if e == "cancelled" => ("Cancelled.".to_owned(), false),
@@ -834,9 +845,12 @@ impl App {
                 }
             }
         }
-        if self.checks_at.elapsed() > Duration::from_secs(10) {
-            self.checks = checks::run();
+        // Re-check now and then, off the window's thread: a check that
+        // takes a moment must never stall drawing (that blinked the app).
+        if self.checks_at.elapsed() > Duration::from_secs(30) && !self.checks_busy {
+            self.checks_busy = true;
             self.checks_at = Instant::now();
+            self.spawn(|_| Bg::Checks(checks::run()));
         }
     }
 
@@ -1803,9 +1817,12 @@ fn browser_addon_card(ui: &mut Ui) {
             for step in [
                 "1. Open the add-ons page: chrome://extensions in Chrome, edge://extensions in Edge.",
                 "2. Turn on \"Developer mode\".",
-                "3. Click \"Load unpacked\" and pick the folder below.",
+                "3. Click \"Load unpacked\" and pick this folder (the one named browser-addon, not Anywhere):",
             ] {
                 ui.label(RichText::new(step).small().color(MUTED));
+            }
+            if let Some(dir) = addon::folder() {
+                ui.label(RichText::new(dir.display().to_string()).monospace().small().color(TEXT));
             }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -1913,7 +1930,7 @@ fn spawn_device_lister(list: Arc<Mutex<(Vec<String>, Vec<String>)>>, ctx: egui::
                 ctx.request_repaint();
             }
         }
-        std::thread::sleep(Duration::from_secs(10));
+        std::thread::sleep(Duration::from_secs(30));
     });
 }
 

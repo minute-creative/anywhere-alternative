@@ -71,7 +71,7 @@ pub fn run() -> Vec<Check> {
 fn has_hevc_extension() -> bool {
     #[cfg(target_os = "windows")]
     {
-        aa_platform::windows::decoder::available_codecs().contains(&aa_core::video::Codec::Hevc)
+        aa_platform::windows::decoder::hevc_decoder_installed()
     }
     #[cfg(not(target_os = "windows"))]
     {
