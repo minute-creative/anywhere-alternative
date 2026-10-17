@@ -350,7 +350,7 @@ app" real test, confirm HEVC on the PC.
   computers their current outside address, and try direct paths from
   both ends at once. Fallback when both ends are blocked: Tailscale
   (already supported), or the Mac mini relaying for the owner's team.
-- Owner's home network (PC test 2026-10-18): public IPv4 103.206.136.131,
+- Owner's home network (PC test 2026-10-18): a public IPv4 address,
   no IPv6 seen, hop 2 is 10.113.0.1 → possibly the ISP shares one address
   (CGNAT); router WAN address not yet checked. If CGNAT and no IPv6, the
   own-direct path can't reach this home from outside; Tailscale covers it.
