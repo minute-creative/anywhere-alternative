@@ -493,5 +493,16 @@ fn hevc_package_installed() -> bool {
 }
 
 pub fn available_codecs() -> Vec<Codec> {
-    [Codec::Hevc, Codec::H264].into_iter().filter(|c| MfDecoder::new(*c, true).is_ok()).collect()
+    [Codec::Hevc, Codec::H264]
+        .into_iter()
+        .filter(|c| match MfDecoder::new(*c, true) {
+            Ok(_) => true,
+            Err(e) => {
+                // Say why: 0.5.4's PC watched in H.264 although the Store
+                // HEVC extension was installed, and the log didn't tell.
+                tracing::warn!(codec = ?c, "decoder won't open: {e}");
+                false
+            }
+        })
+        .collect()
 }

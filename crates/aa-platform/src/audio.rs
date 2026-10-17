@@ -207,6 +207,11 @@ mod player {
         PlatformError::Backend(anyhow::anyhow!("{what}: {e}"))
     }
 
+    /// Errors that only mean "a moment of sound was lost"; the stream goes on.
+    fn transient(e: &cpal::Error) -> bool {
+        matches!(e.kind(), cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied)
+    }
+
     fn device_name(d: &cpal::Device) -> String {
         d.description().map(|d| d.name().to_owned()).unwrap_or_default()
     }
@@ -308,7 +313,14 @@ mod player {
                 match device.build_output_stream(
                     config,
                     move |out: &mut [f32], _| j.lock().expect("jitter").pull(out, channels, rate),
-                    move |e| {
+                    move |e: cpal::Error| {
+                        // A glitch (buffer under/overrun) is not a broken
+                        // device: reopening for it made the PC's microphone
+                        // restart every second (0.5.4 testing).
+                        if transient(&e) {
+                            tracing::debug!("audio output error (glitch, carrying on): {e}");
+                            return;
+                        }
                         tracing::warn!("audio output error: {e}");
                         broken.store(true, Ordering::Relaxed);
                     },
@@ -526,7 +538,14 @@ mod player {
                             let _ = tx.try_send(f.to_vec());
                         });
                     },
-                    move |e| {
+                    move |e: cpal::Error| {
+                        // A glitch (buffer under/overrun) is not a broken
+                        // device: reopening for it made the PC's microphone
+                        // restart every second (0.5.4 testing).
+                        if transient(&e) {
+                            tracing::debug!("microphone error (glitch, carrying on): {e}");
+                            return;
+                        }
                         tracing::warn!("microphone error: {e}");
                         broken.store(true, Ordering::Relaxed);
                     },
