@@ -192,6 +192,16 @@ impl MfDecoder {
             let in_type: IMFMediaType = MFCreateMediaType().map_err(|e| win(e, "MFCreateMediaType"))?;
             in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| win(e, "major"))?;
             in_type.SetGUID(&MF_MT_SUBTYPE, &subtype(codec)?).map_err(|e| win(e, "subtype"))?;
+            if codec == Codec::Hevc {
+                // Microsoft's HEVC Video Extension won't take an output type
+                // until it knows a picture size ("attribute not found" on
+                // SetOutputType, 0.5.5 log): give it a starting size; the real
+                // one arrives with the first frame as a normal size change.
+                use windows::Win32::Media::MediaFoundation::{MFVideoInterlace_Progressive, MF_MT_INTERLACE_MODE};
+                in_type.SetUINT64(&MF_MT_FRAME_SIZE, (1920u64 << 32) | 1080).map_err(|e| win(e, "frame size"))?;
+                let _ = in_type
+                    .SetUINT32(&MF_MT_INTERLACE_MODE, u32::try_from(MFVideoInterlace_Progressive.0).unwrap_or(2));
+            }
             mft.SetInputType(0, &in_type, 0).map_err(|e| win(e, "SetInputType"))?;
             let mut d = Self {
                 mft,
