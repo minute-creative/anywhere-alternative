@@ -200,9 +200,13 @@ fn supervise() {
         // Updates: when the app asks, and by ourselves every six hours
         // (first ten minutes after start), never while someone is connected.
         let asked = crate::update::marker::request().exists();
+        // "Update now" in the app: install even with someone connected (the
+        // person asked; their session ends and comes back on the new version).
+        let forced =
+            asked && std::fs::read_to_string(crate::update::marker::request()).is_ok_and(|t| t.starts_with("force"));
         let due = last_update_check
             .map_or(started.elapsed() > Duration::from_secs(600), |t| t.elapsed() > Duration::from_secs(6 * 3600));
-        if (asked || due) && !crate::update::someone_connected() {
+        if (asked || due) && (forced || !crate::update::someone_connected()) {
             let _ = std::fs::remove_file(crate::update::marker::request());
             last_update_check = Some(Instant::now());
             match update_now(&mut child, &stop_file) {

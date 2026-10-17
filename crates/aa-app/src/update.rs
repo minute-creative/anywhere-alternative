@@ -101,13 +101,16 @@ pub enum Applied {
 
 /// Install `rel`. Blocking (downloads); run it off the window's thread.
 #[allow(clippy::needless_pass_by_value)]
-pub fn apply(rel: Release, service_on: bool) -> anyhow::Result<Applied> {
+/// `now`: the person pressed "Update now" — the Windows service installs
+/// even while someone is connected.
+pub fn apply(rel: Release, service_on: bool, now: bool) -> anyhow::Result<Applied> {
     let url = rel.url_here().ok_or_else(|| anyhow::anyhow!("no installer for this system"))?.to_owned();
     let dir = aa_platform::trust::user_dir();
     #[cfg(target_os = "windows")]
     {
         if service_on && aa_platform::trust::system_dir().is_dir() {
-            std::fs::write(update::marker::request(), rel.version.as_bytes())?;
+            let note = if now { format!("force {}", rel.version) } else { rel.version.clone() };
+            std::fs::write(update::marker::request(), note.as_bytes())?;
             return Ok(Applied::Requested);
         }
         let setup = dir.join("Anywhere-update-setup.exe");
@@ -121,7 +124,7 @@ pub fn apply(rel: Release, service_on: bool) -> anyhow::Result<Applied> {
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = service_on;
+        let _ = (service_on, now);
         let dmg = dir.join("Anywhere-update.dmg");
         update::download(&url, &dmg)?;
         crate::service::replace_app_bundle(&dmg)?;
@@ -130,7 +133,7 @@ pub fn apply(rel: Release, service_on: bool) -> anyhow::Result<Applied> {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let _ = (service_on, url, dir);
+        let _ = (service_on, now, url, dir);
         anyhow::bail!("updates are for the Mac and Windows apps")
     }
 }

@@ -540,10 +540,24 @@ impl App {
         if self.update_skip.as_deref() == Some(rel.version.as_str()) {
             return;
         }
+        self.start_update(rel, false);
+    }
+
+    /// "Update now": install at once, even with someone connected.
+    fn update_now(&mut self) {
+        if self.updating.is_some() {
+            return;
+        }
+        if let Some(rel) = self.updater.available() {
+            self.start_update(rel, true);
+        }
+    }
+
+    fn start_update(&mut self, rel: aa_platform::update::Release, now: bool) {
         self.updating = Some(format!("Updating to {}…", rel.version));
         self.update_error = None;
         let service_on = self.service_on;
-        self.spawn(move |_| Bg::Updated(update::apply(rel, service_on).map_err(|e| e.to_string())));
+        self.spawn(move |_| Bg::Updated(update::apply(rel, service_on, now).map_err(|e| e.to_string())));
     }
 
     /// Close for the update; it reopens the app afterwards.
@@ -1649,6 +1663,8 @@ impl App {
         let s = &mut self.settings;
         ui.add_space(12.0);
         let mut check_now = false;
+        let mut update_now = false;
+        let newer = self.updater.available().is_some();
         let status = {
             let st = self.updater.state.lock();
             let (latest, err) = st.as_ref().map_or((None, None), |st| (st.latest.clone(), st.error.clone()));
@@ -1656,7 +1672,11 @@ impl App {
                 (Some(u), _, _) => u.clone(),
                 (None, Some(e), _) => e.clone(),
                 (None, None, Some(r)) if aa_platform::update::is_newer(&r.version, aa_platform::update::current()) => {
-                    format!("Version {} is ready; it installs when nobody is connected.", r.version)
+                    format!(
+                        "Version {} is ready. It installs by itself when nobody is connected, or press Update now \
+                         (an open connection closes and comes back after the update).",
+                        r.version
+                    )
                 }
                 (None, None, Some(_)) => "You have the newest version.".to_owned(),
                 (None, None, None) if err.is_some() => "Couldn't check for updates (no internet?).".to_owned(),
@@ -1673,9 +1693,14 @@ impl App {
                 "Only when nobody is connected. Anywhere reopens by itself afterwards.",
                 &mut s.auto_update,
             );
-            if button(ui, "Check now", Kind::Secondary).clicked() {
-                check_now = true;
-            }
+            ui.horizontal(|ui| {
+                if newer && self.updating.is_none() && button(ui, "Update now", Kind::Primary).clicked() {
+                    update_now = true;
+                }
+                if button(ui, "Check now", Kind::Secondary).clicked() {
+                    check_now = true;
+                }
+            });
         });
         ui.add_space(12.0);
         card(ui, |ui| {
@@ -1700,6 +1725,9 @@ impl App {
         }
         if changed {
             s.save();
+        }
+        if update_now {
+            self.update_now();
         }
     }
 
