@@ -14,6 +14,10 @@
 //! Capture/encode and input injection are blocking OS calls, so each gets a
 //! dedicated OS thread; the network loop is async on tokio.
 
+// In plain words: the sharing program's starting point. It reads the
+// command-line options (the app passes them), sets up logging, prepares the
+// system's capture/encode/input abilities, and starts the network loop in
+// session.rs. With --service it is the always-on copy and never gives up.
 mod calls;
 mod net;
 mod pipeline;
@@ -29,6 +33,8 @@ use anyhow::Context;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+// Command-line options. Each "///" line below is also the help text shown
+// by "aa-host --help".
 #[derive(Debug, Parser)]
 #[command(name = "aa-host", about = "Anywhere Alternative host", version)]
 #[allow(clippy::struct_excessive_bools)] // CLI switches
@@ -85,6 +91,7 @@ struct Args {
     windows_service: bool,
 }
 
+// "1920x1080" -> width 1920, height 1080.
 fn parse_resolution(s: &str) -> Result<Resolution, String> {
     let (w, h) = s.split_once('x').ok_or_else(|| "expected WxH".to_string())?;
     Ok(Resolution::new(w.parse().map_err(|e| format!("{e}"))?, h.parse().map_err(|e| format!("{e}"))?))
@@ -140,6 +147,7 @@ fn bench() -> anyhow::Result<()> {
 #[cfg(target_os = "windows")]
 fn real_host_backends(encoder: &str) -> anyhow::Result<aa_platform::HostBackends> {
     use aa_platform::windows::EncoderChoice;
+    // Which encoder to use, from the --encoder option.
     let choice = match encoder {
         "auto" => EncoderChoice::Auto,
         "hardware" | "hw" => EncoderChoice::Hardware,
@@ -169,7 +177,9 @@ fn at_login_screen() -> bool {
 }
 
 fn init_logging(args: &Args) {
+    // Log level from the RUST_LOG setting if present, else normal ("info").
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    // The always-on copy writes its log to a file (see the Code guide for where).
     if args.service || args.windows_service {
         let name = if args.windows_service {
             "service-supervisor.log"
@@ -199,10 +209,14 @@ fn init_logging(args: &Args) {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     init_logging(&args);
+    // Windows: the boot-time service only supervises; it starts host copies
+    // on whichever session is on the screen (see windows/session.rs).
     #[cfg(target_os = "windows")]
     if args.windows_service {
         return tokio::task::spawn_blocking(aa_platform::windows::session::run_service).await?;
     }
+    // Always-on copy: note our version (so the app can tell if an old copy
+    // is still running) and wait for the network port to be free.
     if args.service {
         tracing::info!(
             version = aa_platform::update::current(),
@@ -226,6 +240,9 @@ async fn main() -> anyhow::Result<()> {
         return bench();
     }
 
+    // Prepare the system abilities: fake ones for tests (--mock), real ones
+    // otherwise. If the screen cannot be captured yet (no permission), the
+    // always-on copy waits 30 s and exits; the system starts it again.
     let backends = if args.mock {
         tracing::warn!("using MOCK backends: test pattern, no real screen");
         if args.test_clipboard {
@@ -246,6 +263,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // The app stops us by creating a small "stop" file; check every 0.3 s.
     if let Some(path) = args.stop_file.clone() {
         let _ = std::fs::remove_file(&path); // a leftover from last time must not stop us
         std::thread::spawn(move || loop {
@@ -257,6 +275,7 @@ async fn main() -> anyhow::Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(300));
         });
     }
+    // Run the network loop until asked to stop.
     session::run(args.listen, backends).await
 }
 

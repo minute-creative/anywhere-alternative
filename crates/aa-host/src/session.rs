@@ -1,5 +1,11 @@
 //! The network loop: handshake, then fan frames out and input in.
 
+// In plain words: this is the sharing computer's main loop. It waits for
+// packets from the viewer and reacts to each kind: hello (start streaming),
+// input (pass to the mouse/keyboard thread), reports (adjust quality),
+// resend requests, clipboard, controller, camera and microphone for calls.
+// Separate threads capture and encode the screen and sound; a separate task
+// sends the finished frames, so receiving never waits on sending.
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -21,6 +27,7 @@ use tokio::sync::mpsc;
 use crate::net::Net;
 use crate::pipeline::{self, PipelineControl};
 
+// Set by the app (through a stop request) to end the session cleanly.
 static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Ask the running session to end cleanly (says goodbye to the viewer,
@@ -60,6 +67,8 @@ const TAKEOVER_AFTER_SILENCE: Duration = Duration::from_millis(1500);
 
 #[allow(clippy::too_many_lines)] // one select! loop; splitting it would hide the flow
 pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<()> {
+    // Open the network socket (encrypted, see net.rs) and print the addresses
+    // people can type if automatic discovery does not work.
     let socket = Arc::new(crate::net::Net::bind(listen)?);
     tracing::info!("listening on {}", socket.local_addr()?);
     // The addresses to type on the viewer if automatic discovery is blocked.
@@ -69,6 +78,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
         tracing::info!("viewers can connect to: {}", addrs.join("  or  "));
     }
 
+    // Take apart the bundle of system abilities prepared in main.rs.
     let HostBackends {
         capture,
         encoder,
@@ -104,6 +114,8 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     // What we last told the viewer about the screen, and when.
     let mut told: (Option<&'static str>, Option<SocketAddr>, Instant) = (None, None, Instant::now());
 
+    // Shared switches between this loop and the capture thread (target
+    // bitrate, frame rate, "send a keyframe now", what to share...).
     let ctl = Arc::new(PipelineControl::default());
     // A few frames of slack: sending a 250-packet keyframe over Wi-Fi takes
     // longer than one frame interval, and dropping the frames behind it
@@ -141,6 +153,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     // ones its radio dropped (see `Kind::Resend`).
     let recent: Arc<std::sync::Mutex<RecentPackets>> = Arc::default();
 
+    // Start the worker threads: screen capture + encoding, input, sound.
     let cap_ctl = Arc::clone(&ctl);
     let initial_codec = capabilities.codecs.first().copied().unwrap_or(aa_core::video::Codec::H264);
     std::thread::Builder::new().name("aa-capture".into()).spawn(move || {
@@ -160,9 +173,11 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
         drop(audio_tx);
     }
 
+    // Start announcing ourselves on the network every second.
     start_beacon(listen.port(), socket.public_key_hex());
     set_connected(false);
 
+    // No viewer yet; start with a sensible bitrate for this screen.
     let mut viewer: Option<Viewer> = None;
     let seq = Arc::new(SeqCounter::default());
     let fps = capabilities.max_fps;
@@ -193,8 +208,11 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
     let mut housekeeping = tokio::time::interval(Duration::from_secs(1));
     let mut ticks = 0u64;
 
+    // The main loop: wait for whichever of these happens first, handle it,
+    // repeat. Each "=>" branch below is one kind of event.
     loop {
         tokio::select! {
+            // A packet arrived from the network.
             recv = socket.recv_from(&mut buf) => {
                 let (n, from) = match recv {
                     Ok(x) => x,
@@ -211,14 +229,18 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                         continue;
                     }
                 };
+                // Read its label; skip anything malformed.
                 let datagram = Bytes::copy_from_slice(&buf[..n]);
                 let packet = match Packet::parse(datagram) {
                     Ok(p) => p,
                     Err(e) => { tracing::debug!(%from, "bad datagram: {e}"); continue; }
                 };
+                // Any packet from the current viewer proves it is still there.
                 if let Some(v) = viewer.as_mut().filter(|v| v.addr == from) {
                     v.last_heard = Instant::now();
                 }
+                // Kinds handled right here: microphone, camera, camera state, controller,
+                // clipboard. Each is accepted only from the connected viewer.
                 if packet.header.kind == Kind::Mic {
                     if viewer.as_ref().is_some_and(|v| v.addr == from) {
                         mic.handle(packet.payload.clone(), &hub);
@@ -277,9 +299,11 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                     }
                     continue;
                 }
+                // Everything else (hello, input, reports, resends...): see handle_packet.
                 if let Err(e) = handle_packet(&socket, &packet, from, &mut viewer, &ctl, &capabilities, &input_tx, &seq, &mut bitrate, &video_dest, &mut speaker, &recent, &mut stream).await {
                     tracing::warn!("network send error (continuing): {e:#}");
                 }
+                // The viewer changed (connected, left, replaced): tell the call devices.
                 let now_viewer = viewer.as_ref().map(|v| v.addr);
                 if now_viewer != call_viewer {
                     call_viewer = now_viewer;
@@ -293,6 +317,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 }
             }
 
+            // Every 100 ms: screen status messages and clipboard sending.
             _ = clip_tick.tick() => {
                 // Screen status (locked, no display) to the viewer: on every
                 // change, to a newly connected viewer, and every 3 s while set.
@@ -311,6 +336,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 }
             }
 
+            // A DualSense message for the viewer (game rumble, lights, haptics).
             Some(m) = pad_out_rx.recv() => {
                 if let Some(v) = viewer.as_ref().filter(|v| Some(v.addr) == pad_owner) {
                     let body = m.encode();
@@ -321,8 +347,10 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 }
             }
 
+            // Rumble for a generic (non-DualSense) controller.
             Some(r) = rumble_rx.recv() => pads.rumble(r),
 
+            // Every 20 ms while a DualSense is attached: housekeeping for it.
             _ = pad_tick.tick(), if pads.active() > 0 => {
                 // A different viewer took over: its controllers are new ones.
                 if viewer.as_ref().map(|v| v.addr) != pad_owner {
@@ -332,6 +360,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 pads.tick();
             }
 
+            // A call on this computer started or stopped using the camera or mic.
             Ok(()) = wants.changed() => {
                 let w = *wants.borrow_and_update();
                 tracing::info!(camera = w.camera, mic = w.mic, "call devices wanted");
@@ -341,12 +370,16 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 }
             }
 
+            // The browser add-on lost a camera picture: ask the viewer for a fresh one.
             () = hub.keyframe.notified() => {
                 if let Some(v) = viewer.as_ref() {
                     let _ = send_control(&socket, v.addr, &ControlMessage::CameraKeyframe, &seq).await;
                 }
             }
 
+            // Once a second: repeat call-device requests, refresh the "connected"
+            // note, follow the share choice, send stream info, and drop a viewer that
+            // has been silent for 5 seconds.
             _ = housekeeping.tick() => {
                 // Keep the "someone is connected" note fresh (a stale one,
                 // left by a crash, stops counting after two minutes).
@@ -388,6 +421,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 }
             }
 
+            // The app asked us to stop: say goodbye, unmute the speakers, end.
             () = stop_requested() => {
                 tracing::info!("asked to stop");
                 set_connected(false);
@@ -399,6 +433,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 return Ok(());
             }
 
+            // Ctrl+C in a terminal: same as above.
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutting down");
                 set_connected(false);
@@ -437,6 +472,8 @@ impl MicSink {
     /// On a Mac the free `BlackHole` driver plays the same role.
     const CABLES: [&'static str; 4] = ["CABLE Input", "Steam Streaming Microphone", "VB-Audio Virtual", "BlackHole"];
 
+    // First microphone packet of this run: find a virtual microphone cable to
+    // play into (VB-CABLE on Windows, BlackHole on a Mac), once.
     fn handle(&mut self, payload: Bytes, hub: &crate::calls::CallHub) {
         if !self.looked {
             self.looked = true;
@@ -462,6 +499,8 @@ impl MicSink {
                 }
             }
         }
+        // Decode each 10 ms piece and play it into the cable, and also hand it to
+        // the browser add-on for calls.
         let Some(depack) = self.depack.as_mut() else { return };
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(p) = self.player.as_mut() {
@@ -489,6 +528,8 @@ fn start_beacon(port: u16, key: String) {
     if std::env::var_os("AA_SIMULATE_NO_BEACON").is_some() {
         return;
     }
+    // The announcement is the same every time: build it once, then send it to
+    // every network adapter once a second, forever, on its own thread.
     let name = aa_platform::trust::computer_name();
     let version = aa_platform::update::current().to_owned();
     let payload = ControlMessage::Beacon { name, port, key, version }.encode();
@@ -519,12 +560,14 @@ async fn clip_pump(
     seq: &SeqCounter,
 ) -> anyhow::Result<()> {
     let Some(link) = link else { return Ok(()) };
+    // Things copied on this computer since last time.
     while let Ok(item) = link.copied_here.try_recv() {
         // Nobody connected: the copy just stays on this PC.
         if dest.is_some() && !clip.copied(&item) {
             tracing::warn!(item = item.describe(), "too large to share");
         }
     }
+    // Paced clipboard pieces, repeats and requests for missing pieces.
     if let Some(dest) = dest {
         for d in clip.tick(seq) {
             socket.send_to(&d, dest).await?;
@@ -549,6 +592,7 @@ async fn handle_packet(
     recent: &std::sync::Mutex<RecentPackets>,
     stream: &mut Stream,
 ) -> anyhow::Result<()> {
+    // Most branches below only act for the connected viewer ("is_current_viewer").
     let is_current_viewer = viewer.as_ref().is_some_and(|v| v.addr == from);
 
     match packet.header.kind {
@@ -561,7 +605,9 @@ async fn handle_packet(
                 }
             };
             match msg {
+                // Hello: a viewer wants to connect.
                 ControlMessage::Hello { protocol, capabilities } => {
+                    // Different protocol versions cannot understand each other: refuse.
                     if protocol != PROTOCOL_VERSION {
                         let reason = format!("protocol {protocol} != {PROTOCOL_VERSION}");
                         send_control(socket, from, &ControlMessage::Reject { reason }, seq).await?;
@@ -602,6 +648,8 @@ async fn handle_packet(
                             return Ok(());
                         }
                     }
+                    // Agree on codec, size and frame rate; welcome the viewer; reset the
+                    // bitrate; ask the encoder for a fresh keyframe; start streaming.
                     match negotiate(host_caps, &capabilities) {
                         Ok(negotiated) => {
                             let name = socket.peer_name(from).unwrap_or_default();
@@ -639,6 +687,7 @@ async fn handle_packet(
                         }
                     }
                 }
+                // Goodbye: stop streaming, release any held keys, unmute speakers.
                 ControlMessage::Bye if is_current_viewer => {
                     tracing::info!(%from, "viewer left");
                     set_connected(false);
@@ -649,6 +698,7 @@ async fn handle_packet(
                     restore_speakers(speaker);
                     stream.viewer_left(ctl);
                 }
+                // Mute or unmute this computer's own speakers.
                 ControlMessage::SetHostMute { muted } if is_current_viewer => {
                     if let Some(s) = speaker {
                         if let Err(e) = s.set_muted(muted) {
@@ -682,11 +732,13 @@ async fn handle_packet(
                     )
                     .await?;
                 }
+                // The viewer moved its bitrate slider.
                 ControlMessage::SetMaxBitrate { kbps } if is_current_viewer => {
                     bitrate.set_max_kbps(kbps);
                     ctl.target_kbps.store(bitrate.current_kbps(), Ordering::Relaxed);
                     tracing::info!(kbps, "bitrate cap set");
                 }
+                // A full-access viewer asks what could be shared, or picks something.
                 ControlMessage::ShareList if is_current_viewer && stream.full_access => {
                     let items = tokio::task::spawn_blocking(aa_platform::share::list).await.unwrap_or_default();
                     let msg = ControlMessage::Shareables { items, current: stream.now.clone() };
@@ -704,6 +756,8 @@ async fn handle_packet(
             }
         }
 
+        // Input: one packet may hold several events; queue each for the input
+        // thread (if the queue is full, the event is dropped rather than delayed).
         Kind::Input if is_current_viewer => {
             let mut payload = packet.payload.clone();
             while payload.has_remaining() {
@@ -721,6 +775,7 @@ async fn handle_packet(
             }
         }
 
+        // NACK: the viewer lost a frame. Send a repair frame or a keyframe.
         Kind::Nack if is_current_viewer => {
             // Repair from a confirmed reference when both sides can (no big
             // fresh picture); otherwise a keyframe.
@@ -731,6 +786,8 @@ async fn handle_packet(
             }
         }
 
+        // Resend: send again the exact packets the viewer names, from the last
+        // second of sent packets kept in memory.
         Kind::Resend if is_current_viewer => {
             if let Some(rq) = wire::ResendRequest::decode(&packet.payload) {
                 // Copy the datagrams out under the lock, send outside it.
@@ -744,6 +801,7 @@ async fn handle_packet(
             }
         }
 
+        // Ack: the once-a-second report. Updates bitrate, parity and frame rate.
         Kind::Ack if is_current_viewer => {
             let mut payload = packet.payload.clone();
             if let Some(rep) = ReceiverReport::decode(&mut payload) {
@@ -788,6 +846,7 @@ async fn handle_packet(
             }
         }
 
+        // Ping: answer at once with a Pong (the viewer measures the round trip).
         Kind::Ping if is_current_viewer => {
             let mut out = BytesMut::with_capacity(wire::HEADER_LEN + packet.payload.len());
             Header { kind: Kind::Pong, seq: seq.take(), ..packet.header }.write(&mut out);
@@ -815,6 +874,7 @@ async fn sender_task(
     ctl: Arc<PipelineControl>,
 ) {
     let mut audio_open = true;
+    // Wait for either a finished video frame or a sound packet.
     loop {
         let frame = tokio::select! {
             f = frame_rx.recv() => match f { Some(f) => f, None => break },
@@ -836,12 +896,14 @@ async fn sender_task(
                 continue;
             }
         };
+        // No viewer: drop the frame.
         let Some(dest) = *video_dest.lock().expect("dest") else { continue };
         let fec = f64::from(ctl.fec_permille.load(Ordering::Relaxed)) / 1000.0;
         let mut flags = if frame.meta.is_keyframe { wire::flags::KEYFRAME } else { 0 };
         if frame.recovery {
             flags |= wire::flags::RECOVERY;
         }
+        // Cut the frame into packets, add parity, and send them all.
         let slices = match wire::slice_frame_with_fec_flagged(&frame.data, frame.meta.frame_id, flags, &seq, fec) {
             Ok(s) => s,
             Err(e) => {
@@ -861,6 +923,7 @@ async fn sender_task(
                 break;
             }
         }
+        // Keep the packets a little while in case the viewer asks for some again.
         recent.lock().expect("recent").remember(frame.meta.frame_id, slices);
     }
     tracing::info!("sender task exiting");
@@ -879,6 +942,7 @@ impl RecentPackets {
     /// 12 MB: a second of a 4K keyframe-heavy stream, roughly.
     const MAX_BYTES: usize = 12 * 1024 * 1024;
 
+    // Add the newest frame's packets; forget the oldest beyond 64 frames or 12 MB.
     fn remember(&mut self, frame_id: u32, slices: Vec<Bytes>) {
         self.bytes += slices.iter().map(Bytes::len).sum::<usize>();
         self.frames.push_back((frame_id, slices));
@@ -918,6 +982,7 @@ impl RecentPackets {
     }
 }
 
+// Wrap a spoken message in a packet label and send it.
 async fn send_control(socket: &Net, to: SocketAddr, msg: &ControlMessage, seq: &SeqCounter) -> anyhow::Result<()> {
     let payload = msg.encode();
     let mut out = BytesMut::with_capacity(wire::HEADER_LEN + payload.len());
@@ -1046,6 +1111,7 @@ impl Stream {
     /// Re-read the local choice; apply whatever should be shown now.
     /// `tick` (seconds) spaces out the "is that app still open?" check.
     fn follow_choice(&mut self, ctl: &PipelineControl, _tick: u64) {
+        // The person at this computer changed their choice: that wins.
         let local = aa_platform::trust::share_choice();
         if local != self.local {
             self.local = local;
@@ -1056,12 +1122,15 @@ impl Stream {
             self.now = want;
             self.apply(ctl);
         }
+        // The shared app was closed: tell the viewer why the picture is empty.
         let gone = !self.now.is_screen() && self.closed.load(Ordering::Relaxed);
         self.share_status = gone.then_some("The shared app or window was closed on the other computer");
     }
 
     fn apply(&mut self, ctl: &PipelineControl) {
         tracing::info!(sharing = self.now.label(), full_access = self.full_access, "sharing");
+        // Tell the capture, sound and input threads what is being shared, and
+        // whether input is limited to that app (no full access).
         *ctl.share.lock().expect("share") = Some(self.now.clone());
         *ctl.audio_share.lock().expect("audio share") = Some(self.now.clone());
         let limit = (!self.now.is_screen() && !self.full_access).then(|| self.now.clone());

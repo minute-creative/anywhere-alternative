@@ -1,5 +1,13 @@
 //! The capture → encode thread and the input-injection thread.
 
+// In plain words: three worker threads of the sharing computer.
+// - capture_thread: takes pictures of the screen, squeezes them (encodes)
+//   and hands them to the network task. It also heals itself: if the screen
+//   changes size or the graphics card resets, it builds everything again.
+// - audio_thread: records what the computer plays and squeezes it with Opus.
+// - input_thread: applies the viewer's mouse, keys and controllers here.
+// The network loop (session.rs) steers them through PipelineControl, a set
+// of shared switches that need no waiting.
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
@@ -173,12 +181,14 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
     let mut share_blocked = false;
     let mut blocked_retry = Instant::now();
 
+    // The main loop: runs until the program stops.
     while !ctl.shutdown.load(Ordering::Relaxed) {
         let streaming = ctl.streaming.load(Ordering::Relaxed);
         if streaming != awake {
             aa_platform::keep_awake(streaming);
             awake = streaming;
         }
+        // Nobody watching: sleep and use no power or graphics card.
         if !streaming {
             std::thread::sleep(idle_poll);
             continue;
@@ -215,6 +225,8 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
 
         // What to share changed (the person here, or a full-access viewer),
         // or the capture was rebuilt and must be told again.
+        // Sharing choice: apply a new one, or re-apply after a rebuild, or retry an
+        // app that could not be shown (every 3 seconds).
         let new_share = ctl.share.lock().expect("share").take();
         let retry = share_blocked && blocked_retry.elapsed() > Duration::from_secs(3);
         if retry {
@@ -245,6 +257,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
             capture.set_max_size(max_size);
         }
 
+        // Tell the viewer when the screen cannot be shown (locked, asleep...).
         let reason = if share_blocked {
             Some("The chosen app or window can't be shown right now, so nothing is shown")
         } else {
@@ -272,7 +285,9 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
         // While a picture is held back, wait only until its turn.
         let wait =
             if held { next_due.saturating_duration_since(Instant::now()).min(frame_timeout) } else { frame_timeout };
+        // Ask the system for the next screen picture (waits up to "wait").
         let frame = match capture.next_frame(wait) {
+            // A new picture.
             Ok(Some(f)) => {
                 capture_failures = 0;
                 still_since = Instant::now();
@@ -287,12 +302,14 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
                 held = false;
                 f
             }
+            // No new picture, but the one we held back is due now: send it.
             Ok(None) if held && Instant::now() >= next_due => {
                 // The held picture's turn: nothing newer came.
                 held = false;
                 let Some(f) = last_frame.clone() else { continue };
                 f
             }
+            // Nothing new: maybe re-send the last picture sharper (see REFINE_AFTER_MS).
             Ok(None) => {
                 // Nothing changed on screen. Time to sharpen the last picture?
                 let still = still_since.elapsed();
@@ -304,6 +321,8 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
                 refined += 1;
                 f
             }
+            // The screen or graphics card went away (resolution change, sleep, driver
+            // reset): build the whole capture again.
             Err(PlatformError::DeviceLost(why)) => {
                 tracing::warn!("capture device lost ({why}); rebuilding the video pipeline");
                 rebuilt = rebuild_pipeline(&mut capture, &mut factory, &mut encoder, &mut rebuild, ctl);
@@ -311,6 +330,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
                 held = false;
                 continue;
             }
+            // Any other capture error: wait a moment; after 40 in a row, rebuild.
             Err(e) => {
                 capture_failures += 1;
                 if capture_failures == 1 || capture_failures % 20 == 0 {
@@ -392,6 +412,8 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
 
         // The viewer confirmed frames up to `good`: their long-term
         // references may be built on from now on.
+        // Long-term reference bookkeeping (Mac only): tell the encoder which of
+        // its reference pictures the viewer is known to have.
         let good = ctl.last_good.swap(u32::MAX, Ordering::Relaxed);
         if good != u32::MAX && !ltr_pending.is_empty() {
             let mut confirmed = Vec::new();
@@ -406,6 +428,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
                 enc.acknowledge(&confirmed);
             }
         }
+        // The viewer lost something: repair frame if possible, else a keyframe.
         if ctl.recovery.swap(false, Ordering::Relaxed) {
             // Unconfirmed references may be among what was lost: never
             // build on them.
@@ -419,6 +442,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
                 tracing::warn!("intra refresh request failed: {e}");
             }
         }
+        // Pick up a forced keyframe and a new bitrate, if the network task set them.
         let force_key = ctl.force_keyframe.swap(false, Ordering::Relaxed);
         let kbps = ctl.target_kbps.swap(0, Ordering::Relaxed);
         if kbps != 0 {
@@ -431,6 +455,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
             }
         }
 
+        // Encode this picture and give it a frame number that only ever goes up.
         match enc.encode(&frame, force_key) {
             Ok(mut packet) => {
                 encode_failures = 0;
@@ -447,16 +472,20 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
                         ltr_pending.pop_front();
                     }
                 }
+                // The network task is behind: drop this frame rather than queue it.
                 if tx.try_send(packet).is_err() {
                     tracing::debug!("network busy, dropped a frame");
                 }
             }
+            // The encoder chose to skip this frame (out of bitrate budget).
             Err(PlatformError::FrameSkipped) => {
                 skipped_in_row += 1;
                 if skipped_in_row % 60 == 0 {
                     tracing::warn!(skipped_in_row, kbps = kbps_now, "encoder keeps skipping frames (picture frozen)");
                 }
             }
+            // A real failure: ask for a keyframe; after 30 in a row build a new encoder,
+            // after 120 rebuild everything.
             Err(e) => {
                 encode_failures += 1;
                 if encode_failures == 1 || encode_failures % 60 == 0 {
@@ -552,11 +581,14 @@ pub fn audio_thread(
     // rather than everything (nothing should slip out that wasn't chosen).
     let mut silenced = false;
 
+    // Loop: record 10 ms of sound, encode it, label it, queue it for sending.
     while !ctl.shutdown.load(Ordering::Relaxed) {
         if !ctl.streaming.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
+        // Sharing one app: limit the sound to that app, or go silent if this
+        // system cannot separate one app's sound.
         let new_share = ctl.audio_share.lock().expect("audio share").take();
         if let Some(target) = new_share {
             silenced = match capture.set_share(&target) {
@@ -614,6 +646,7 @@ pub fn input_thread(
     rumble_tx: &mpsc::Sender<aa_core::input::Rumble>,
     ctl: &PipelineControl,
 ) {
+    // Loop: take the next input event and apply it.
     loop {
         // Sharing changed: keep the viewer inside the shared app (or not).
         if let Some(limit) = ctl.input_limit.lock().expect("limit").take() {
@@ -641,6 +674,8 @@ pub fn input_thread(
                 None => break,
             }
         };
+        // Controller events go to the virtual controller (if this computer has
+        // one); everything else (mouse, keys) to the input injector.
         let r = match (ev, gamepad.as_mut()) {
             (InputEvent::Gamepad { slot, state }, Some(pad)) => pad.update(slot, state),
             (InputEvent::GamepadAttach { slot, kind }, Some(pad)) => pad.attach(slot, kind),

@@ -6,6 +6,11 @@
 //! kind of unencrypted packet through: "who's there?" (`Discover`), so
 //! computers can still find this one by name.
 
+// In plain words: every packet to and from a paired computer is locked
+// (encrypted) and unlocked here, so the rest of the host never sees the
+// locking. Strangers get nothing except the answer to "who's there?" and
+// the pairing exchange. Wrong pairing codes are slowed down and, after five
+// in a row, the code changes.
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -56,6 +61,7 @@ impl std::fmt::Debug for Net {
 }
 
 impl Net {
+    // Load our permanent key and the current pairing code; print the code.
     pub fn bind(addr: SocketAddr) -> anyhow::Result<Self> {
         let sock = crate::udp::bind(addr)?;
         let id = aa_platform::trust::host_identity();
@@ -97,6 +103,8 @@ impl Net {
 
     /// Send one packet: sealed if `to` is a connected computer.
     pub async fn send_to(&self, buf: &[u8], to: SocketAddr) -> std::io::Result<usize> {
+        // Lock the packet with that computer's session key if it is connected;
+        // otherwise send as is (only discovery answers and pairing go out that way).
         let session = self.peers.lock().ok().and_then(|p| p.get(&to).map(|p| Arc::clone(&p.session)));
         match session {
             Some(s) => self.sock.send_to(&s.seal(buf), to).await,
@@ -107,12 +115,16 @@ impl Net {
     /// The next plain packet for the host, from a paired computer (or a
     /// "who's there?" from anyone). Handshakes are answered on the way.
     pub async fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        // Wait for packets until one is for the host: unlock sealed ones, answer
+        // handshakes and pairing right here, pass "who's there?" through, drop
+        // everything else.
         let mut raw = vec![0u8; buf.len() + secure::OVERHEAD];
         loop {
             let (n, from) = self.sock.recv_from(&mut raw).await?;
             let d = &raw[..n];
             let Some(&first) = d.first() else { continue };
             match first {
+                // Sealed: find the session for that address and try to unlock.
                 secure::SEALED => {
                     let session = self.peers.lock().ok().and_then(|mut p| {
                         p.get_mut(&from).map(|p| {
@@ -126,6 +138,8 @@ impl Net {
                             return Ok((plain.len(), from));
                         }
                         Some(_) => {}
+                        // A packet that fails to unlock from someone without a session: tell them
+                        // to reconnect.
                         None => self.maybe_reset(from).await,
                     }
                 }
@@ -173,6 +187,8 @@ impl Net {
             let _ = self.sock.send_to(&r, from).await;
             return;
         }
+        // Answer a hello: work out session keys if the computer is paired, else
+        // say "pair first".
         let Some(resp) = secure::respond(&self.id, &self.name, d, aa_platform::trust::is_paired_viewer) else {
             return;
         };
@@ -204,6 +220,8 @@ impl Net {
     }
 
     async fn pair_request(&self, d: &[u8], from: SocketAddr) {
+        // Pairing step 2: a computer typed a code. One attempt per 2 seconds from
+        // anyone; repeats of the same request get the same answer.
         let answer: Vec<u8> = {
             let Ok(mut p) = self.pairing.lock() else { return };
             p.pending.retain(|_, (_, t, _)| t.elapsed() < Duration::from_secs(60));
@@ -240,6 +258,8 @@ impl Net {
     }
 
     async fn pair_confirm(&self, d: &[u8], from: SocketAddr) {
+        // Pairing step 4: the proof that the typed code was right. Remember the
+        // computer, then make a new code (each code works once).
         let ok = {
             let Ok(mut p) = self.pairing.lock() else { return };
             let Some((pp, _, done)) = p.pending.get(&from).cloned() else { return };
@@ -266,6 +286,7 @@ impl Net {
 }
 
 fn fail(why: &str) -> Vec<u8> {
+    // A pairing failure message with a reason.
     let mut v = vec![secure::PAIR_FAIL];
     v.extend_from_slice(why.as_bytes());
     v

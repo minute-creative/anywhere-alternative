@@ -8,6 +8,10 @@
 //! viewer to switch its camera and mic on or off), and hands pictures and
 //! sound to everyone listening.
 
+// Plain summary: this file is the switchboard for the camera and microphone
+// the OTHER computer lends us. Browser tabs (through the add-on) and the
+// Windows virtual camera say what they want; the hub works out whether the
+// viewer should send camera and/or mic, and passes pictures and sound on.
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +38,8 @@ pub struct Wanted {
     pub mic: bool,
 }
 
+// One browser tab connected to us. `tx` is its outbox; `video` / `audio` say
+// whether that tab wants the camera / microphone right now.
 #[derive(Debug)]
 struct Client {
     tx: mpsc::Sender<Message>,
@@ -41,6 +47,7 @@ struct Client {
     audio: bool,
 }
 
+// Everything the hub remembers, behind one lock so a change is never half-done.
 #[derive(Debug, Default)]
 struct State {
     clients: HashMap<u64, Client>,
@@ -52,6 +59,8 @@ struct State {
 }
 
 impl State {
+    // Camera is needed if the Windows virtual camera is in use OR any tab wants
+    // video; the microphone only if some tab wants audio.
     fn wanted(&self) -> Wanted {
         Wanted {
             camera: self.vcam || self.clients.values().any(|c| c.video),
@@ -59,6 +68,8 @@ impl State {
         }
     }
 
+    // The status message every tab gets: which computer is watching, its camera
+    // name, and any problem to show the person.
     fn status(&self) -> Message {
         let m = BridgeMsg::Status {
             viewer: self.viewer.clone(),
@@ -96,18 +107,24 @@ impl CallHub {
         (hub, rx)
     }
 
+    // Every change goes through here: apply it under the lock, then (after
+    // letting go of the lock) tell the session if the wanted camera/mic changed
+    // and send every tab the new status.
     fn update(&self, f: impl FnOnce(&mut State)) {
         let (wanted, status, clients) = {
             let mut s = self.state.lock().expect("calls");
             f(&mut s);
             (s.wanted(), s.status(), s.clients.values().map(|c| c.tx.clone()).collect::<Vec<_>>())
         };
+        // Only wakes the session when the answer really changed, so the viewer's
+        // camera isn't switched off and on for nothing.
         self.wanted_tx.send_if_modified(|w| {
             let changed = *w != wanted;
             *w = wanted;
             changed
         });
         for tx in clients {
+            // try_send never waits: a tab whose outbox is full just misses this status.
             let _ = tx.try_send(status.clone());
         }
     }
@@ -147,6 +164,8 @@ impl CallHub {
     }
 
     fn set_vcam(&self, on: bool) {
+        // The moment an app opens the camera, ask for a keyframe (a complete
+        // picture), because a decoder can't start from a partial one.
         if on && !self.state.lock().expect("calls").vcam {
             self.keyframe.notify_one();
         }
@@ -154,14 +173,18 @@ impl CallHub {
     }
 
     fn ts(&self) -> u64 {
+        // Microseconds since the hub started; the add-on uses it to keep pictures
+        // and sound in order.
         self.started.elapsed().as_micros() as u64
     }
 
     /// A camera picture arrived from the viewer.
     pub fn frame(&self, data: &Bytes, keyframe: bool) {
+        // The Windows virtual camera gets the picture first, if an app is using it.
         if let Some(tx) = self.vcam_frames.lock().ok().and_then(|f| f.clone()) {
             let _ = tx.try_send((data.clone(), keyframe));
         }
+        // Then the same picture, with a small header, goes to every tab that wants video.
         let msg = Message::Binary(Bytes::from(encode_media(MSG_VIDEO, keyframe, self.ts(), data)));
         let s = self.state.lock().expect("calls");
         for c in s.clients.values().filter(|c| c.video) {
@@ -176,6 +199,7 @@ impl CallHub {
         if !s.clients.values().any(|c| c.audio) {
             return;
         }
+        // Turn the samples into bytes, low byte first (little-endian), as the add-on expects.
         let mut bytes = Vec::with_capacity(pcm.len() * 2);
         for v in pcm {
             bytes.extend_from_slice(&v.to_le_bytes());
@@ -189,6 +213,8 @@ impl CallHub {
     /// Start the WebSocket server for the browser add-on (127.0.0.1 only).
     pub fn serve(&self) {
         let hub = self.clone();
+        // Runs in the background forever: accept each browser connection and look
+        // after it in its own task.
         tokio::spawn(async move {
             let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, BRIDGE_PORT));
             let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -202,6 +228,7 @@ impl CallHub {
             };
             tracing::info!(%addr, "browser camera link ready");
             loop {
+                // A failed accept (rare) is skipped; the server keeps listening.
                 let Ok((stream, _)) = listener.accept().await else { continue };
                 let id = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
                 let hub = hub.clone();
@@ -209,6 +236,7 @@ impl CallHub {
                     if let Err(e) = hub.client(stream, id).await {
                         tracing::debug!("browser link {id} ended: {e}");
                     }
+                    // When a tab leaves for any reason, forget it so nothing more is sent to it.
                     hub.update(|s| {
                         s.clients.remove(&id);
                     });
@@ -219,6 +247,8 @@ impl CallHub {
 
     async fn client(&self, stream: tokio::net::TcpStream, id: u64) -> anyhow::Result<()> {
         let _ = stream.set_nodelay(true);
+        // Security check before accepting: only the Anywhere add-on's own origin is
+        // let in, so a random website can't grab the camera or microphone.
         #[allow(clippy::result_large_err)] // the type tungstenite asks for
         let check = |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
             let origin = req.headers().get("origin").and_then(|o| o.to_str().ok()).unwrap_or("");
@@ -239,6 +269,8 @@ impl CallHub {
             s.clients.insert(id, Client { tx: tx.clone(), video: false, audio: false });
         });
         tracing::info!(id, "browser add-on connected");
+        // Writer task: moves this tab's outbox onto the connection. Kept separate
+        // from reading so a slow send never holds up incoming messages.
         let writer = tokio::spawn(async move {
             while let Some(m) = rx.recv().await {
                 if sink.send(m).await.is_err() {
@@ -246,10 +278,13 @@ impl CallHub {
                 }
             }
         });
+        // Reader loop: the tab tells us what it wants. Non-text messages are ignored.
         while let Some(msg) = source.next().await {
             let Message::Text(text) = msg? else { continue };
             match serde_json::from_str::<BridgeMsg>(text.as_str()) {
                 Ok(BridgeMsg::Want { video, audio }) => {
+                    // Work out whether video is NEWLY wanted before applying the change, so a
+                    // keyframe is asked for only at the moment it switches on.
                     let newly = {
                         let s = self.state.lock().expect("calls");
                         s.clients.get(&id).is_some_and(|c| video && !c.video)
@@ -265,10 +300,12 @@ impl CallHub {
                         self.keyframe.notify_one();
                     }
                 }
+                // The tab's decoder lost its place and asks for a complete picture.
                 Ok(BridgeMsg::Keyframe) => self.keyframe.notify_one(),
                 _ => {}
             }
         }
+        // Tab closed: stop its writer task as well.
         writer.abort();
         tracing::info!(id, "browser add-on disconnected");
         Ok(())
