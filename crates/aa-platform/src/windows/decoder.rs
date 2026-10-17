@@ -95,7 +95,12 @@ unsafe fn find_decoder(codec: Codec) -> Result<IMFTransform> {
         let mut count = 0u32;
         MFTEnumEx(
             MFT_CATEGORY_VIDEO_DECODER,
-            MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+            // Store codecs too: Microsoft's HEVC Video Extensions come from
+            // the Store, and without this flag the PC never found them and
+            // fell back to H.264 (seen in the owner's viewer.log, 0.5.1).
+            MFT_ENUM_FLAG_SYNCMFT
+                | MFT_ENUM_FLAG_SORTANDFILTER
+                | windows::Win32::Media::MediaFoundation::MFT_ENUM_FLAG_UNTRUSTED_STOREMFT,
             Some(&input),
             None,
             &mut list,

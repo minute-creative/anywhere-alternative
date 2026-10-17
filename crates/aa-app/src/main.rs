@@ -768,8 +768,10 @@ impl App {
         }
         self.last_poll = Instant::now();
         self.handle_bg();
-        // Windows service installing an update: close; it reopens us.
-        if cfg!(target_os = "windows") && self.service_on && aa_platform::update::marker::running().exists() {
+        // Windows service installing an update: close; it reopens us. A note
+        // older than ten minutes is from an update that never finished (0.5.3:
+        // the app then closed itself every time it opened): ignore it.
+        if cfg!(target_os = "windows") && self.service_on && update_in_progress() {
             aa_platform::update::note(&aa_platform::update::marker::relaunch(), true);
             self.quit_for_update();
             return;
@@ -1978,6 +1980,13 @@ fn spawn_discovery(found: Arc<Mutex<Vec<Found>>>, ctx: egui::Context) {
 
 fn main() -> eframe::Result {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    // If the app ever crashes, leave the reason where the owner can find it.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let note = format!("{}: the app crashed: {info}\n", aa_platform::update::current());
+        let _ = std::fs::write(procs::data_dir().join("app-crash.log"), note);
+        default_hook(info);
+    }));
     let icon = aa_platform::clipboard::png_to_rgba(include_bytes!("../../../assets/icon-256.png"))
         .map(|(width, height, rgba)| egui::IconData { rgba, width, height });
     let mut viewport = egui::ViewportBuilder::default()
@@ -2018,6 +2027,20 @@ impl App {
             }
         }
     }
+}
+
+/// Is the always-on service installing an update right now?
+fn update_in_progress() -> bool {
+    let marker = aa_platform::update::marker::running();
+    let Ok(age) = std::fs::metadata(&marker).and_then(|m| m.modified()).map(|t| t.elapsed().unwrap_or_default()) else {
+        return false;
+    };
+    if age > Duration::from_secs(600) {
+        let _ = std::fs::remove_file(&marker);
+        tracing::warn!("an update note was left behind by an update that didn't finish; ignoring it");
+        return false;
+    }
+    true
 }
 
 /// Why we won't connect to a computer that answered without a key.

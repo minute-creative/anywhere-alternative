@@ -92,7 +92,9 @@ end;
 
 function WantAddons: Boolean;
 begin
-  Result := AddonList('') <> '';
+  // Not during automatic (silent) updates: the add-on downloads can wait for
+  // a question nobody sees, and the update then never finishes (0.5.3).
+  Result := (AddonList('') <> '') and not WizardSilent;
 end;
 
 function Relaunch: Boolean;
