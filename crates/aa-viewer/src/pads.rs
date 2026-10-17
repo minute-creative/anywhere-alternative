@@ -13,7 +13,14 @@
 //!
 //! Why the whole state rather than individual button events: a lost UDP
 //! packet would otherwise leave a button stuck down. With snapshots the
-//! next one simply corrects it.
+//! next one simply corrects it. The state is also repeated every 100 ms
+//! while nothing changes, so a lost "button released" can't leave the
+//! button held on the host while the controller sits still.
+//!
+//! In plain words: this file finds controllers plugged into (or paired
+//! with) this computer and keeps the other computer's virtual controllers
+//! in step with them. DualSense pads may instead be read raw by `ds5.rs`
+//! (for rumble, triggers and the touchpad); those are skipped here.
 
 use aa_core::input::GamepadKind;
 
@@ -86,6 +93,9 @@ mod real {
     use super::{kind_of, SlotTable};
     use crate::link::ViewerCommand;
 
+    /// Repeat an unchanged controller state this often (see the file notes).
+    const REPEAT_MS: u64 = 100;
+
     #[allow(clippy::cast_possible_truncation)]
     fn stick(v: f32) -> i16 {
         (v.clamp(-1.0, 1.0) * 32767.0) as i16
@@ -143,7 +153,8 @@ mod real {
             // Unplug notices still being repeated, with when they started.
             let mut leaving: Vec<(u8, Instant)> = Vec::new();
             let mut last_announce = Instant::now();
-            let mut last: HashMap<GamepadId, GamepadState> = HashMap::new();
+            // What each controller last sent, and when (for the repeat).
+            let mut last: HashMap<GamepadId, (GamepadState, Instant)> = HashMap::new();
             let send = |ev: InputEvent| commands.blocking_send(ViewerCommand::Input(ev)).is_ok();
             // Controllers already connected at start count as new arrivals.
             let present: Vec<GamepadId> = gilrs.gamepads().map(|(id, _)| id).collect();
@@ -225,13 +236,20 @@ mod real {
                         continue;
                     };
                     let state = snapshot(&gilrs.gamepad(id));
-                    if last.get(&id) != Some(&state) {
-                        last.insert(id, state);
-                        // Newest state wins; if the queue is full the next one corrects it.
-                        if commands.try_send(ViewerCommand::Input(InputEvent::Gamepad { slot, state })).is_err()
-                            && commands.is_closed()
-                        {
-                            return;
+                    let due = last
+                        .get(&id)
+                        .map_or(true, |(prev, at)| *prev != state || at.elapsed() >= Duration::from_millis(REPEAT_MS));
+                    if due {
+                        match commands.try_send(ViewerCommand::Input(InputEvent::Gamepad { slot, state })) {
+                            Ok(()) => {
+                                last.insert(id, (state, Instant::now()));
+                            }
+                            // Queue full: leave `last` alone so the next pass
+                            // tries again. (Before 0.5.8 `last` was updated
+                            // first, so a state that didn't fit in the queue
+                            // was never sent: a release could be lost for good.)
+                            Err(mpsc::error::TrySendError::Full(_)) => {}
+                            Err(mpsc::error::TrySendError::Closed(_)) => return,
                         }
                     }
                 }

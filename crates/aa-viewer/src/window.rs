@@ -6,9 +6,21 @@
 //! frame is drawn on the next display refresh and never torn, which is the
 //! "locked to the viewer's refresh rate" rule from the architecture doc.
 //!
-//! This commit uploads CPU frames (`FrameBuffer::Cpu`) through
-//! `queue.write_texture`. The zero-copy GPU path for real decoders replaces
-//! that one function; nothing else here changes.
+//! Decoded pictures arrive as CPU memory (`FrameBuffer::Cpu`) and are
+//! copied to the graphics card with `queue.write_texture` in [`Gpu::upload`].
+//! NV12 pictures (the decoders' usual output) go up as two textures and a
+//! small shader (`nv12.wgsl`) turns them into screen colours.
+//!
+//! In plain words: this file is the stream window. It draws each picture
+//! the decoder hands over, scaled to fit (or stretched), and turns your
+//! mouse, keyboard and scroll wheel into events for the other computer.
+//! Things worth knowing when debugging input:
+//! - Keys you hold are remembered (`held_keys`) and released on the host
+//!   when the window loses focus, so nothing stays stuck down there.
+//! - Game mouse (Ctrl/Cmd+Shift+G) captures the pointer and sends raw
+//!   movement instead of positions; games need that to turn the camera.
+//! - Cmd/Ctrl are swapped so shortcuts mean the same on both computers
+//!   (`shortcut_key` at the bottom).
 
 use std::sync::Arc;
 
@@ -827,7 +839,6 @@ impl ApplicationHandler<Wake> for App {
                 }
             }
             WindowEvent::CursorMoved { .. } if self.game_mouse => {}
-            WindowEvent::Focused(false) if self.game_mouse => self.set_game_mouse(false),
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some((x, y)) = self.rect.normalise(position.x, position.y) {
                     self.send(InputEvent::MouseMoveAbs { x, y });
@@ -896,6 +907,13 @@ impl ApplicationHandler<Wake> for App {
                 }
             }
             WindowEvent::Focused(false) => {
+                // Leaving the window ends game mouse (the pointer must be free
+                // in other apps). 0.5.8: this used to be a separate match arm
+                // that ran instead of the key release below, so a key held in
+                // a game (W to walk) stayed down on the host after Alt+Tab.
+                if self.game_mouse {
+                    self.set_game_mouse(false);
+                }
                 self.cmd_held = false;
                 // macOS does not deliver key-up for keys released while another
                 // app has focus (Cmd during Cmd+Tab is the classic). Release

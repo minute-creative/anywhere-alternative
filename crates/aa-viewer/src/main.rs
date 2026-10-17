@@ -10,6 +10,14 @@
 //! network session runs on its own tokio runtime in a background thread.
 //! `--headless` skips the window entirely and only prints statistics; CI
 //! and quick network checks use that.
+//!
+//! In plain words: this file starts the viewer. It reads the options the
+//! Anywhere app passed (which computer, picture size, frame rate, camera and
+//! microphone choices), pairs first if a code was given, starts the
+//! controller readers, then runs the connection on a background thread and
+//! the window on the main thread. If the other computer goes quiet it keeps
+//! trying to reconnect (`run_reconnecting`), looking it up again by its key
+//! in case its address changed.
 
 mod audio;
 mod camera;
@@ -310,8 +318,8 @@ type StatusFn = std::sync::Arc<dyn Fn(window::Wake) + Send + Sync>;
 
 /// Run sessions until the user quits. If the host goes quiet (asleep,
 /// crashed, Wi-Fi blip) we look for it again (it may have a new address)
-/// and reconnect, for up to two minutes, instead of freezing on the last
-/// picture.
+/// and reconnect instead of freezing on the last picture: until the window
+/// is closed, or for two minutes without a window.
 #[allow(clippy::too_many_arguments)]
 async fn run_reconnecting(
     args: &Args,
@@ -359,8 +367,12 @@ async fn run_reconnecting(
         };
         let result = session::run(opts, backends(args)?, &mut commands).await;
         if connected.load(std::sync::atomic::Ordering::Relaxed) {
-            // We were back in business; a later loss gets a fresh two minutes.
+            // We were back in business; a later loss starts afresh: a new
+            // two minutes (headless) and the short 1 s first wait again.
+            // (Before 0.5.8 `attempt` kept counting, so every loss after the
+            // first waited the full 5 s before trying.)
             lost_since = None;
+            attempt = 0;
         }
         let Err(e) = result else { return Ok(()) };
         let lost = is_host_lost(&e);
