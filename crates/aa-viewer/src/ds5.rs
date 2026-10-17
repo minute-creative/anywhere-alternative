@@ -12,6 +12,14 @@
 //! back unchanged. `gilrs` is told to leave DualSense pads alone while this
 //! reader has them (see [`RAW_ACTIVE`]).
 //!
+//! In plain words: a DualSense plugged into (or paired with) this computer
+//! is read byte for byte and its reports are sent to the other computer,
+//! which replays them on a pretend DualSense (PC: a virtual USB device;
+//! Mac: a generic virtual pad). What the game sends back (rumble, trigger
+//! resistance, lights, haptics sound) comes the other way and is written to
+//! the real controller. If the pad drops, look for "DualSense stopped
+//! answering" in viewer.log and "DualSense silent" in the host log.
+//!
 //! USB and Bluetooth both work. Over Bluetooth the controller starts in a
 //! reduced mode; reading its calibration (feature report 0x05) switches it
 //! to full reports, which we convert to USB layout (and outputs back to
@@ -313,7 +321,10 @@ mod real {
             let n = match dev.read_timeout(&mut buf, 2) {
                 Ok(n) => n,
                 Err(e) => {
-                    tracing::debug!("DualSense read ended: {e}");
+                    // Info, not debug: when a controller keeps dropping, this
+                    // line in viewer.log is the reason (0.5.8: the owner's pad
+                    // dropped every 10-40 s on a Mac host and the log was silent).
+                    tracing::warn!(slot, bluetooth = bt, "DualSense stopped answering: {e}");
                     return;
                 }
             };

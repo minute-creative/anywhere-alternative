@@ -6,6 +6,14 @@
 //! buffering because a late sample is an audible click, unlike a late video
 //! frame which just gets skipped. The buffer is adaptive: it starts at
 //! 60 ms and grows only when the link actually makes it run dry.
+//!
+//! In plain words: sound is squeezed with Opus (the codec most calling
+//! apps use) into 10 ms pieces. The receiving side turns them back into
+//! sound, fills in a lost piece from a spare copy carried in the next one,
+//! and keeps a small reserve so a late piece doesn't click. [`Player`],
+//! [`Mic`] and [`PadSpeaker`] follow device changes by themselves (new
+//! headphones, a controller plugged in); `transient` decides which audio
+//! errors are mere glitches and which mean the device is gone.
 
 use aa_core::audio::{CHANNELS, FRAME_SAMPLES, SAMPLE_RATE};
 
@@ -425,7 +433,14 @@ mod player {
                             }
                         }
                     },
-                    move |e| {
+                    move |e: cpal::Error| {
+                        // Same rule as the speakers and microphone: a glitch
+                        // is not an unplugged controller (0.5.8; before, one
+                        // glitch closed the controller's sound for 5 s).
+                        if transient(&e) {
+                            tracing::debug!("DualSense audio glitch, carrying on: {e}");
+                            return;
+                        }
                         tracing::warn!("DualSense audio error: {e}");
                         b.store(true, Ordering::Relaxed);
                     },

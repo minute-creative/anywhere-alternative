@@ -14,6 +14,12 @@
 //! that folder when "share after a restart" is switched on.
 //!
 //! `AA_DATA_DIR` moves everything (tests, two copies on one machine).
+//!
+//! In plain words: pairing means "remember the other computer's public
+//! key". These files are that memory. Delete `paired-*.json` and the
+//! computers must pair again; delete a `.key` file and this computer
+//! becomes a stranger to everyone it paired with (uninstalling Anywhere does
+//! that, which is why updating over the old version is better).
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -80,7 +86,10 @@ fn writable(dir: &Path) -> bool {
 /// Write a file only this user (and, in the shared Mac folder, the
 /// administrators group) can read.
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    // The temporary name includes the process id: the app, the viewer and
+    // the host may all save the same file at once, and a shared temporary
+    // name let one program rename another's half-written file into place.
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     std::fs::write(&tmp, bytes)?;
     #[cfg(unix)]
     {
@@ -96,10 +105,23 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// Read this computer's key, making one the first time.
+///
+/// A key that exists but can't be read right now (permissions, the disk
+/// busy) is never replaced: replacing it would make every paired computer
+/// see a stranger. In that case a throw-away key is used for this run only.
 fn load_identity(path: &Path) -> Identity {
-    if let Ok(b) = std::fs::read(path) {
-        if let Ok(secret) = <[u8; 32]>::try_from(b.as_slice()) {
-            return Identity::from_secret(secret);
+    match std::fs::read(path) {
+        Ok(b) => {
+            if let Ok(secret) = <[u8; 32]>::try_from(b.as_slice()) {
+                return Identity::from_secret(secret);
+            }
+            tracing::warn!("{} is damaged; making a new key (computers must pair again)", path.display());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!("can't read this computer's key at {} ({e}); using a temporary one", path.display());
+            return Identity::generate();
         }
     }
     let id = Identity::generate();
@@ -282,6 +304,9 @@ pub fn add_paired_viewer(name: &str, key: &PublicKeyBytes) {
     let full_access = list.iter().any(|v| v.key == hex && v.full_access);
     list.retain(|v| v.key != hex);
     // Same computer re-paired with a new identity: forget the old one.
+    // Trade-off: two different computers with exactly the same name can't
+    // both stay paired; the newer pairing wins (the owner preferred that to
+    // stale "not answering" entries, 0.5.6).
     if !name.is_empty() {
         list.retain(|v| v.name != name);
     }

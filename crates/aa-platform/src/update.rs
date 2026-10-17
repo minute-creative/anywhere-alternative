@@ -115,8 +115,9 @@ pub mod marker {
     use std::path::PathBuf;
 
     /// App → service: "a newer version exists and nobody is connected; please
-    /// install it" (the service fetches it from GitHub itself; the file's
-    /// content is ignored).
+    /// install it" (the service fetches it from GitHub itself). Empty, or
+    /// "force <version>" when the person pressed Update now: then the
+    /// service installs even while someone is connected (0.5.6).
     pub fn request() -> PathBuf {
         crate::trust::system_dir().join("update-request")
     }

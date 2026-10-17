@@ -14,6 +14,17 @@
 //! screen, the user's desktop, a security prompt) for capture and input.
 //! When someone signs in or out, the service makes sure exactly one host
 //! runs in the session on the screen.
+//!
+//! The same service also installs updates (`update_now`): when the app
+//! leaves an `update-request` note in `C:\ProgramData\AnywhereAlternative`,
+//! or by itself every six hours, but never while someone is connected
+//! unless the note says "force" (the app's Update now button).
+//!
+//! In plain words: the always-on service is a babysitter. Every second it
+//! checks that one copy of `aa-host` is running for whoever is on the
+//! screen (or the sign-in screen), restarts it if it stopped, and runs the
+//! installer when an update is due. Its diary is `service-supervisor.log`;
+//! the host it starts writes `service.log`.
 
 // FFI code: `unsafe` is the point here, each block carries a SAFETY note.
 #![allow(unsafe_code, clippy::pedantic)]
@@ -282,7 +293,14 @@ fn update_now(child: &mut Option<Child>, stop_file: &std::path::Path) -> anyhow:
         // SAFETY: closing our own handle once.
         let _ = unsafe { CloseHandle(c.process) };
     }
-    std::process::Command::new(&setup).args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"]).spawn()?;
+    if let Err(e) =
+        std::process::Command::new(&setup).args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"]).spawn()
+    {
+        // Take back "installing now": the app would otherwise wait for an
+        // install that never comes. The loop restarts the host next pass.
+        let _ = std::fs::remove_file(crate::update::marker::running());
+        return Err(anyhow::anyhow!("could not start the installer: {e}"));
+    }
     Ok(true)
 }
 
