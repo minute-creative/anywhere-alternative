@@ -2005,11 +2005,20 @@ impl App {
     /// one (started before the files changed). A Mac can restart it by
     /// itself; on Windows we say what to do.
     fn check_stale_service(&mut self) {
+        static RESTARTED_UNKNOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !self.service_on || self.stale_check_at.elapsed() < Duration::from_secs(30) {
             return;
         }
         self.stale_check_at = Instant::now();
-        let Some(running) = service::running_version() else { return };
+        // No version note at all: a sharing process from before notes
+        // existed (pre-0.4.8) is still running — the owner's Mac ran one for
+        // weeks, answering "older Anywhere" to the PC. Restart it once.
+        let Some(running) = service::running_version() else {
+            if !RESTARTED_UNKNOWN.swap(true, std::sync::atomic::Ordering::Relaxed) && service::restart().is_ok() {
+                tracing::info!("restarted an always-on host too old to report its version");
+            }
+            return;
+        };
         if running == aa_platform::update::current() {
             self.stale_service = None;
             return;

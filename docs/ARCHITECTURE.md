@@ -619,6 +619,17 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   restarted and its "update running" note stayed. The app closed itself on
   every start to make way for an installer that wasn't coming. Now: no
   add-ons in silent installs, and the app ignores a note older than 10 min.
+- **"No version note" is itself a stale host** (0.5.4 testing): the Mac's
+  always-on host had run since before 0.4 (no key, name = `gethostname` =
+  "192.168.1.9"). The app only restarted hosts whose version note differed,
+  and that host never wrote one, so updates never replaced it. Now a missing
+  note triggers one restart. `launchctl kickstart -k gui/$(id -u)/
+  com.minutecreative.anywhere.host` fixes it by hand.
+- **Offer the screen's fastest mode, not its current one** (0.5.4 testing):
+  the PC's sharing started while the laptop screen sat at 60 Hz (battery /
+  dynamic refresh) and kept offering 60 fps after it went back to 120. A
+  200 Hz Mac asking for 144 got 60. The host now offers the highest refresh
+  the screen lists at its resolution.
 
 ## 10. Measured so far
 
