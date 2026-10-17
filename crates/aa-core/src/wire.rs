@@ -524,6 +524,8 @@ impl Reassembler {
     /// A frame whose packets stopped arriving this long ago has a gap
     /// worth asking about (the host sends a frame as one burst).
     const QUIET_MS: u64 = 2;
+    /// …but never wait longer than this for a stalled frame's tail.
+    const QUIET_MAX_MS: u64 = 15;
     /// Give up asking after this many tries.
     const MAX_REQUESTS: u8 = 3;
 
@@ -686,7 +688,13 @@ impl Reassembler {
             }
             let later_frame_seen =
                 newest.is_some_and(|n| is_newer(n, id)) || newest_held.is_some_and(|n| is_newer(n, id));
-            let quiet = now_ms.saturating_sub(pf.last_packet_ms) >= Self::QUIET_MS;
+            // "Quiet" scales with the round trip: on Wi-Fi a frame's packets
+            // often pause for several ms (radio airtime). With a fixed 2 ms
+            // the PC asked the Mac for ~5,000 packets a second that were
+            // merely late — 0% real loss — and the duplicates pushed the
+            // stream from 80 to 140 Mbit/s and smeared the picture (0.5.4).
+            let quiet_after = self.rtt_ms.clamp(Self::QUIET_MS, Self::QUIET_MAX_MS);
+            let quiet = now_ms.saturating_sub(pf.last_packet_ms) >= quiet_after;
             if !(later_frame_seen || quiet) {
                 continue;
             }
