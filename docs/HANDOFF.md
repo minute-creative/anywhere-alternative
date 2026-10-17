@@ -239,6 +239,24 @@ Everything else (all simulated end to end, see ARCHITECTURE §10):
 Their answers so far: PC refresh supports 120 Hz+; colours "washed out /
 grey"; want all accessories (mic, headphones, controllers, other USB).
 
+## 0.5.5 (2026-10-17): first round of the full test checklist
+
+Owner tests from a checklist page (claude.ai artifact, results in its
+database collection "results"; read them with ArtifactData). Found and fixed:
+- Mac's always-on host was pre-0.4 code (no key, name "192.168.1.9"): PC
+  said "older Anywhere". Restarted by hand; app now restarts a host with no
+  version note.
+- PC offered 60 fps after starting at 60 Hz: now offers the screen's max.
+- PC mic reopened every second on a cpal Xrun: glitches no longer reopen.
+- PC viewer still H.264 with the Store HEVC extension installed: 0.5.5
+  logs the reason and every HEVC decoder Windows lists (viewer.log) — read
+  it and fix next.
+Open: Elden Ring camera spins when played from the Mac (viewer only sends
+absolute mouse; games re-centre the cursor → needs relative "game mouse"
+mode); the Mac's DualSense drops and re-attaches every 10–40 s (ask for
+the Mac's viewer.log lines); ~1 in 20 frames dropped PC watching Mac;
+the app opens a second copy if launched again (no single-instance).
+
 ## The app and releases (2026-10-08)
 
 People now install **Anywhere** instead of running cargo: `crates/aa-app`

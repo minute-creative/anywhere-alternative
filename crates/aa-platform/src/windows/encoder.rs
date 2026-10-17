@@ -188,7 +188,7 @@ pub fn list_hardware_encoders(codec: HwCodec) -> Vec<String> {
     names
 }
 
-fn friendly_name(act: &IMFActivate) -> String {
+pub(crate) fn friendly_name(act: &IMFActivate) -> String {
     use windows::Win32::Media::MediaFoundation::MFT_FRIENDLY_NAME_Attribute;
     // SAFETY: GetAllocatedString allocates with CoTaskMem; we copy then free.
     unsafe {

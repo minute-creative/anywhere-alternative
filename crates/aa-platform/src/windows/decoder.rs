@@ -501,8 +501,49 @@ pub fn available_codecs() -> Vec<Codec> {
                 // Say why: 0.5.4's PC watched in H.264 although the Store
                 // HEVC extension was installed, and the log didn't tell.
                 tracing::warn!(codec = ?c, "decoder won't open: {e}");
+                if *c == Codec::Hevc {
+                    log_hevc_decoders();
+                }
                 false
             }
         })
         .collect()
+}
+
+/// Every HEVC decoder Windows lists, by kind, for the log: tells whether
+/// only the graphics driver's (hardware, asynchronous) one exists, which
+/// this decoder cannot drive yet.
+fn log_hevc_decoders() {
+    use windows::Win32::Media::MediaFoundation::{
+        IMFActivate, MFMediaType_Video, MFT_ENUM_FLAG, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
+        MFT_ENUM_FLAG_UNTRUSTED_STOREMFT, MFT_REGISTER_TYPE_INFO,
+    };
+    let kinds: [(&str, MFT_ENUM_FLAG); 3] = [
+        ("sync", MFT_ENUM_FLAG_SYNCMFT),
+        ("sync-store", MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_UNTRUSTED_STOREMFT),
+        ("hardware-async", MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_UNTRUSTED_STOREMFT),
+    ];
+    for (kind, flags) in kinds {
+        // SAFETY: standard MF enumeration; the array is CoTaskMem we free.
+        let names: Vec<String> = unsafe {
+            let input = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_HEVC };
+            let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
+            let mut count = 0u32;
+            if MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, flags, Some(&input), None, &mut list, &mut count).is_err()
+                || list.is_null()
+            {
+                Vec::new()
+            } else {
+                let mut out = Vec::new();
+                for i in 0..count as usize {
+                    if let Some(a) = (*list.add(i)).take() {
+                        out.push(super::encoder::friendly_name(&a));
+                    }
+                }
+                CoTaskMemFree(Some(list.cast()));
+                out
+            }
+        };
+        tracing::warn!(kind, ?names, "HEVC decoders Windows lists");
+    }
 }
