@@ -20,7 +20,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 # The app window: egui on the same wgpu the viewer uses.
-eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "glow", "default_fonts", "x11", "wayland"] }
 
 [build-dependencies]
 # Windows icon resource (does nothing on other systems).

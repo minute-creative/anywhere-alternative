@@ -1922,7 +1922,7 @@ impl eframe::App for App {
         ui.ctx().request_repaint_after(Duration::from_millis(500));
     }
 
-    fn on_exit(&mut self) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.settings.save();
         if let Some(h) = self.host.as_mut() {
             h.stop();
@@ -2011,8 +2011,22 @@ fn main() -> eframe::Result {
     if let Some(i) = icon {
         viewport = viewport.with_icon(i);
     }
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
-    eframe::run_native("Anywhere", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+    // Windows: draw with OpenGL. On the owner's Intel Arc PC the wgpu
+    // renderer crashed the app ("Failed to create staging buffer", 0.5.4)
+    // while the full-screen viewer held the graphics card, and the window
+    // flickered on mouse moves. The viewer keeps wgpu; this window is plain.
+    let renderer = if cfg!(target_os = "windows") { eframe::Renderer::Glow } else { eframe::Renderer::Wgpu };
+    let options = eframe::NativeOptions { viewport: viewport.clone(), renderer, ..Default::default() };
+    match eframe::run_native("Anywhere", options, Box::new(|cc| Ok(Box::new(App::new(cc))))) {
+        // No usable OpenGL (old or missing driver): fall back to wgpu
+        // rather than not opening at all.
+        Err(e) if renderer == eframe::Renderer::Glow => {
+            tracing::warn!("OpenGL window failed ({e}); using wgpu");
+            let options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Wgpu, ..Default::default() };
+            eframe::run_native("Anywhere", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+        }
+        r => r,
+    }
 }
 
 impl App {
