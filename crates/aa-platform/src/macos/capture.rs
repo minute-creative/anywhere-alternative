@@ -27,7 +27,7 @@ use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{
-    CGDisplayCopyDisplayMode, CGDisplayMode, CGMainDisplayID, CGPreflightScreenCaptureAccess,
+    kCGColorSpaceSRGB, CGDisplayCopyDisplayMode, CGDisplayMode, CGMainDisplayID, CGPreflightScreenCaptureAccess,
     CGRequestScreenCaptureAccess,
 };
 use objc2_core_media::{CMSampleBuffer, CMTime};
@@ -348,6 +348,10 @@ impl SckCapture {
             config.setHeight(h);
             config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
             config.setColorMatrix(kCVImageBufferYCbCrMatrix_ITU_R_709_2);
+            // Colours in sRGB, what the other computer's screen shows. Without
+            // this the Mac's own display profile (Display P3, a monitor's
+            // profile) went out and the PC showed different colours (0.5.4).
+            config.setColorSpaceName(kCGColorSpaceSRGB);
             config.setMinimumFrameInterval(CMTime::new(1, i32::from(refresh_hz)));
             // No cursor in the picture: the viewer shows its own pointer,
             // which never lags. A drawn-in cursor trailed it on every fast
@@ -411,6 +415,10 @@ impl SckCapture {
             config.setHeight(h);
             config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
             config.setColorMatrix(kCVImageBufferYCbCrMatrix_ITU_R_709_2);
+            // Colours in sRGB, what the other computer's screen shows. Without
+            // this the Mac's own display profile (Display P3, a monitor's
+            // profile) went out and the PC showed different colours (0.5.4).
+            config.setColorSpaceName(kCGColorSpaceSRGB);
             config.setMinimumFrameInterval(CMTime::new(1, i32::from(self.refresh_hz)));
             config.setShowsCursor(false);
             config.setQueueDepth(4);

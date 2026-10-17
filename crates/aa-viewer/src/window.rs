@@ -143,6 +143,17 @@ impl Gpu {
         // Latency: don't let the swapchain queue frames behind our back.
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
+        // Mac: say the picture is sRGB, so macOS shows the same colours the
+        // other computer's screen does (it otherwise skipped colour matching).
+        #[cfg(target_os = "macos")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(h) = window.window_handle() {
+                if let RawWindowHandle::AppKit(a) = h.as_raw() {
+                    aa_platform::macos::show_view_as_srgb(a.ns_view);
+                }
+            }
+        }
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

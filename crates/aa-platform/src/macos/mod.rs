@@ -169,3 +169,47 @@ pub fn viewer_backends() -> Result<ViewerBackends> {
     });
     Ok(ViewerBackends { decoder, clipboard: crate::clipboard::system(), capabilities })
 }
+
+/// Show a window's pictures as sRGB. The stream is sRGB (both hosts send
+/// that); a Metal layer with no colour space hands the numbers to the
+/// monitor as-is, so on a wide-gamut or profiled monitor the Mac showed the
+/// PC in different colours than the PC itself (0.5.4). `ns_view` is the
+/// window's `NSView`; wgpu's Metal layer is its layer or one of its
+/// sublayers, so every layer that takes a colour space gets sRGB.
+#[allow(unsafe_code)]
+pub fn show_view_as_srgb(ns_view: std::ptr::NonNull<std::ffi::c_void>) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2_core_graphics::{kCGColorSpaceSRGB, CGColorSpace};
+    // SAFETY: `ns_view` is a live NSView from winit, used on the main thread;
+    // every message is checked with respondsToSelector first.
+    unsafe {
+        let Some(space) = CGColorSpace::with_name(Some(kCGColorSpaceSRGB)) else { return };
+        let space: *const CGColorSpace = &*space;
+        let view: &AnyObject = ns_view.cast::<AnyObject>().as_ref();
+        let layer: *mut AnyObject = msg_send![view, layer];
+        let Some(layer) = layer.as_ref() else { return };
+        let set = objc2::sel!(setColorspace:);
+        let tag = |l: &AnyObject| {
+            let ok: Bool = msg_send![l, respondsToSelector: set];
+            if ok.as_bool() {
+                let _: () = msg_send![l, setColorspace: space];
+                true
+            } else {
+                false
+            }
+        };
+        let mut tagged = tag(layer);
+        let subs: *mut AnyObject = msg_send![layer, sublayers];
+        if let Some(subs) = subs.as_ref() {
+            let n: usize = msg_send![subs, count];
+            for i in 0..n {
+                let l: *mut AnyObject = msg_send![subs, objectAtIndex: i];
+                if let Some(l) = l.as_ref() {
+                    tagged |= tag(l);
+                }
+            }
+        }
+        tracing::info!(tagged, "viewer window shows colours as sRGB");
+    }
+}
