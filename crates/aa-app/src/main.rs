@@ -14,6 +14,22 @@
 //! (`aa-host`, `aa-viewer`), so this window is only a remote control and
 //! costs next to nothing while a game streams: it redraws twice a second
 //! at most, and reads only the end of the log files.
+//!
+//! In plain words, how this file is laid out:
+//! - Look (colours, fonts, buttons), then `Settings` (saved to
+//!   `settings.json`) and `read_status`, which reads the host's log to know
+//!   who is connected and what went wrong.
+//! - `App`: everything the window remembers. `poll` runs twice a second and
+//!   does the housekeeping (logs, updates, checks); slow work (pairing,
+//!   installing, updating, checks) runs on other threads through `spawn`
+//!   and comes back as a `Bg` message, because anything slow on the
+//!   window's own thread makes the window blink or freeze.
+//! - One function per page (`connect_page`, `share_page`, …), drawn top to
+//!   bottom, then `main` at the end (single-copy check, crash log, renderer
+//!   choice).
+//!
+//! Debugging: the app writes `app-crash.log` if it crashes; the engines
+//! write `host.log` and `viewer.log` in the same folder.
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -298,8 +314,14 @@ impl Settings {
         std::fs::read(Self::path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
     }
     fn save(&self) {
+        // Write a temporary file, then rename it into place: a crash or full
+        // disk mid-write can't leave half a file, which would silently put
+        // every setting back to its default on the next start.
         if let Ok(b) = serde_json::to_vec_pretty(self) {
-            let _ = std::fs::write(Self::path(), b);
+            let tmp = Self::path().with_extension("json.tmp");
+            if std::fs::write(&tmp, b).is_ok() {
+                let _ = std::fs::rename(&tmp, Self::path());
+            }
         }
     }
     fn viewer_prefs(&self) -> procs::ViewerPrefs {
@@ -897,7 +919,9 @@ impl App {
             });
         });
         ui.add_space(22.0);
-        let missing = self.checks.iter().filter(|c| !c.ok).count();
+        // Same rule as the "Install what's missing" card: HEVC alone never
+        // lights the dot (Microsoft may refuse it to this PC for good).
+        let missing = self.missing_addons();
         for (page, label, badge) in [
             (Page::Connect, "Connect", None),
             (Page::Share, "Share", (self.host.is_some() || self.service_on).then_some(("ON", GOOD))),
@@ -1975,8 +1999,6 @@ impl eframe::App for App {
     }
 }
 
-/// Keep the list of sharing computers fresh (every 3 s), leaving out this
-/// computer itself.
 /// Keep the lists of cameras and microphones up to date (one gets plugged in).
 fn spawn_device_lister(list: Arc<Mutex<(Vec<String>, Vec<String>)>>, ctx: egui::Context) {
     let _ = std::thread::Builder::new().name("device-list".into()).spawn(move || loop {
@@ -2005,6 +2027,8 @@ fn spawn_share_lister(list: Arc<Mutex<Vec<aa_core::share::ShareTarget>>>, ctx: e
     });
 }
 
+/// Keep the list of sharing computers fresh (every 3 s), leaving out this
+/// computer itself.
 fn spawn_discovery(found: Arc<Mutex<Vec<Found>>>, ctx: egui::Context) {
     let _ = std::thread::Builder::new().name("discovery".into()).spawn(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
@@ -2093,7 +2117,10 @@ impl App {
             }
             return;
         };
-        if running == aa_platform::update::current() {
+        // Only an older sharing process needs restarting. A newer one means
+        // this window is the old copy (it will update itself); restarting the
+        // service then would only repeat every 30 s and change nothing.
+        if !aa_platform::update::is_newer(aa_platform::update::current(), &running) {
             self.stale_service = None;
             return;
         }

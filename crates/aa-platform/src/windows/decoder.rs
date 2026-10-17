@@ -13,6 +13,12 @@
 //! If the GPU path can't be set up, the same Windows decoder runs on the
 //! processor (still multi-threaded and much faster than OpenH264); if even
 //! that is missing, the caller falls back to OpenH264.
+//!
+//! In plain words: Windows has decoders built in (H.264 always, HEVC with
+//! Microsoft's add-on). This file finds one, hands it each compressed frame
+//! and copies the finished picture out. "decoder won't open" in viewer.log
+//! with a list of "HEVC decoders Windows lists" explains why a PC fell back
+//! to H.264.
 
 #![allow(unsafe_code, clippy::pedantic)]
 
@@ -432,7 +438,6 @@ impl MfDecoder {
     }
 }
 
-/// Which codecs this PC can decode in hardware-assisted Media Foundation.
 /// Is any HEVC decoder registered with Windows (the Store's HEVC Video
 /// Extensions, or one from the graphics driver)? Only lists them, opens
 /// nothing: cheap enough to ask now and then without stalling anything.
@@ -502,6 +507,9 @@ fn hevc_package_installed() -> bool {
     }
 }
 
+/// Which codecs this PC can decode with Media Foundation, best first. Each
+/// is checked by really opening a decoder, so call it once per connection,
+/// never on the app's window thread.
 pub fn available_codecs() -> Vec<Codec> {
     [Codec::Hevc, Codec::H264]
         .into_iter()
