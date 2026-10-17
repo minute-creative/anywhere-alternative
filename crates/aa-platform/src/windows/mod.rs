@@ -471,12 +471,12 @@ pub fn app_already_open(title: &str) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE};
     let name: Vec<u16> = "Local\\AnywhereAlternativeApp".encode_utf16().chain([0]).collect();
     // SAFETY: plain Win32 calls with NUL-terminated strings that outlive them.
-    // The mutex handle is kept open (leaked) for the life of the process.
+    // The mutex handle stays open for the life of the process.
     #[allow(unsafe_code)]
     unsafe {
         let Ok(handle) = CreateMutexW(None, false, PCWSTR(name.as_ptr())) else { return false };
         if GetLastError() != ERROR_ALREADY_EXISTS {
-            std::mem::forget(handle);
+            let _ = handle; // never closed: it marks this copy as the open one
             return false;
         }
         let t: Vec<u16> = title.encode_utf16().chain([0]).collect();
