@@ -139,6 +139,7 @@ mod real {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // one reader loop: plug, unplug, hand-over, state
     pub fn spawn(commands: mpsc::Sender<ViewerCommand>) {
         let _ = std::thread::Builder::new().name("aa-pads".into()).spawn(move || {
             let mut gilrs = match Gilrs::new() {
