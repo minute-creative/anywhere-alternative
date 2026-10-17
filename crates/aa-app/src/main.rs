@@ -342,6 +342,12 @@ fn read_status(lines: &[String]) -> HostStatus {
         } else if l.contains("viewer left") || l.contains("viewer timed out") {
             s.viewer = None;
         }
+        // Problems belong to a session: once it ends (or a new one starts)
+        // they are history, not something to keep showing (they stayed up
+        // for hours after the host had already recovered).
+        if l.contains("viewer connected") || l.contains("viewer left") || l.contains("viewer timed out") {
+            s.warnings.clear();
+        }
         if l.contains(" WARN ") || l.contains(" ERROR ") {
             let p = procs::plain(l).trim_start_matches("⚠ ").to_owned();
             // The same problem with a new count ("encode_failures=2") is one
