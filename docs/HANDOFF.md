@@ -271,6 +271,43 @@ the app opens a second copy if launched again (no single-instance).
   that user's background session (Apple Screen Sharing "log in as
   yourself"); unknown is input routing (CGEventPost targets the console).
 
+## 0.5.8 (2026-10-17): code review, comments, real bugs
+Owner asked for a full pass over syntax, logic, architecture and comments
+so anyone can debug and change the code. Every file now opens with a
+plain-language note; `docs/CODE-GUIDE.md` is the map. Bugs found and fixed:
+- **Smear after a lost frame (the big one).** A frame whose packets were
+  all lost, or one the host dropped while its network side was busy, left
+  no trace on the viewer: the next frame decoded on a missing reference
+  and the picture smeared until a keyframe happened to come. Also a race
+  let the decoder clear the "need keyframe" flag right after the network
+  loop set it. Now the decode thread checks the frame numbers itself (the
+  host numbers every encoded frame) and waits for a keyframe or repair
+  frame after any gap. Mock test at 15% loss: decoder errors went from 5–7
+  per run to 0; the `dropped` figure now counts these frames. Likely part
+  of the owner's "pixelated / not accurate" report: ask after 0.5.8.
+- Keys stayed held on the host after Alt+Tab away from game mouse (the
+  game-mouse focus handler skipped the key release).
+- A controller "button released" could be lost for good (queue full, or a
+  lost packet while the pad sat still): states now repeat every 100 ms.
+- DualSense sound glitches closed its speaker/haptics for 5 s; a viewer's
+  DualSense dropping now logs why ("DualSense stopped answering" in
+  viewer.log) — ask the owner for that line for the Mac drop issue.
+- Reconnect waited 5 s after every drop after the first (backoff never
+  reset).
+- A key file that existed but couldn't be read was replaced (computers
+  would need to pair again); now a temporary key is used for that run.
+- Two programs saving the same file could rename each other's half-written
+  copy into place (shared temporary name).
+- The app restarted a sharing process every 30 s when the service was
+  *newer* than the app; Extras dot lit forever for HEVC alone; settings
+  could be lost to a half-written file.
+- Windows service: a failed installer start left "update running" behind.
+- Host: a viewer reconnecting from a new port now releases the old
+  connection's keys and restores the speakers.
+Open from before: DualSense drop on the Mac (need the new log line), Mac
+window not reopening from the Dock, softness from 1.5x scaling, "share one
+app" real test, confirm HEVC on the PC.
+
 ## The app and releases (2026-10-08)
 
 People now install **Anywhere** instead of running cargo: `crates/aa-app`

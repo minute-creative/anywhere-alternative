@@ -630,6 +630,15 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   dynamic refresh) and kept offering 60 fps after it went back to 120. A
   200 Hz Mac asking for 144 got 60. The host now offers the highest refresh
   the screen lists at its resolution.
+- **A frame can vanish without a trace** (0.5.8 review): when every packet
+  of a small frame is lost, the reassembler never hears of it, and when the
+  host drops an encoded frame (network side busy) it never leaves. In-order
+  delivery then hands over the next frame as if nothing happened and the
+  decoder builds on a picture it never saw (smear until a keyframe). The
+  frame number is the only reliable witness: the decode thread checks
+  continuity and waits for a keyframe or repair frame after any gap. A
+  shared "need keyframe" flag set by one thread and cleared by another is
+  not enough on its own: the decoder could clear it right after a drop.
 
 ## 10. Measured so far
 

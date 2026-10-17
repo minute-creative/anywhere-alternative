@@ -517,6 +517,24 @@ Edge and Safari can). Found a keyframe-request storm when decoding fails
 (every frame asked for one); now checks decoder support first and asks at
 most twice a second. The Windows DLL is CI-compiled only.
 
+## Day 17 — code review and comments (v0.5.8)
+
+Owner: go through syntax, logic, architecture and comments so the code is
+easy to debug and change; comments plus real bug fixes; plain-language
+summary per file plus technical notes; ship as 0.5.8. Another chat had
+already written docs/CODE-GUIDE.md and commented aa-core and aa-host; this
+pass did the platform code, viewer, app, camera DLL and add-on, and
+checked core and host for logic.
+
+The main find came from comparing the pre-review build with the new one
+under `AA_SIMULATE_LOSS=15`: OpenH264 reported "reference lost" while the
+viewer showed `dropped=0`. A frame with every packet lost never enters the
+reassembler, so in-order delivery silently skipped it. Fixed by checking
+frame-number continuity in the decode thread (see HANDOFF 0.5.8 for the
+full list). Process slip: a comparison build was put in `target-old/`
+inside the repo and `git add -A` committed it; caught before the push
+completed and amended out. Build comparisons go outside the repo.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.

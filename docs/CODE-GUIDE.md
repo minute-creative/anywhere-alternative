@@ -177,9 +177,16 @@ Release workflow), `assets/` (icons), `docs/` (these notes).
 | Updates don't install, app closes itself | `service.log` "update", markers in `C:\ProgramData\AnywhereAlternative` | `aa-app/src/update.rs`, `aa-platform/src/update.rs`, `windows/session.rs` |
 | Sign-in screen not shared | `service.log`, `service-supervisor.log` | `windows/session.rs`, `aa-app/src/service.rs` |
 
+When the picture smears or blocks after a hiccup, look for "keyframe
+arrived; resuming" in viewer.log: each one is a gap in the frame numbers
+the viewer noticed and repaired. Many of them mean a lossy link (see the
+`loss` and `dropped` figures); "decode failed" lines without them would be
+a new kind of problem.
+
 The viewer's `stream` line, written once a second, reads like this:
 `fps` frames shown, `mbps` data received, `rtt_ms` round trip, `loss` pieces
-lost before repair, `dropped` frames given up, `fec_fixed` pieces rebuilt
+lost before repair, `dropped` frames that never reached the decoder (lost
+whole, given up, or dropped on either side), `fec_fixed` pieces rebuilt
 from parity, `resent` pieces that came again after asking, `gap_ms`
 spacing between frames (typical / worst 1% / worst), `stutters` visible
 hitches, `audio=` sound frames / filled-in gaps / buffer / underruns.
@@ -209,6 +216,8 @@ hitches, `audio=` sound frames / filled-in gaps / buffer / underruns.
   looks odd. Many end with the version and what the owner saw when that
   line was added (for example "0.5.4: the camera spun"), so the history of a
   decision stays next to the code.
+- Every file's `//!` header also has an "In plain words" part where the
+  technical description alone would lose a non-programmer.
 - `SAFETY:` comments sit above every `unsafe` block and say why it is safe.
   Those blocks are where Rust's own checks are switched off to talk to
   Windows or macOS, so they deserve the most care.
