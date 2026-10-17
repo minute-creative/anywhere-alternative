@@ -323,6 +323,17 @@ last session showed 30 s at 0 fps after joining an idle Mac. Fixed in 0.5.8:
   `host.prev.log` (starting again used to wipe the log of a freeze).
 Ask after 0.5.8: is it smooth at 60 fps on Wi-Fi; Mbps in the corner (should
 stay well under 40 at 1080p).
+Owner report: PC shared to the Mac, hover and keys worked, clicks never did
+(whole desktop, not just Valorant). PC service.log: every click "SendInput
+accepted 0 of 1"; also 20 s of SetCursorPos failures after a desktop
+switch (that path never followed the desktop on the screen). 0.5.8: pointer
+moves follow the desktop too; refused input retries after following at
+once; a refused click retries without a position; after 4 refusals the log
+explains the likely cause once (Riot Vanguard, installed with Valorant,
+blocks injected clicks system-wide per Parsec's support page) and how to
+check (`sc query vgk`). If Vanguard is confirmed, the real fix is a
+virtual USB mouse through the existing USB/IP path (needs usbip-win2):
+offer it to the owner as an option, it is a larger piece of work.
 Open from before: DualSense drop on the Mac (need the new log line), Mac
 window not reopening from the Dock, softness from 1.5x scaling, "share one
 app" real test, confirm HEVC on the PC.

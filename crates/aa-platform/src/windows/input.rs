@@ -89,6 +89,10 @@ pub struct SendInputInjector {
     held_keys: Vec<u16>,
     held_buttons: Vec<MouseButton>,
     limit: Option<Limit>,
+    /// Clicks Windows refused in a row, and whether we already explained
+    /// why in the log (once per run, not once per click).
+    refused_clicks: u32,
+    explained: bool,
 }
 
 impl SendInputInjector {
@@ -124,6 +128,8 @@ impl SendInputInjector {
             held_keys: Vec::new(),
             held_buttons: Vec::new(),
             limit: None,
+            refused_clicks: 0,
+            explained: false,
         })
     }
 
@@ -174,12 +180,61 @@ impl SendInputInjector {
         // Typing into the sign-in screen needs this thread on that desktop
         // (only possible for the sharing service; harmless otherwise).
         super::session::follow_input_desktop_throttled();
+        if Self::send_once(inputs) {
+            return Ok(());
+        }
+        // The desktop on the screen may have just changed (a security
+        // prompt, the lock screen, a game switching modes): follow it now,
+        // not at the next quarter-second check, and try once more.
+        super::session::follow_input_desktop();
+        if Self::send_once(inputs) {
+            return Ok(());
+        }
+        // This thread's last Windows error, in words.
+        let why = std::io::Error::last_os_error();
+        Err(PlatformError::Backend(anyhow::anyhow!("Windows refused {} input event(s): {why}", inputs.len())))
+    }
+
+    fn send_once(inputs: &[INPUT]) -> bool {
         // SAFETY: the slice is valid for its length; cbsize is the struct size.
         let n = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
-        if n as usize == inputs.len() {
-            Ok(())
+        n as usize == inputs.len()
+    }
+
+    /// A click Windows refused even after following the desktop: try the
+    /// older way (put the pointer there, then a click with no position).
+    /// Then say once, in plain words, what usually causes it.
+    fn click_fallback(&mut self, flags: MOUSE_EVENT_FLAGS, data: u32, first: PlatformError) -> Result<()> {
+        if let Some((px, py)) = self.last_pos {
+            // SAFETY: plain Win32 call.
+            let _ = unsafe { SetCursorPos(px, py) };
+        }
+        let plain =
+            MOUSE_EVENT_FLAGS(flags.0 & !(MOUSEEVENTF_MOVE.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0));
+        if Self::send_once(&[Self::mouse(0, 0, data, plain)]) {
+            if self.refused_clicks > 0 {
+                tracing::info!("clicks work again (sent without a position)");
+            }
+            self.refused_clicks = 0;
+            return Ok(());
+        }
+        self.refused_clicks += 1;
+        if self.refused_clicks >= 4 && !self.explained {
+            self.explained = true;
+            tracing::warn!(
+                "Windows keeps refusing the viewer's clicks while it accepts keys. The usual cause is \
+                 anti-cheat software that runs all the time, such as Riot Vanguard (installed with Valorant \
+                 and League of Legends): it blocks clicks sent by other programs everywhere, not just in the \
+                 game. Check with: sc query vgk. Quitting Vanguard (tray icon > Exit Vanguard) and \
+                 reconnecting brings clicks back; it starts again at the next restart."
+            );
+        }
+        // Only the first refusal of a run goes to the log in full; the
+        // explanation above covers the rest.
+        if self.refused_clicks == 1 {
+            Err(first)
         } else {
-            Err(PlatformError::Backend(anyhow::anyhow!("SendInput accepted {n} of {} events", inputs.len())))
+            Ok(())
         }
     }
 
@@ -286,9 +341,22 @@ impl InputInjector for SendInputInjector {
                 // normalisation quirks of SendInput on scaled displays.
                 let (px, py) = self.pixels_for(x, y);
                 self.last_pos = Some((px, py));
+                // Same desktop rule as `send`: SetCursorPos fails (with a
+                // misleading "completed successfully") from a thread that is
+                // not on the desktop on the screen (0.5.7 log: 20 s of it
+                // after a desktop switch).
+                super::session::follow_input_desktop_throttled();
                 // SAFETY: plain Win32 call.
-                unsafe { SetCursorPos(px, py) }
-                    .map_err(|e| PlatformError::Backend(anyhow::anyhow!("SetCursorPos: {e}")))?;
+                if unsafe { SetCursorPos(px, py) }.is_err() {
+                    super::session::follow_input_desktop();
+                    // SAFETY: as above.
+                    if unsafe { SetCursorPos(px, py) }.is_err() {
+                        // Moving the pointer by SendInput instead.
+                        let (ax, ay) = self.to_absolute(px, py);
+                        let flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+                        return Self::send(&[Self::mouse(ax, ay, 0, flags)]);
+                    }
+                }
                 return Ok(());
             }
             InputEvent::MouseMoveRel { dx, dy } => Self::mouse(i32::from(dx), i32::from(dy), 0, MOUSEEVENTF_MOVE),
@@ -314,7 +382,15 @@ impl InputInjector for SendInputInjector {
                     }
                     None => (0, 0),
                 };
-                Self::mouse(ax, ay, data, flags)
+                // 0.5.7: every click from the Mac was refused ("SendInput
+                // accepted 0 of 1") while keys and pointer moves worked.
+                return match Self::send(&[Self::mouse(ax, ay, data, flags)]) {
+                    Ok(()) => {
+                        self.refused_clicks = 0;
+                        Ok(())
+                    }
+                    Err(e) => self.click_fallback(flags, data, e),
+                };
             }
             InputEvent::MouseScroll { dx, dy } => {
                 let mut batch = Vec::with_capacity(2);
