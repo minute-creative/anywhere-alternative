@@ -257,6 +257,20 @@ mode); the Mac's DualSense drops and re-attaches every 10–40 s (ask for
 the Mac's viewer.log lines); ~1 in 20 frames dropped PC watching Mac;
 the app opens a second copy if launched again (no single-instance).
 
+## 0.5.6–0.5.7 (2026-10-17, later)
+- Found via logs: HEVC on the PC failed because HEVCVideoExtension needs
+  MF_MT_FRAME_SIZE on the input type; Windows mis-decodes LTR repair
+  frames (garbled static areas) → Windows viewer uses keyframes; game
+  mouse (Ctrl/Cmd+Shift+G); "Update now" button; re-pairing drops ghost
+  entries; Windows app window uses OpenGL; sRGB colours on the Mac.
+- Mac "out of application memory" at 19:57 was not Anywhere (aa-host 0.1
+  GB); aa-host was SIGKILLed (code signature) when the owner dragged in a
+  new app while it ran.
+- Owner idea, LOW priority (after fixes): a second macOS user used remotely
+  at the same time as someone at the Mac's own screen. Plan: run aa-host in
+  that user's background session (Apple Screen Sharing "log in as
+  yourself"); unknown is input routing (CGEventPost targets the console).
+
 ## The app and releases (2026-10-08)
 
 People now install **Anywhere** instead of running cargo: `crates/aa-app`
