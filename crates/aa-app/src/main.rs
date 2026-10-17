@@ -344,9 +344,13 @@ fn read_status(lines: &[String]) -> HostStatus {
         }
         if l.contains(" WARN ") || l.contains(" ERROR ") {
             let p = procs::plain(l).trim_start_matches("⚠ ").to_owned();
-            if !s.warnings.contains(&p) {
-                s.warnings.push(p);
-            }
+            // The same problem with a new count ("encode_failures=2") is one
+            // banner, updated in place: new banners every few seconds made
+            // the page jump about.
+            let key = |t: &str| t.chars().filter(|c| !c.is_ascii_digit()).collect::<String>();
+            let k = key(&p);
+            s.warnings.retain(|w| key(w) != k);
+            s.warnings.push(p);
         }
     }
     let n = s.warnings.len();
@@ -1980,6 +1984,11 @@ fn spawn_discovery(found: Arc<Mutex<Vec<Found>>>, ctx: egui::Context) {
 
 fn main() -> eframe::Result {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    // Opened again while already open: show the open one instead (two
+    // copies fought over the screen and settings; seen 0.5.4).
+    if aa_platform::app_already_open("Anywhere") {
+        return Ok(());
+    }
     // If the app ever crashes, leave the reason where the owner can find it.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

@@ -256,6 +256,21 @@ pub fn keep_awake(on: bool) {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let _ = on;
 }
+/// Is the app already open? Then bring its window forward and say so, so a
+/// second start (Start menu, desktop icon) doesn't open a second copy. A
+/// Mac does this by itself for .app bundles.
+pub fn app_already_open(title: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::app_already_open(title)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = title;
+        false
+    }
+}
+
 /// The main screen's refresh rate (frames per second it can show). The
 /// viewer tells the host, so it never sends frames the screen can't show.
 pub fn display_refresh_hz() -> Option<u16> {

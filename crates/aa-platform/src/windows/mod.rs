@@ -461,3 +461,29 @@ fn usbip_attach(server: std::net::SocketAddr, busid: &str) -> anyhow::Result<()>
         )
     }
 }
+
+/// One copy of the app per signed-in person: a named mutex marks the first;
+/// a second start brings the first's window forward and quits.
+pub fn app_already_open(title: &str) -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE};
+    let name: Vec<u16> = "Local\\AnywhereAlternativeApp".encode_utf16().chain([0]).collect();
+    // SAFETY: plain Win32 calls with NUL-terminated strings that outlive them.
+    // The mutex handle is kept open (leaked) for the life of the process.
+    #[allow(unsafe_code)]
+    unsafe {
+        let Ok(handle) = CreateMutexW(None, false, PCWSTR(name.as_ptr())) else { return false };
+        if GetLastError() != ERROR_ALREADY_EXISTS {
+            std::mem::forget(handle);
+            return false;
+        }
+        let t: Vec<u16> = title.encode_utf16().chain([0]).collect();
+        if let Ok(w) = FindWindowW(PCWSTR::null(), PCWSTR(t.as_ptr())) {
+            let _ = ShowWindow(w, SW_RESTORE);
+            let _ = SetForegroundWindow(w);
+        }
+        true
+    }
+}
