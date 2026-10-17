@@ -607,6 +607,19 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   `PROPVARIANT` runs `PropVariantClear` on drop; a `VT_BLOB` pointing at
   the stack corrupted the heap. `ManuallyDrop` when the blob is borrowed.
 
+- **Never do slow work on the app's window thread** (0.5.1): opening test
+  decoders every 10 s for the add-on checklist froze drawing; the owner saw
+  the app blink. Checks run in the background and only list decoders.
+- **The PC must look for Store codecs** (0.5.1 viewer.log): without
+  `MFT_ENUM_FLAG_UNTRUSTED_STOREMFT` the HEVC Video Extensions were never
+  found and the PC silently watched in H.264.
+- **A silent update must never wait on anything** (0.5.3): the service's
+  automatic update ran the installer, which never finished (add-on
+  downloads under the system account are the suspect), so the service never
+  restarted and its "update running" note stayed. The app closed itself on
+  every start to make way for an installer that wasn't coming. Now: no
+  add-ons in silent installs, and the app ignores a note older than 10 min.
+
 ## 10. Measured so far
 
 | Date | Machine | Path | Result |
