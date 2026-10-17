@@ -434,8 +434,12 @@ pub fn hevc_decoder_installed() -> bool {
         let input = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_HEVC };
         let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
         let mut count = 0u32;
-        let flags =
-            MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+        // Include codecs from the Microsoft Store (where the HEVC extension lives).
+        let flags = MFT_ENUM_FLAG_SYNCMFT
+            | MFT_ENUM_FLAG_ASYNCMFT
+            | MFT_ENUM_FLAG_HARDWARE
+            | MFT_ENUM_FLAG_SORTANDFILTER
+            | windows::Win32::Media::MediaFoundation::MFT_ENUM_FLAG_UNTRUSTED_STOREMFT;
         let ok = MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, flags, Some(&input), None, &mut list, &mut count).is_ok();
         if !list.is_null() {
             for i in 0..count as usize {
@@ -443,7 +447,43 @@ pub fn hevc_decoder_installed() -> bool {
             }
             CoTaskMemFree(Some(list.cast()));
         }
-        ok && count > 0
+        (ok && count > 0) || hevc_package_installed()
+    }
+}
+
+/// Is the Store's HEVC package installed for this user? (Windows lists
+/// every installed Store package under this registry key.)
+fn hevc_package_installed() -> bool {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+    };
+    let path: Vec<u16> =
+        r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages"
+            .encode_utf16()
+            .chain([0])
+            .collect();
+    // SAFETY: reading registry key names into a local buffer; the key is closed.
+    unsafe {
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, windows::core::PCWSTR(path.as_ptr()), None, KEY_READ, &mut key).is_err() {
+            return false;
+        }
+        let mut found = false;
+        let mut buf = [0u16; 512];
+        for i in 0.. {
+            let mut len = buf.len() as u32;
+            if RegEnumKeyExW(key, i, Some(windows::core::PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None)
+                .is_err()
+            {
+                break;
+            }
+            if String::from_utf16_lossy(&buf[..len as usize]).starts_with("Microsoft.HEVCVideoExtension") {
+                found = true;
+                break;
+            }
+        }
+        let _ = RegCloseKey(key);
+        found
     }
 }
 
