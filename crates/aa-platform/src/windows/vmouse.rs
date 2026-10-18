@@ -1,3 +1,4 @@
+#![allow(clippy::doc_markdown)] // product names read better plain
 //! When Valorant's anti-cheat runs, click through a virtual USB mouse.
 //!
 //! In plain words: while Riot Vanguard runs, clicks sent the normal way
@@ -52,7 +53,10 @@ pub struct Router {
 
 impl std::fmt::Debug for Router {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Router").field("plugged", &self.plugged.is_some()).field("gave_up", &self.gave_up).finish()
+        f.debug_struct("Router")
+            .field("plugged", &self.plugged.is_some())
+            .field("gave_up", &self.gave_up)
+            .finish_non_exhaustive()
     }
 }
 
