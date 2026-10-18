@@ -145,6 +145,23 @@ mod tests {
     }
 }
 
+/// This computer's own internet addresses (global IPv6, `2000::/3`). With
+/// one of these a computer can be reached directly from other networks,
+/// no router door needed (when the router's IPv6 firewall lets it in).
+pub fn global_ipv6() -> Vec<std::net::Ipv6Addr> {
+    let Ok(list) = if_addrs::get_if_addrs() else { return Vec::new() };
+    let mut out: Vec<std::net::Ipv6Addr> = list
+        .into_iter()
+        .filter_map(|i| match i.addr {
+            if_addrs::IfAddr::V6(v6) if (v6.ip.segments()[0] & 0xe000) == 0x2000 => Some(v6.ip),
+            _ => None,
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Is `ip` on a home or office network, or Tailscale, rather than the open
 /// internet? Pairing is only allowed from these (see `aa-host` `net.rs`):
 /// once the sharing computer opens a door on its router, anyone on the

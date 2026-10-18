@@ -38,6 +38,13 @@ impl Link {
     /// Prove who we are to `host` and agree on this connection's keys.
     /// Returns the host's key.
     pub async fn connect(bind: SocketAddr, host: SocketAddr) -> anyhow::Result<(Self, PublicKeyBytes)> {
+        // An IPv6 host (a computer's own internet address, 0.5.8) needs an
+        // IPv6 socket; the default "any address" bind is IPv4.
+        let bind = if host.is_ipv6() && bind.ip().is_unspecified() && bind.is_ipv4() {
+            SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), bind.port())
+        } else {
+            bind
+        };
         let sock = crate::udp::bind(bind)?;
         sock.connect(host).await?;
         let id = aa_platform::trust::viewer_identity();

@@ -354,6 +354,19 @@ app" real test, confirm HEVC on the PC.
   no IPv6 seen, hop 2 is 10.113.0.1 → possibly the ISP shares one address
   (CGNAT); router WAN address not yet checked. If CGNAT and no IPv6, the
   own-direct path can't reach this home from outside; Tailscale covers it.
+- Built 2026-10-18 (owner asleep, in 0.5.8, not yet tried on a real
+  router): `aa_platform::portmap` opens UDP 7700 on the router by UPnP
+  (hand-written SSDP/SOAP, tested against a pretend router) or NAT-PMP,
+  renews hourly, closes on stop; the host logs one `outside:` line (open /
+  provider shares the address / router won't open) and the Share page
+  shows it. Local "who's there?" answers now include the outside address
+  and the computer's global IPv6 addresses, so paired viewers remember them
+  and find it from other networks. The host also listens on IPv6 (separate
+  socket, IPv4 untouched). Pairing is refused from internet addresses
+  (only home networks / Tailscale), and internet "who's there?" answers
+  carry only the key. Owner's router: ZTE F670L (fibre box), login needed
+  to check its WAN address and whether UPnP is on. Not built: trying from
+  both ends at once (needs a meeting point we chose not to run).
 - Beta needs (agreed list): built-in connecting, signed installers (Apple
   developer account and Windows signing still to decide), first-run setup
   without Terminal/sudo, invite a teammate, problem-report button, clear

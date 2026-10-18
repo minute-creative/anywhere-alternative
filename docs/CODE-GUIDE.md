@@ -108,7 +108,7 @@ Release workflow), `assets/` (icons), `docs/` (these notes).
 - `lib.rs`: the five abilities every system must provide (capture, encode, decode, input, controllers) and which version each system gets.
 - `windows/`: `capture.rs` (screen), `convert.rs` (colours), `encoder.rs`, `decoder.rs`, `input.rs`, `audio.rs`, `gamepad.rs` (virtual Xbox/PlayStation pads), `camera.rs`, `vcam.rs`, `share.rs` (one app/window), `session.rs` (sign-in screen and the always-on service), `mod.rs` (puts them together).
 - `macos/`: `capture.rs`, `encoder.rs`, `decoder.rs`, `input.rs`, `audio.rs`, `speaker.rs` (mute), `gamepad.rs`, `camera.rs`, `wininfo.rs` (which window is where), `mod.rs`.
-- Shared: `audio.rs` (Opus sound codec, playback, microphone), `playout.rs` (smoothing sound), `camera.rs`, `clipboard.rs`, `discover.rs` and `lan.rs` (finding computers), `pairing.rs`, `trust.rs` (who is paired, keys, pairing code), `tailscale.rs`, `update.rs` (download and install updates), `usbip.rs` + `ds5dev.rs` + `padhub.rs` (virtual USB DualSense on a PC), `padmap.rs`, `hid_scancode.rs` + `hid_mac.rs` (key tables), `share.rs`, `sw.rs` (software video codec fallback), `mock.rs` (fake hardware for tests).
+- Shared: `audio.rs` (Opus sound codec, playback, microphone), `playout.rs` (smoothing sound), `camera.rs`, `clipboard.rs`, `discover.rs` and `lan.rs` (finding computers), `portmap.rs` (opening a door on the home router so paired computers connect from any network), `pairing.rs`, `trust.rs` (who is paired, keys, pairing code), `tailscale.rs`, `update.rs` (download and install updates), `usbip.rs` + `ds5dev.rs` + `padhub.rs` (virtual USB DualSense on a PC), `padmap.rs`, `hid_scancode.rs` + `hid_mac.rs` (key tables), `share.rs`, `sw.rs` (software video codec fallback), `mock.rs` (fake hardware for tests).
 
 **aa-app** (the window people open)
 - `main.rs`: all four pages, settings, finding computers, starting host and viewer, updates.
@@ -161,6 +161,7 @@ Release workflow), `assets/` (icons), `docs/` (these notes).
 | What you see | First look in | Likely files |
 |---|---|---|
 | A computer doesn't appear, or "older Anywhere" | host log (is it sharing? which version?) | `discover.rs`, `lan.rs`, `aa-host/src/session.rs` (Discover), `aa-app/src/service.rs` |
+| Can't connect from another network | host log `outside:` line (also on the Share page) | `portmap.rs`, `discover.rs`, `tailscale.rs` |
 | Pairing code rejected | host log "pairing" lines | `secure.rs`, `aa-host/src/net.rs`, `pairing.rs`, `trust.rs` |
 | Black screen | viewer log "decoder", host log "encoder" | `encoder.rs`, `decoder.rs`, `capability.rs` |
 | Blurry, blocky, smeared, garbled patches | viewer log `stream` lines (loss, resent, dropped), "repair frame" | `wire.rs` (resends), `control_flow.rs`, `quality.rs`, `decoder.rs`, `aa-viewer/src/session.rs` |

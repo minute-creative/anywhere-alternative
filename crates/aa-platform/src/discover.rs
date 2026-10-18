@@ -116,6 +116,9 @@ fn looks_like_local_network_block(e: &std::io::Error) -> bool {
 pub async fn find_hosts(port: u16) -> anyhow::Result<Vec<Found>> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
+    // Paired computers' IPv6 addresses need an IPv6 socket (none on a
+    // computer without IPv6: then those addresses are skipped).
+    let socket6 = UdpSocket::bind("[::]:0").await.ok();
     let beacons = match crate::lan::beacon_listener().and_then(UdpSocket::from_std) {
         Ok(s) => Some(s),
         Err(e) => {
@@ -139,6 +142,7 @@ pub async fn find_hosts(port: u16) -> anyhow::Result<Vec<Found>> {
     let mut blocked = false;
     let mut buf = vec![0u8; wire::MAX_DATAGRAM * 2];
     let mut beacon_buf = vec![0u8; wire::MAX_DATAGRAM * 2];
+    let mut buf6 = vec![0u8; wire::MAX_DATAGRAM * 2];
     let mut deadline = tokio::time::Instant::now() + LISTEN;
     let mut resend = tokio::time::interval(Duration::from_millis(400));
 
@@ -146,13 +150,23 @@ pub async fn find_hosts(port: u16) -> anyhow::Result<Vec<Found>> {
         tokio::select! {
             _ = resend.tick() => {
                 for t in &targets {
-                    if let Err(e) = socket.send_to(&ask, t).await {
+                    let sock = match (t.is_ipv6(), socket6.as_ref()) {
+                        (false, _) => &socket,
+                        (true, Some(s6)) => s6,
+                        (true, None) => continue,
+                    };
+                    if let Err(e) = sock.send_to(&ask, t).await {
                         blocked |= looks_like_local_network_block(&e);
                         tracing::debug!("discover send to {t}: {e}");
                     }
                 }
             }
-            recv = socket.recv_from(&mut buf) => {
+            recv = async {
+                match socket6.as_ref() {
+                    Some(s6) => tokio::select! { r = socket.recv_from(&mut buf) => r, r = s6.recv_from(&mut buf6) => r.map(|(n, f)| { buf[..n].copy_from_slice(&buf6[..n]); (n, f) }) },
+                    None => socket.recv_from(&mut buf).await,
+                }
+            } => {
                 let (n, from) = match recv {
                     Ok(x) => x,
                     // A paired computer that is switched off: Windows reports
@@ -205,7 +219,6 @@ fn far_targets(port: u16) -> Vec<SocketAddr> {
     let mut t: Vec<SocketAddr> = crate::trust::paired_hosts()
         .iter()
         .flat_map(|h| h.addrs.iter().filter_map(|a| a.parse::<SocketAddr>().ok()))
-        .filter(SocketAddr::is_ipv4)
         .collect();
     for p in crate::tailscale::peers().into_iter().filter(|p| p.online) {
         t.extend(p.ips.into_iter().filter(IpAddr::is_ipv4).map(|ip| SocketAddr::new(ip, port)));

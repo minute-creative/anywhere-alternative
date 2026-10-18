@@ -28,6 +28,11 @@ pub fn bind(addr: SocketAddr) -> anyhow::Result<UdpSocket> {
     if let Err(e) = sock.set_send_buffer_size(BUFFER_BYTES) {
         tracing::debug!("could not enlarge send buffer: {e}");
     }
+    // IPv6 sockets take IPv6 only: IPv4 keeps its own socket, which is what
+    // home-network discovery (broadcasts) has always used.
+    if addr.is_ipv6() {
+        let _ = sock.set_only_v6(true);
+    }
     // Bind = claim this address and port so packets sent there reach us.
     sock.bind(&addr.into())?;
     tracing::debug!(recv = ?sock.recv_buffer_size(), send = ?sock.send_buffer_size(), "udp buffers");

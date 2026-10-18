@@ -47,6 +47,9 @@ struct Pairing {
 
 pub struct Net {
     sock: UdpSocket,
+    /// The same port on IPv6, when this computer has IPv6 (0.5.8): lets a
+    /// paired computer reach this one at its own internet address.
+    sock6: Option<UdpSocket>,
     id: Identity,
     name: String,
     peers: Mutex<HashMap<SocketAddr, Peer>>,
@@ -64,6 +67,13 @@ impl Net {
     // Load our permanent key and the current pairing code; print the code.
     pub fn bind(addr: SocketAddr) -> anyhow::Result<Self> {
         let sock = crate::udp::bind(addr)?;
+        let sock6 = if addr.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED) {
+            crate::udp::bind(SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), addr.port()))
+                .map_err(|e| tracing::debug!("no IPv6 socket ({e}); IPv4 only"))
+                .ok()
+        } else {
+            None
+        };
         let id = aa_platform::trust::host_identity();
         let code = aa_platform::trust::pair_code();
         tracing::info!(
@@ -73,6 +83,7 @@ impl Net {
         );
         Ok(Self {
             sock,
+            sock6,
             name: aa_platform::trust::computer_name(),
             id,
             peers: Mutex::default(),
@@ -101,14 +112,22 @@ impl Net {
         aa_platform::trust::viewer_full_access(&key)
     }
 
+    /// The socket for this address's family.
+    fn sock_for(&self, to: SocketAddr) -> &UdpSocket {
+        match (&self.sock6, to) {
+            (Some(s6), SocketAddr::V6(_)) => s6,
+            _ => &self.sock,
+        }
+    }
+
     /// Send one packet: sealed if `to` is a connected computer.
     pub async fn send_to(&self, buf: &[u8], to: SocketAddr) -> std::io::Result<usize> {
         // Lock the packet with that computer's session key if it is connected;
         // otherwise send as is (only discovery answers and pairing go out that way).
         let session = self.peers.lock().ok().and_then(|p| p.get(&to).map(|p| Arc::clone(&p.session)));
         match session {
-            Some(s) => self.sock.send_to(&s.seal(buf), to).await,
-            None => self.sock.send_to(buf, to).await,
+            Some(s) => self.sock_for(to).send_to(&s.seal(buf), to).await,
+            None => self.sock_for(to).send_to(buf, to).await,
         }
     }
 
@@ -119,8 +138,19 @@ impl Net {
         // handshakes and pairing right here, pass "who's there?" through, drop
         // everything else.
         let mut raw = vec![0u8; buf.len() + secure::OVERHEAD];
+        let mut raw6 = vec![0u8; buf.len() + secure::OVERHEAD];
         loop {
-            let (n, from) = self.sock.recv_from(&mut raw).await?;
+            let (n, from) = match &self.sock6 {
+                None => self.sock.recv_from(&mut raw).await?,
+                Some(s6) => tokio::select! {
+                    r = self.sock.recv_from(&mut raw) => r?,
+                    r = s6.recv_from(&mut raw6) => {
+                        let (n, from) = r?;
+                        raw[..n].copy_from_slice(&raw6[..n]);
+                        (n, from)
+                    }
+                },
+            };
             let d = &raw[..n];
             let Some(&first) = d.first() else { continue };
             match first {
@@ -172,7 +202,7 @@ impl Net {
             due
         });
         if due {
-            let _ = self.sock.send_to(&[secure::RESET], from).await;
+            let _ = self.sock_for(from).send_to(&[secure::RESET], from).await;
         }
     }
 
@@ -184,7 +214,7 @@ impl Net {
                 p.get(&from).filter(|p| d.get(33..65) == Some(&p.viewer_eph[..])).map(|p| p.reply.clone())
             });
         if let Some(r) = repeat {
-            let _ = self.sock.send_to(&r, from).await;
+            let _ = self.sock_for(from).send_to(&r, from).await;
             return;
         }
         // Answer a hello: work out session keys if the computer is paired, else
@@ -210,11 +240,11 @@ impl Net {
                         },
                     );
                 }
-                let _ = self.sock.send_to(&reply, from).await;
+                let _ = self.sock_for(from).send_to(&reply, from).await;
             }
             Response::Unknown { reply } => {
                 tracing::info!(%from, "a computer that isn't paired tried to connect; it needs the pairing code");
-                let _ = self.sock.send_to(&reply, from).await;
+                let _ = self.sock_for(from).send_to(&reply, from).await;
             }
         }
     }
@@ -228,7 +258,7 @@ impl Net {
         if !aa_platform::lan::is_local_network(from.ip()) {
             tracing::info!(%from, "pairing request from the internet refused (pair on the same network or Tailscale)");
             let why = "Pair once on the same network (or through Tailscale); after that it connects from anywhere.";
-            let _ = self.sock.send_to(&fail(why), from).await;
+            let _ = self.sock_for(from).send_to(&fail(why), from).await;
             return;
         }
         // Pairing step 2: a computer typed a code. One attempt per 2 seconds from
@@ -265,7 +295,7 @@ impl Net {
                 }
             }
         };
-        let _ = self.sock.send_to(&answer, from).await;
+        let _ = self.sock_for(from).send_to(&answer, from).await;
     }
 
     async fn pair_confirm(&self, d: &[u8], from: SocketAddr) {
@@ -292,7 +322,7 @@ impl Net {
             right
         };
         let msg = if ok { vec![secure::PAIR_OK] } else { fail("That code isn't right.") };
-        let _ = self.sock.send_to(&msg, from).await;
+        let _ = self.sock_for(from).send_to(&msg, from).await;
     }
 }
 

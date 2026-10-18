@@ -742,8 +742,12 @@ async fn handle_packet(
                     } else {
                         Vec::new()
                     };
-                    if let Some(outside) = aa_platform::portmap::current().and_then(|o| o.addr()).filter(|_| local) {
-                        addrs.push(outside.to_string());
+                    if local {
+                        if let Some(outside) = aa_platform::portmap::current().and_then(|o| o.addr()) {
+                            addrs.push(outside.to_string());
+                        }
+                        // Its own internet (IPv6) addresses, when it has any.
+                        addrs.extend(aa_platform::lan::global_ipv6().into_iter().map(|ip| format!("[{ip}]:{port}")));
                     }
                     send_control(
                         socket,

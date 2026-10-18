@@ -647,6 +647,10 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
 - **More bits than the picture can use only hurt on Wi-Fi** (0.5.8): the
   controller probed up to the user's cap (80 Mbps, 100+ with parity) for a
   1080p stream that is sharp at 14. Ceiling = 2x `quality::sharp_kbps`.
+- **A router door makes pairing an internet-facing service** (0.5.8): with
+  UDP 7700 opened by UPnP, the 2-second pairing rate limit would still let
+  a stranger guess a six-digit code within weeks, and block real pairing.
+  Pairing is accepted only from home-network and Tailscale addresses.
 - **"Newest wins" needs a slot, not a queue** (0.5.8): a full bounded
   channel with `try_send` drops the newest item, the opposite of intent.
 
