@@ -135,65 +135,71 @@ fn run() {
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match msg {
-        WM_TIMER => {
-            if WANT.load(Ordering::SeqCst) {
-                // Stay on top of anything opened since, covering every monitor.
-                let (x, y, cx, cy) = all_screens();
-                let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, cx, cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            } else {
-                let _ = DestroyWindow(hwnd);
+    // SAFETY: called by Windows on this window's thread with a valid hwnd.
+    unsafe {
+        match msg {
+            WM_TIMER => {
+                if WANT.load(Ordering::SeqCst) {
+                    // Stay on top of anything opened since, covering every monitor.
+                    let (x, y, cx, cy) = all_screens();
+                    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, cx, cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                } else {
+                    let _ = DestroyWindow(hwnd);
+                }
+                LRESULT(0)
             }
-            LRESULT(0)
+            WM_PAINT => {
+                paint(hwnd);
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                PostQuitMessage(0);
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
-        WM_PAINT => {
-            paint(hwnd);
-            LRESULT(0)
-        }
-        WM_DESTROY => {
-            PostQuitMessage(0);
-            LRESULT(0)
-        }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
 
 /// Black (the window's background) plus one dim line in the middle of the
 /// main monitor, so nobody thinks the PC crashed.
 unsafe fn paint(hwnd: HWND) {
-    let mut ps = PAINTSTRUCT::default();
-    let dc = BeginPaint(hwnd, &mut ps);
-    // The main monitor starts at screen (0, 0); the window starts at the
-    // top-left of all monitors.
-    let (x, y, _, _) = all_screens();
-    let mut main = RECT {
-        left: -x,
-        top: -y,
-        right: -x + GetSystemMetrics(SM_CXSCREEN),
-        bottom: -y + GetSystemMetrics(SM_CYSCREEN),
-    };
-    let font = CreateFontW(
-        -36,
-        0,
-        0,
-        0,
-        FW_NORMAL.0 as i32,
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY,
-        0,
-        w!("Segoe UI"),
-    );
-    let old = SelectObject(dc, HGDIOBJ(font.0));
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, COLORREF(0x0070_7070));
-    let mut text: Vec<u16> = "This PC is in use remotely".encode_utf16().collect();
-    DrawTextW(dc, &mut text, &mut main, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(dc, old);
-    let _ = DeleteObject(HGDIOBJ(font.0));
-    let _ = EndPaint(hwnd, &ps);
+    // SAFETY: standard WM_PAINT drawing; the font is freed below.
+    unsafe {
+        let mut ps = PAINTSTRUCT::default();
+        let dc = BeginPaint(hwnd, &mut ps);
+        // The main monitor starts at screen (0, 0); the window starts at the
+        // top-left of all monitors.
+        let (x, y, _, _) = all_screens();
+        let mut main = RECT {
+            left: -x,
+            top: -y,
+            right: -x + GetSystemMetrics(SM_CXSCREEN),
+            bottom: -y + GetSystemMetrics(SM_CYSCREEN),
+        };
+        let font = CreateFontW(
+            -36,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            0,
+            w!("Segoe UI"),
+        );
+        let old = SelectObject(dc, HGDIOBJ(font.0));
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, COLORREF(0x0070_7070));
+        let mut text: Vec<u16> = "This PC is in use remotely".encode_utf16().collect();
+        DrawTextW(dc, &mut text, &mut main, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, old);
+        let _ = DeleteObject(HGDIOBJ(font.0));
+        let _ = EndPaint(hwnd, &ps);
+    }
 }
