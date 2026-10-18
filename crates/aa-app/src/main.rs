@@ -473,9 +473,6 @@ struct App {
     share_saved_at: Instant,
     /// Cameras and microphones here, for "Calls on the other computer".
     devices: Arc<Mutex<(Vec<String>, Vec<String>)>>,
-    /// The first-open "usage numbers" question: the box (ticked by default,
-    /// the owner's choice) while it hasn't been answered yet.
-    usage_box: bool,
 }
 
 impl App {
@@ -535,7 +532,6 @@ impl App {
             shareables: Arc::default(),
             share_saved_at: Instant::now().checked_sub(Duration::from_secs(3600)).unwrap_or_else(Instant::now),
             devices: Arc::default(),
-            usage_box: true,
         };
         spawn_share_lister(Arc::clone(&app.shareables), cc.egui_ctx.clone());
         spawn_device_lister(Arc::clone(&app.devices), cc.egui_ctx.clone());
@@ -641,31 +637,6 @@ impl App {
             ("always_on_sharing", serde_json::json!(self.service_on)),
             ("paired_computers", serde_json::json!(paired)),
         ]);
-    }
-
-    /// First open: ask once whether anonymous usage numbers may be sent.
-    fn usage_card(&mut self, ui: &mut Ui) {
-        let mut done = false;
-        card(ui, |ui| {
-            section(
-                ui,
-                "Help make Anywhere better",
-                "Anywhere can send anonymous numbers: how often it is used, and how smooth it is (frame rate, \
-                 freezes, reconnects). Never names, computer names, addresses or anything on the screen. You \
-                 can change this any time in Settings.",
-            );
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.usage_box, "Send anonymous usage numbers");
-            });
-            ui.add_space(4.0);
-            if button(ui, "Continue", Kind::Primary).clicked() {
-                done = true;
-            }
-        });
-        if done {
-            aa_platform::telemetry::set_consent(self.usage_box);
-            self.note_opened();
-        }
     }
 
     fn ask_code(&mut self, target: &str, name: &str) {
@@ -1071,11 +1042,6 @@ impl App {
 
         if self.pair.is_some() {
             self.pair_card(ui);
-            ui.add_space(12.0);
-        }
-
-        if aa_platform::telemetry::consent().is_none() {
-            self.usage_card(ui);
             ui.add_space(12.0);
         }
 
@@ -1784,23 +1750,6 @@ impl App {
                 "Only when nobody is connected. Anywhere reopens by itself afterwards.",
                 &mut s.auto_update,
             );
-            let mut usage = aa_platform::telemetry::consent() == Some(true);
-            if switch_row(
-                ui,
-                "Send anonymous usage numbers",
-                "How often Anywhere is used and how smooth it is (frame rate, freezes). Never names, addresses or \
-                 what is on the screen.",
-                &mut usage,
-            ) {
-                aa_platform::telemetry::set_consent(usage);
-                if usage {
-                    let paired = self.paired_hosts.len() + self.paired_viewers.len();
-                    aa_platform::telemetry::opened_today(&[
-                        ("always_on_sharing", serde_json::json!(self.service_on)),
-                        ("paired_computers", serde_json::json!(paired)),
-                    ]);
-                }
-            }
             ui.horizontal(|ui| {
                 if newer && self.updating.is_none() && button(ui, "Update now", Kind::Primary).clicked() {
                     update_now = true;
@@ -1826,6 +1775,21 @@ impl App {
                 }
             });
         });
+        // Last on the page (owner's choice): anonymous usage numbers, on
+        // unless switched off here.
+        ui.add_space(12.0);
+        let mut usage = aa_platform::telemetry::sending();
+        let mut usage_changed = false;
+        card(ui, |ui| {
+            section(ui, "Privacy", "");
+            usage_changed = switch_row(
+                ui,
+                "Send anonymous usage numbers",
+                "How often Anywhere is used and how smooth it is (frame rate, freezes, reconnects). Never names, \
+                 computer names, addresses or what is on the screen.",
+                &mut usage,
+            );
+        });
         if check_now {
             self.update_skip = None;
             self.update_error = None;
@@ -1836,6 +1800,12 @@ impl App {
         }
         if update_now {
             self.update_now();
+        }
+        if usage_changed {
+            aa_platform::telemetry::set_consent(usage);
+            if usage {
+                self.note_opened();
+            }
         }
     }
 

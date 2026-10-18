@@ -9,9 +9,9 @@
 //! contents or keys are ever sent.
 //!
 //! Permission is a small file, `usage-stats`, next to the settings: "on" or
-//! "off". The app writes it from its first-open screen (box ticked by
-//! default, the owner's choice) and its Settings switch. With no file yet,
-//! nothing is sent at all: the person hasn't seen the question.
+//! "off", written by the switch at the bottom of the app's Settings page.
+//! With no file it counts as on (the owner's choice: on by default, easy to
+//! switch off; it used to be a first-open card, moved to Settings in 0.5.10).
 //!
 //! Sending uses the `curl` that ships with Windows and macOS, started in the
 //! background, so it never slows anything down and a failure costs nothing.
@@ -43,7 +43,12 @@ pub fn consent() -> Option<bool> {
     }
 }
 
-/// Save the person's choice (first-open screen, Settings switch).
+/// Whether notes are sent: on unless the person switched it off.
+pub fn sending() -> bool {
+    consent() != Some(false)
+}
+
+/// Save the person's choice (the Settings switch).
 pub fn set_consent(on: bool) {
     let _ = std::fs::write(consent_file(), if on { "on" } else { "off" });
 }
@@ -67,7 +72,7 @@ fn install_id() -> String {
 /// Send one note, if allowed. `props` are added to the version and system,
 /// which every note carries.
 pub fn send(event: &str, props: &[(&str, Value)]) {
-    if consent() != Some(true) || std::env::var_os("AA_NO_TELEMETRY").is_some() {
+    if !sending() || std::env::var_os("AA_NO_TELEMETRY").is_some() {
         return;
     }
     let mut properties = Map::new();
@@ -114,7 +119,7 @@ pub fn opened_today(props: &[(&str, Value)]) {
     if std::fs::read_to_string(&path).is_ok_and(|d| d.trim() == today) {
         return;
     }
-    if consent() == Some(true) {
+    if sending() {
         let _ = std::fs::write(&path, &today);
         send("app_opened", props);
     }
