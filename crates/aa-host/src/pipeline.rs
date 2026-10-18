@@ -496,16 +496,21 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
         // Every 2 s on a busy screen: is compressing fast enough at this size?
         gov_win.add(took);
         if let Some((screen_fps, sent_fps, encode_ms)) = gov_win.take(speed.captured_total) {
-            if let Some(limit) = governor.update(fps_now, screen_fps, sent_fps, encode_ms, enc_res.height) {
+            let by_speed = governor.update(fps_now, screen_fps, sent_fps, encode_ms, enc_res.height);
+            let by_bits = governor.on_bitrate(current_codec, capture.resolution(), fps_now, kbps_now);
+            if let Some(limit) = by_bits.or(by_speed) {
                 speed_cap = limit.map(|h| Resolution::new(h * 32 / 9, h));
+                let why = if by_bits.is_some() { "connection" } else { "compressing" };
                 if let Some(h) = limit {
                     tracing::info!(
                         height = h,
+                        why,
+                        kbps = kbps_now,
                         encode_ms = format!("{encode_ms:.1}"),
-                        "compressing can't keep up: sending a smaller picture"
+                        "sending a smaller picture"
                     );
                 } else {
-                    tracing::info!("compressing has room again: full-size picture");
+                    tracing::info!(why, kbps = kbps_now, "room again: full-size picture");
                 }
                 if capture.scales_itself() {
                     capture.set_max_size(tighter(max_size, speed_cap));

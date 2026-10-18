@@ -366,6 +366,19 @@ app" real test, confirm HEVC on the PC.
   `sc start AnywhereHost`) before running the installer, and the installer
   writes C:\ProgramData\AnywhereAlternative\installer.log: READ IT after
   the next update to find the real cause.
+- 0.5.13 picture size follows the bitrate too: owner reported blurry +
+  "fps never above 75" on 0.5.11-era logs. host.log: bitrate controller
+  sat at 11-16 Mbps (loss 2-4%, RTT 11 -> 40, spikes 273/608 ms: Wi-Fi
+  queueing, PC 192.168.1.2 / Mac 192.168.1.8 same LAN) while 2880x1800
+  HEVC needs ~34 Mbps; overlay showed 3.6 Mbps actual. PC screen flips
+  60/120 Hz (dynamic refresh); at 120 the Intel MFT's 13-16 ms per full
+  frame caps ~70 fps. Mac had Frame rate fixed at 120. Fix:
+  `SizeGovernor::on_bitrate` picks the biggest step with >= 85% of
+  `sharp_kbps` once below 70% on a busy screen (2 windows), up when 100%
+  of the bigger size for 4 windows; limit = smaller of speed and bits.
+  Log: `sending a smaller picture why=connection|compressing`. Headless
+  viewer ignores --max-mbps, so only unit tests cover the bits path.
+  Advised: Frame rate Automatic, Ethernet on one side.
 - 0.5.12 automatic picture size (owner chose this over pipelining, for
   input feel): PC log in Valorant showed encode 15-25 ms per 2880x1800
   frame on the Intel HEVC MFT (hardware, GPU NV12, zero-copy, realtime GPU

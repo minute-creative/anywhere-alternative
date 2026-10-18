@@ -238,15 +238,28 @@ mod tests {
 /// down (1440, 1080, 900, 720) until it fits the frame budget, then back up
 /// when there is clearly room. A still screen never counts: a slow compress
 /// of one picture a second costs nothing.
+///
+/// The second reason to go smaller is the connection (`on_bitrate`): the
+/// owner's PC-to-Mac Wi-Fi carried only 11-16 Mbps cleanly, a third of what
+/// 2880x1800 needs to look sharp, so every picture was blurry. A smaller
+/// picture with enough bits per pixel looks sharper than a big starved one.
+/// The size sent is the smaller of the two limits.
 #[derive(Debug, Clone)]
 pub struct SizeGovernor {
-    /// Index into [`Self::STEPS`]; 0 = full size.
+    /// Index into [`Self::STEPS`] from compress speed; 0 = full size.
     step: usize,
     /// Consecutive windows that were too slow / had room.
     slow: u32,
     roomy: u32,
     /// Windows left before stepping up is considered (after a step down).
     hold: u32,
+    /// Index into [`Self::STEPS`] from the bitrate the connection allows.
+    bits_step: usize,
+    /// Consecutive windows starved of bits / with plenty for a bigger size.
+    starved: u32,
+    plenty: u32,
+    /// Was the last window a busy screen?
+    busy: bool,
 }
 
 impl Default for SizeGovernor {
@@ -269,12 +282,73 @@ impl SizeGovernor {
     const HOLD_AFTER_DOWN: u32 = 15;
 
     pub fn new() -> Self {
-        Self { step: 0, slow: 0, roomy: 0, hold: 0 }
+        Self { step: 0, slow: 0, roomy: 0, hold: 0, bits_step: 0, starved: 0, plenty: 0, busy: false }
     }
 
     /// The current height limit (None: full size).
     pub fn limit(&self) -> Option<u32> {
-        Some(Self::STEPS[self.step]).filter(|&h| h > 0)
+        Some(Self::STEPS[self.step.max(self.bits_step)]).filter(|&h| h > 0)
+    }
+
+    /// Step down for bits when the bitrate is under this share of what the
+    /// current size needs to look sharp...
+    const STARVED: f64 = 0.7;
+    /// ...to the biggest size that gets at least this share.
+    const ENOUGH: f64 = 0.85;
+    /// Step up when the bitrate covers all of what the bigger size needs.
+    const PLENTY: f64 = 1.0;
+    const BITS_DOWN_AFTER: u32 = 2;
+    const BITS_UP_AFTER: u32 = 4;
+
+    /// The picture at step `i` for a screen of size `full`.
+    fn res_at(full: Resolution, i: usize) -> Resolution {
+        let h = Self::STEPS[i];
+        if h == 0 || h >= full.height {
+            return full;
+        }
+        let w = (u64::from(full.width) * u64::from(h) / u64::from(full.height.max(1))) as u32;
+        Resolution::new(w & !1, h)
+    }
+
+    /// Feed the bitrate the connection allows right now, once per measuring
+    /// window, after [`Self::update`]. `full`: the screen's own size.
+    /// Returns the new limit when it changes. Steps down only on a busy
+    /// screen (a still picture sharpens over a few frames at any bitrate);
+    /// steps back up whenever there is plenty.
+    pub fn on_bitrate(&mut self, codec: Codec, full: Resolution, fps: u16, kbps: u32) -> Option<Option<u32>> {
+        if kbps == 0 || full.height == 0 {
+            return None;
+        }
+        let before = self.limit();
+        let have = f64::from(kbps);
+        let need = |i: usize| f64::from(sharp_kbps(codec, Self::res_at(full, i), fps));
+        if self.busy && have < need(self.bits_step) * Self::STARVED {
+            self.plenty = 0;
+            self.starved += 1;
+            if self.starved >= Self::BITS_DOWN_AFTER && self.bits_step + 1 < Self::STEPS.len() {
+                let now = Self::res_at(full, self.bits_step);
+                let mut next = self.bits_step + 1;
+                while next + 1 < Self::STEPS.len()
+                    && (Self::res_at(full, next) == now || have < need(next) * Self::ENOUGH)
+                {
+                    next += 1;
+                }
+                self.bits_step = next;
+                self.starved = 0;
+            }
+        } else if self.bits_step > 0 && have >= need(self.bits_step - 1) * Self::PLENTY {
+            self.starved = 0;
+            self.plenty += 1;
+            if self.plenty >= Self::BITS_UP_AFTER {
+                self.bits_step -= 1;
+                self.plenty = 0;
+            }
+        } else {
+            self.starved = 0;
+            self.plenty = 0;
+        }
+        let after = self.limit();
+        (after != before).then_some(after)
     }
 
     /// Feed one measuring window. `target_fps`: what we try to send (the
@@ -298,13 +372,14 @@ impl SizeGovernor {
         // encoder also caps how many new pictures we collect (the owner's
         // PC in Valorant: 30 new, 33 sent, at 15 ms each).
         let busy = screen_fps >= 10.0 && screen_fps >= sent_fps * 0.7;
+        self.busy = busy;
         self.hold = self.hold.saturating_sub(1);
         if !busy || encode_ms <= 0.0 {
             self.slow = 0;
             self.roomy = 0;
             return None;
         }
-        let before = self.step;
+        let before = self.limit();
         if encode_ms > budget_ms * Self::BUSY {
             self.roomy = 0;
             self.slow += 1;
@@ -343,7 +418,8 @@ impl SizeGovernor {
                 self.roomy = 0;
             }
         }
-        (self.step != before).then(|| self.limit())
+        let after = self.limit();
+        (after != before).then_some(after)
     }
 }
 
@@ -386,6 +462,68 @@ mod size_tests {
             }
         }
         assert_eq!(changed, Some(Some(1440)));
+    }
+
+    const FULL: Resolution = Resolution { width: 2880, height: 1800 };
+
+    #[test]
+    fn a_thin_connection_on_a_busy_screen_sends_a_smaller_sharp_picture() {
+        // The owner's Wi-Fi: about 12 Mbps clean. Full size needs ~34 Mbps;
+        // 1440 ~22 (too much); 1080 ~12.3: 12 is over 85% of that.
+        let mut g = SizeGovernor::new();
+        g.update(60, 55.0, 55.0, 8.0, 1800); // busy, compressing fast enough
+        assert_eq!(g.on_bitrate(Codec::Hevc, FULL, 60, 12_000), None);
+        g.update(60, 55.0, 55.0, 8.0, 1800);
+        assert_eq!(g.on_bitrate(Codec::Hevc, FULL, 60, 12_000), Some(Some(1080)));
+        // The same wobbly link (11-16 Mbps) holds it there.
+        for kbps in [11_000, 16_000, 13_000, 11_500, 15_000, 12_000] {
+            g.update(60, 55.0, 55.0, 4.0, 1080);
+            assert_eq!(g.on_bitrate(Codec::Hevc, FULL, 60, kbps), None);
+        }
+    }
+
+    #[test]
+    fn a_still_screen_keeps_full_size_on_a_thin_connection() {
+        let mut g = SizeGovernor::new();
+        for _ in 0..10 {
+            g.update(60, 2.0, 8.0, 20.0, 1800);
+            assert_eq!(g.on_bitrate(Codec::Hevc, FULL, 60, 5_000), None);
+        }
+    }
+
+    #[test]
+    fn plenty_of_bits_brings_full_size_back() {
+        let mut g = SizeGovernor::new();
+        for _ in 0..2 {
+            g.update(60, 55.0, 55.0, 8.0, 1800);
+            g.on_bitrate(Codec::Hevc, FULL, 60, 12_000);
+        }
+        assert_eq!(g.limit(), Some(1080));
+        // A cable: 80 Mbps. Back up a step at a time, 4 windows each.
+        let mut seen = vec![];
+        for _ in 0..12 {
+            g.update(60, 55.0, 55.0, 4.0, 1080);
+            if let Some(l) = g.on_bitrate(Codec::Hevc, FULL, 60, 80_000) {
+                seen.push(l);
+            }
+        }
+        assert_eq!(seen, vec![Some(1440), None]);
+    }
+
+    #[test]
+    fn the_smaller_of_speed_and_bits_wins() {
+        let mut g = SizeGovernor::new();
+        // Bits say 1080...
+        for _ in 0..2 {
+            g.update(60, 55.0, 55.0, 8.0, 1800);
+            g.on_bitrate(Codec::Hevc, FULL, 60, 12_000);
+        }
+        assert_eq!(g.limit(), Some(1080));
+        // ...then compressing is too slow even at 1080 (12 ms vs 14.2
+        // budget is fine; 16 ms is not): speed says smaller still.
+        g.update(60, 55.0, 55.0, 16.0, 1080);
+        let c = g.update(60, 55.0, 55.0, 16.0, 1080);
+        assert!(matches!(c, Some(Some(h)) if h < 1080), "{c:?}");
     }
 
     #[test]
