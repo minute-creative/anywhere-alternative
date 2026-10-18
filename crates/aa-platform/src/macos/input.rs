@@ -139,6 +139,8 @@ const FIELD_CLICK_STATE: u32 = 1;
 const FIELD_BUTTON_NUMBER: u32 = 3;
 const FIELD_DELTA_X: u32 = 4;
 const FIELD_DELTA_Y: u32 = 5;
+/// `kCGKeyboardEventAutorepeat`: non-zero marks a key-down as a held-key repeat.
+const FIELD_KEYBOARD_AUTOREPEAT: u32 = 8;
 
 /// USB HID usage of Caps Lock.
 const HID_CAPS_LOCK: u16 = 0x39;
@@ -402,14 +404,21 @@ impl MacInput {
         if !self.key_allowed(usage, pressed) {
             return;
         }
+        // A press of a key already down is the viewer's key repeat.
+        let repeat = pressed && self.keys.contains(&usage);
         if pressed {
-            if !self.keys.contains(&usage) {
+            if !repeat {
                 self.keys.push(usage);
             }
         } else {
             self.keys.retain(|k| *k != usage);
         }
         let Some(ev) = CGEvent::new_keyboard_event(self.source.as_deref(), code, pressed) else { return };
+        if repeat {
+            // Mark it as a repeat, like a held Mac key, so apps that treat
+            // repeats differently (games, text fields) behave normally.
+            CGEvent::set_integer_value_field(Some(&ev), CGEventField(FIELD_KEYBOARD_AUTOREPEAT), 1);
+        }
         if modifier_flag(usage).is_some() {
             // Modifiers are "flags changed" events on a Mac, not key presses.
             CGEvent::set_type(Some(&ev), CGEventType(FLAGS_CHANGED));

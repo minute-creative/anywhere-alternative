@@ -900,14 +900,22 @@ impl ApplicationHandler<Wake> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.repeat {
-                    return; // the host OS generates its own repeats
-                }
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if let Some(hid) = hid_usage(code) {
                         let hid = shortcut_key(hid, self.cmd_as_ctrl, crate::link::host_is_mac());
                         let pressed = event.state == ElementState::Pressed;
                         let is_modifier = (0xE0..=0xE7).contains(&hid);
+                        if event.repeat {
+                            // Holding a key: pass each repeat on as another
+                            // press. Neither Windows nor macOS repeats a key
+                            // another program typed, so holding the right
+                            // arrow moved one step only (owner, 0.5.9).
+                            // Modifiers and Caps Lock never repeat.
+                            if pressed && !is_modifier && hid != 0x39 && self.held_keys.contains(&hid) {
+                                self.send(InputEvent::Key { hid_usage: hid, pressed: true });
+                            }
+                            return;
+                        }
                         if cfg!(target_os = "macos") && code == winit::keyboard::KeyCode::CapsLock {
                             // macOS reports Caps Lock as a state, not a key:
                             // "pressed" when the light goes on, "released"
