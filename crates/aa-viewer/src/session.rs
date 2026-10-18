@@ -160,9 +160,15 @@ pub async fn run(
                         continue;
                     }
                     match ControlMessage::decode(&packet.payload) {
-                        Ok(ControlMessage::Welcome { negotiated, host_os, full_access, .. }) => {
+                        Ok(ControlMessage::Welcome { negotiated, host_os, full_access, version, .. }) => {
                             crate::link::set_host_os(&host_os);
-                            crate::link::update_host_info(|i| i.full_access = full_access);
+                            let note = crate::update_note::once(&version, host_os == "macos");
+                            crate::link::update_host_info(|i| {
+                                i.full_access = full_access;
+                                if note.is_some() {
+                                    i.update_note = note;
+                                }
+                            });
                             return anyhow::Ok(negotiated);
                         }
                         Ok(ControlMessage::Reject { reason }) if reason.contains("busy") => {

@@ -650,6 +650,7 @@ async fn handle_packet(
                                     negotiated,
                                     host_os: std::env::consts::OS.to_owned(),
                                     full_access: stream.full_access,
+                                    version: aa_platform::update::current().to_owned(),
                                 },
                                 seq,
                             )
@@ -687,6 +688,7 @@ async fn handle_packet(
                                     negotiated,
                                     host_os: std::env::consts::OS.to_owned(),
                                     full_access,
+                                    version: aa_platform::update::current().to_owned(),
                                 },
                                 seq,
                             )

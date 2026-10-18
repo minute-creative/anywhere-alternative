@@ -35,6 +35,10 @@ pub enum ControlMessage {
         /// (see [`ControlMessage::SetShare`]) and always has full control.
         #[serde(default)]
         full_access: bool,
+        /// The host program's version ("0.5.9"), for the viewer's one-time
+        /// "update the other computer" note. Empty from hosts before 0.5.9.
+        #[serde(default)]
+        version: String,
     },
     /// Host → viewer: refused, with a human-readable reason.
     Reject { reason: String },

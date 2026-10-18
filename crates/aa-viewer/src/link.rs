@@ -104,6 +104,8 @@ pub struct HostInfo {
     pub notes: Vec<String>,
     /// The host's current input warning (also one of `notes`).
     pub warning: Option<String>,
+    /// The one-time "update the other computer" note, if due.
+    pub update_note: Option<crate::update_note::UpdateNote>,
 }
 
 static INFO: Mutex<Option<HostInfo>> = Mutex::new(None);

@@ -66,6 +66,10 @@ pub struct Overlay {
     pub requests: Vec<crate::link::ViewerCommand>,
     /// The share list was asked for since the panel opened.
     asked_list: bool,
+    /// The update note on screen now (None once closed with its X).
+    note: Option<crate::update_note::UpdateNote>,
+    /// The person closed the note.
+    note_closed: bool,
 }
 
 impl std::fmt::Debug for Overlay {
@@ -109,13 +113,17 @@ impl Overlay {
             hint_until: Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
             requests: Vec::new(),
             asked_list: false,
+            note: None,
+            note_closed: false,
         }
     }
 
     /// Feed a window event. Returns true if the overlay consumed it (the
     /// caller must then NOT forward it to the host).
     pub fn on_event(&mut self, window: &Window, event: &winit::event::WindowEvent) -> bool {
+        let note = self.note.is_some();
         if !self.open
+            && !note
             && !matches!(
                 event,
                 winit::event::WindowEvent::Resized(_) | winit::event::WindowEvent::ScaleFactorChanged { .. }
@@ -124,7 +132,15 @@ impl Overlay {
             return false;
         }
         let r = self.state.on_window_event(window, event);
-        self.open && r.consumed
+        if self.open {
+            return r.consumed;
+        }
+        // Only the update note is up: keep clicks on it here, and let
+        // everything else (moves, keys, clicks elsewhere) go to the stream.
+        note && matches!(
+            event,
+            winit::event::WindowEvent::MouseInput { .. } | winit::event::WindowEvent::MouseWheel { .. }
+        ) && self.ctx.is_pointer_over_egui()
     }
 
     pub fn toggle(&mut self) {
@@ -150,13 +166,14 @@ impl Overlay {
         host_label: &str,
     ) {
         let show_hint = self.hint_until.is_some_and(|t| std::time::Instant::now() < t);
-        if !self.open && !show_hint && !settings.show_stats {
+        let info = crate::link::host_info();
+        self.note = if self.note_closed { None } else { info.update_note.clone() };
+        if !self.open && !show_hint && !settings.show_stats && self.note.is_none() {
             return;
         }
 
         let raw = self.state.take_egui_input(window);
         self.ctx.begin_pass(raw);
-        let info = crate::link::host_info();
         let codec = info.codec.map_or(String::new(), |c| format!("  {}", codec_name(c)));
         let fps_line = if info.target_fps > 0 && u32::from(info.target_fps) != stats.fps {
             format!("{}/{} fps", stats.fps, info.target_fps)
@@ -175,10 +192,19 @@ impl Overlay {
             );
         }
 
-        if settings.show_stats && !self.open {
+        if !self.open && (settings.show_stats || self.note.is_some()) {
             egui::Area::new(egui::Id::new("stats")).anchor(egui::Align2::RIGHT_BOTTOM, [-8.0, -8.0]).show(
                 &self.ctx,
                 |ui| {
+                    if let Some(note) = &self.note {
+                        if Self::update_note(ui, note) {
+                            self.note_closed = true;
+                        }
+                        ui.add_space(6.0);
+                    }
+                    if !settings.show_stats {
+                        return;
+                    }
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         // One line, never wrapped next to the screen edge.
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -309,6 +335,26 @@ impl Overlay {
         }
         // Handled above; egui checks (in debug builds) that nothing was lost.
         out.textures_delta.clear();
+    }
+
+    /// The one-time update note (see `update_note`). True when its X was
+    /// clicked.
+    fn update_note(ui: &mut egui::Ui, note: &crate::update_note::UpdateNote) -> bool {
+        let mut close = false;
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            ui.set_max_width(340.0);
+            ui.horizontal(|ui| {
+                ui.strong(&note.title);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close = ui.small_button("×").on_hover_text("Close").clicked();
+                });
+            });
+            ui.label(&note.text);
+            for c in &note.changes {
+                ui.label(format!("•  {c}"));
+            }
+        });
+        close
     }
 
     fn hotkey_label() -> &'static str {

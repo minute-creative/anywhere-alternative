@@ -807,6 +807,9 @@ impl ApplicationHandler<Wake> for App {
         // While the overlay is open it owns input; nothing goes to the host.
         if let (Some(o), Some(w)) = (&mut self.overlay, &self.window) {
             let consumed = o.on_event(w, &event);
+            if !o.open && consumed {
+                return; // a click on the update note's X
+            }
             if o.open {
                 if let Some(w) = &self.window {
                     w.request_redraw();

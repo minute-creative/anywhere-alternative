@@ -30,6 +30,7 @@ mod pacing;
 mod pads;
 mod session;
 mod udp;
+mod update_note;
 mod window;
 
 use std::net::SocketAddr;
