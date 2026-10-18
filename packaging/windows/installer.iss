@@ -22,6 +22,14 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 WizardStyle=modern
+; Don't let Windows' Restart Manager hunt for programs using our files: the
+; camera DLL is loaded by Windows' shared camera service, and asking that to
+; close can hang a silent install with nothing on screen (the PC's
+; automatic updates stalled three times, 0.5.9 to 0.5.11). Our own programs
+; are closed in PrepareToInstall below; the DLL is swapped on restart
+; (restartreplace).
+CloseApplications=no
+RestartApplications=no
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
@@ -111,5 +119,12 @@ var
 begin
   Exec(ExpandConstant('{sys}\sc.exe'), 'stop AnywhereHost', '', SW_HIDE, ewWaitUntilTerminated, Code);
   Sleep(4000);
+  // Anything of ours still running holds its .exe open: end it, so the
+  // files can be replaced without asking anyone (the app reopens itself
+  // after an automatic update, see [Run]).
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM anywhere.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM aa-viewer.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM aa-host.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Sleep(1000);
   Result := '';
 end;

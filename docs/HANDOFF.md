@@ -366,6 +366,14 @@ app" real test, confirm HEVC on the PC.
   `sc start AnywhereHost`) before running the installer, and the installer
   writes C:\ProgramData\AnywhereAlternative\installer.log: READ IT after
   the next update to find the real cause.
+- Third stall (0.5.9 app stuck on "Installing the update...", 0.5.11
+  out). Likely cause: Inno's Restart Manager (CloseApplications defaults
+  on) trying to close the shared Windows camera service that loads
+  aa_vcam.dll, hanging the /VERYSILENT install. 0.5.12 installer:
+  CloseApplications=no, RestartApplications=no, and PrepareToInstall
+  taskkills anywhere.exe / aa-viewer.exe / aa-host.exe after stopping the
+  service. The fix lives in the downloaded installer, so it applies to the
+  next update whatever version is installed. Confirm via installer.log.
 - OPEN: 0.5.8 -> 0.5.9 auto-update on the PC (10:20 UTC) stopped the
   service, then the installer never finished and nothing restarted the
   service (app wouldn't open). Owner started "Anywhere sharing" by hand;

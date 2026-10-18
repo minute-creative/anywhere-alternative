@@ -13,6 +13,7 @@
 /// What changed, newest first, in words for the person using it. Add the
 /// new version's lines here with each release.
 const CHANGES: &[(&str, &[&str])] = &[
+    ("0.5.12", &["PC updates no longer get stuck on \"Installing the update\""]),
     ("0.5.11", &["Updates on a PC can no longer leave Anywhere closed"]),
     (
         "0.5.10",
