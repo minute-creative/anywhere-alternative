@@ -68,6 +68,7 @@ Filename: "{app}\anywhere.exe"; Description: "Open Anywhere"; Flags: nowait post
 Filename: "{app}\anywhere.exe"; Parameters: "--after-update"; Flags: nowait runasoriginaluser; Check: Relaunch
 
 [UninstallRun]
+Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /F /TN AnywhereUpdateGuard"; Flags: runhidden; RunOnceId: "guarddelete"
 Filename: "{sys}\sc.exe"; Parameters: "stop AnywhereHost"; Flags: runhidden; RunOnceId: "svcstop"
 Filename: "{sys}\sc.exe"; Parameters: "delete AnywhereHost"; Flags: runhidden; RunOnceId: "svcdelete"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Anywhere host"""; Flags: runhidden; RunOnceId: "fwhost"

@@ -293,8 +293,18 @@ fn update_now(child: &mut Option<Child>, stop_file: &std::path::Path) -> anyhow:
         // SAFETY: closing our own handle once.
         let _ = unsafe { CloseHandle(c.process) };
     }
-    if let Err(e) =
-        std::process::Command::new(&setup).args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"]).spawn()
+    // Safety net: the installer stops this service and starts it again at
+    // its very end. Twice on the owner's PC (0.5.9, 0.5.10) it stalled in
+    // between, the service stayed stopped and the app wouldn't open until
+    // the owner started "Anywhere sharing" by hand. So ask Windows to start
+    // the service in 5 minutes whatever happens (harmless if it runs).
+    schedule_service_restart();
+    // The installer's own log, so a stalled update can be explained.
+    let log = crate::trust::system_dir().join("installer.log");
+    if let Err(e) = std::process::Command::new(&setup)
+        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"])
+        .arg(format!("/LOG={}", log.display()))
+        .spawn()
     {
         // Take back "installing now": the app would otherwise wait for an
         // install that never comes. The loop restarts the host next pass.
@@ -302,6 +312,33 @@ fn update_now(child: &mut Option<Child>, stop_file: &std::path::Path) -> anyhow:
         return Err(anyhow::anyhow!("could not start the installer: {e}"));
     }
     Ok(true)
+}
+
+/// A one-time Windows scheduled task, 5 minutes from now, running as the
+/// system: `sc start AnywhereHost`. Replaced on every update (`/F`).
+fn schedule_service_restart() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // Local time, as schtasks reads it; the date is today, so near midnight
+    // the task may be for "yesterday" and never run: rare and harmless.
+    let Ok(out) = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", "(Get-Date).AddMinutes(5).ToString('HH:mm')"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    else {
+        return;
+    };
+    let at = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if at.len() != 5 {
+        return;
+    }
+    let ok = std::process::Command::new("schtasks.exe")
+        .args(["/Create", "/F", "/TN", "AnywhereUpdateGuard", "/RU", "SYSTEM", "/SC", "ONCE", "/ST", &at, "/TR"])
+        .arg("sc.exe start AnywhereHost")
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .is_ok_and(|s| s.success());
+    tracing::info!(at, ok, "update safety net: the sharing service will be started again if the installer stalls");
 }
 
 /// Start the Anywhere app for whoever is signed in to `session` (as them,

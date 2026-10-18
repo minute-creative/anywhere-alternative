@@ -361,6 +361,11 @@ app" real test, confirm HEVC on the PC.
   I'd told the owner Ctrl+Shift+G; on a Mac it's Cmd+Shift+G): the host now
   reports when a game hides and clips the pointer (StreamInfo
   cursor_captured) and the viewer switches game mouse on/off to match.
+- 0.5.10 auto-update stalled the same way on the PC. 0.5.11: the service
+  now schedules a one-time SYSTEM task (AnywhereUpdateGuard, +5 min,
+  `sc start AnywhereHost`) before running the installer, and the installer
+  writes C:\ProgramData\AnywhereAlternative\installer.log: READ IT after
+  the next update to find the real cause.
 - OPEN: 0.5.8 -> 0.5.9 auto-update on the PC (10:20 UTC) stopped the
   service, then the installer never finished and nothing restarted the
   service (app wouldn't open). Owner started "Anywhere sharing" by hand;
