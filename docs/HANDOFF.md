@@ -351,6 +351,13 @@ app" real test, confirm HEVC on the PC.
   25% of the start (unless loss >= 25%), a halving holds 3 reports, and
   growth is 25%/s while under half the wall. Test
   `one_hiccup_does_not_sink_the_bitrate`.
+- OPEN: 0.5.8 -> 0.5.9 auto-update on the PC (10:20 UTC) stopped the
+  service, then the installer never finished and nothing restarted the
+  service (app wouldn't open). Owner started "Anywhere sharing" by hand;
+  the service retried the update and it finished in 15 s. No installer log
+  to see why the first run stalled. Idea: have the installer always
+  restart the service on exit, or a Windows "restart on failure" recovery
+  action plus a scheduled-task watchdog.
 - Valorant clicks (owner accepted the risk: Riot doesn't support it, ban
   can't be ruled out): while the `vgc` service runs, `windows/vmouse.rs`
   plugs a virtual USB mouse (`hidmouse.rs`, pid.codes 1209:0001, 5 buttons,
