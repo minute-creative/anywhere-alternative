@@ -230,6 +230,29 @@ fn main() -> anyhow::Result<()> {
     };
 
     if args.headless {
+        // AA_TEST_INPUT: send a mouse move and a key tap every half second,
+        // so the compatibility test (scripts/compat) can check that input
+        // reaches the host. Only for headless test runs.
+        if std::env::var_os("AA_TEST_INPUT").is_some() {
+            let tx = cmd_tx.clone();
+            std::thread::spawn(move || {
+                use aa_core::input::InputEvent;
+                for i in 0u16.. {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let x = (i % 100) * 600;
+                    let events = [
+                        InputEvent::MouseMoveAbs { x, y: x },
+                        InputEvent::Key { hid_usage: 0x04, pressed: true },
+                        InputEvent::Key { hid_usage: 0x04, pressed: false },
+                    ];
+                    for ev in events {
+                        if tx.blocking_send(link::ViewerCommand::Input(ev)).is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+        }
         // Keep the sender alive: a closed command channel means "window closed".
         let result = runtime.block_on(run_reconnecting(&args, host, None, cmd_rx, None, mic, None, pad_out));
         drop(cmd_tx);

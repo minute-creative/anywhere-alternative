@@ -351,6 +351,26 @@ app" real test, confirm HEVC on the PC.
   25% of the start (unless loss >= 25%), a halving holds 3 reports, and
   growth is 25%/s while under half the wall. Test
   `one_hiccup_does_not_sink_the_bitrate`.
+- Holding a key repeated only once (right arrow moved one step): neither
+  Windows nor macOS repeats injected keys. The viewer now forwards each
+  held-key repeat as another press; a Mac host flags it as autorepeat.
+- Screen mask (owner request): "Black out the PC's screen" in the stream
+  window's settings (only when the host is a PC). `windows/privacy.rs`: a
+  black, topmost, click-through window over all monitors with
+  `WDA_EXCLUDEFROMCAPTURE`, so DXGI capture sees through it; dim line "This
+  PC is in use remotely"; never shown if Windows refuses the capture
+  exclusion. Off on every way a viewer leaves (`restore_speakers`). Limits:
+  the PC's own pointer still shows; Start pop-ups may peek over it. Not on a
+  Mac host yet. NOT yet confirmed on the owner's PC.
+- One-time update note: Welcome carries the host's version (serde
+  default). `aa-viewer/src/update_note.rs` holds a short plain-words
+  changelog (add lines each release!) and shows a bottom-right note with an
+  X once per newer version (`update-note-seen` file).
+- Compatibility test: CI job "works with older versions" builds the last
+  three release tags once (cached), then runs old host + new viewer (with
+  test input via `AA_TEST_INPUT`) and new host + old viewer in mock mode
+  (`scripts/compat`). Old viewers send no test input, so that direction
+  checks connect and pictures only.
 - Caps Lock Mac -> PC: injected by key name (VK_CAPITAL) plus scancode;
   both ends log it ("Caps Lock changed" on the Mac viewer, "Caps Lock from
   the viewer" on the PC service). If it still fails, those lines say which

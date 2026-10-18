@@ -68,3 +68,45 @@ jobs:
             done
           } > comment.md
           gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@comment.md >/dev/null
+
+  # Old and new copies of Anywhere must still work together: the last three
+  # releases against this code, both ways round, with pretend screens.
+  compat:
+    name: works with older versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the release tags
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: last three releases
+        id: tags
+        run: |
+          list=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -3 | tr '\n' ' ')
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "key=$(echo $list | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: old-builds
+          key: compat-old-builds-v1-${{ steps.tags.outputs.key }}
+          restore-keys: compat-old-builds-v1-
+      - name: build the older versions (only the first time)
+        run: scripts/compat/build-old.sh ${{ steps.tags.outputs.list }} 2>&1 | tee compat.log; exit ${PIPESTATUS[0]}
+      - name: build this version
+        run: cargo build -p aa-host -p aa-viewer 2>&1 | tee -a compat.log; exit ${PIPESTATUS[0]}
+      - name: old and new together
+        run: scripts/compat/run-all.sh target/debug/aa-host target/debug/aa-viewer ${{ steps.tags.outputs.list }} 2>&1 | tee -a compat.log; exit ${PIPESTATUS[0]}
+      - name: report failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### Compatibility test failed"
+            echo
+            echo '```'
+            grep -vE "^\s*Compiling|^\s*Downloaded" compat.log | tail -80
+            echo '```'
+          } > comment.md
+          gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@comment.md >/dev/null

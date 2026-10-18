@@ -6,3 +6,7 @@ tools/sim/*.log
 tools/sim/report.md
 tools/sim/chaos-report.md
 /dist
+
+# compatibility test (scripts/compat)
+old-builds/
+old-target/
