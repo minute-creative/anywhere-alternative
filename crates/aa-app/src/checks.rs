@@ -29,7 +29,7 @@ pub fn run() -> Vec<Check> {
         });
         v.push(Check {
             name: "usbip-win2",
-            why: "Full DualSense: adaptive triggers, haptics, touchpad, motion",
+            why: "Full DualSense (triggers, haptics, touchpad, motion), and clicks while Valorant runs",
             ok: exists(r"C:\Program Files\USBip\usbip.exe"),
             url: "https://github.com/vadimgrn/usbip-win2/releases",
         });

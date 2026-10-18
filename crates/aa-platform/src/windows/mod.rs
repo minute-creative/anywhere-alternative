@@ -28,6 +28,7 @@ pub mod session;
 pub mod share;
 pub mod syskeys;
 pub mod vcam;
+pub mod vmouse;
 
 use aa_core::capability::Capabilities;
 use aa_core::config::StreamConfig;

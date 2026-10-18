@@ -335,6 +335,50 @@ impl InputInjector for SendInputInjector {
             }
             _ => {}
         }
+        // While Valorant's anti-cheat runs, clicks, aiming and the wheel go
+        // through a virtual USB mouse (see `vmouse`); any mouse event also
+        // lets it start plugging in early.
+        if matches!(
+            event,
+            InputEvent::MouseButton { .. }
+                | InputEvent::MouseMoveRel { .. }
+                | InputEvent::MouseScroll { .. }
+                | InputEvent::MouseMoveAbs { .. }
+        ) {
+            let usb = super::vmouse::shared().lock().ok().and_then(|mut r| r.route());
+            if let Some(m) = usb {
+                match event {
+                    InputEvent::MouseButton { button, pressed } => {
+                        if pressed {
+                            // The click lands where the pointer is: put it
+                            // where the viewer's cursor is first.
+                            if let Some((px, py)) = self.last_pos {
+                                // SAFETY: plain Win32 call.
+                                let _ = unsafe { SetCursorPos(px, py) };
+                            }
+                        }
+                        let bit = match button {
+                            MouseButton::Left => 1,
+                            MouseButton::Right => 2,
+                            MouseButton::Middle => 4,
+                            MouseButton::Back => 8,
+                            MouseButton::Forward => 16,
+                        };
+                        m.button(bit, pressed);
+                        return Ok(());
+                    }
+                    InputEvent::MouseMoveRel { dx, dy } => {
+                        m.move_by(dx, dy);
+                        return Ok(());
+                    }
+                    InputEvent::MouseScroll { dx, dy } => {
+                        m.scroll(dx, dy);
+                        return Ok(());
+                    }
+                    _ => {} // pointing: SetCursorPos below, which Vanguard allows
+                }
+            }
+        }
         let input = match event {
             InputEvent::MouseMoveAbs { x, y } => {
                 // SetCursorPos takes real pixels and is immune to the

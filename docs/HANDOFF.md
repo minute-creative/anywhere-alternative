@@ -351,6 +351,16 @@ app" real test, confirm HEVC on the PC.
   25% of the start (unless loss >= 25%), a halving holds 3 reports, and
   growth is 25%/s while under half the wall. Test
   `one_hiccup_does_not_sink_the_bitrate`.
+- Valorant clicks (owner accepted the risk: Riot doesn't support it, ban
+  can't be ruled out): while the `vgc` service runs, `windows/vmouse.rs`
+  plugs a virtual USB mouse (`hidmouse.rs`, pid.codes 1209:0001, 5 buttons,
+  16-bit relative X/Y, wheel, pan) into the PC through our USB/IP server +
+  usbip-win2, and routes clicks, relative moves (game mouse) and the wheel
+  through it; pointing stays on SetCursorPos (allowed). Unplugged when
+  Vanguard stops. Without usbip-win2 the viewer's corner note says to
+  install it. Reports are queued (a click is two reports), never repeated.
+  NOT yet confirmed in Valorant. If Vanguard also ignores it, the next
+  options are thin: say so honestly.
 - Holding a key repeated only once (right arrow moved one step): neither
   Windows nor macOS repeats injected keys. The viewer now forwards each
   held-key repeat as another press; a Mac host flags it as autorepeat.

@@ -32,6 +32,7 @@ pub mod discover;
 pub mod ds5dev;
 pub mod hid_mac;
 pub mod hid_scancode;
+pub mod hidmouse;
 pub mod lan;
 pub mod mock;
 pub mod padhub;
@@ -265,18 +266,19 @@ pub fn keep_awake(on: bool) {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let _ = on;
 }
-/// Is the app already open? Then bring its window forward and say so, so a
-/// second start (Start menu, desktop icon) doesn't open a second copy. A
-/// Mac does this by itself for .app bundles.
+
 /// Something on this computer that stops the other computer's mouse or
 /// keys from working, in plain words for the viewer's corner display. Today:
 /// Riot Vanguard (Valorant's anti-cheat) on a PC, which swallows clicks.
 pub fn input_blocker() -> Option<&'static str> {
+    // With Vanguard running, clicks go through a virtual USB mouse
+    // (`windows::vmouse`), which needs usbip-win2. Only say something when
+    // that can't work.
     #[cfg(target_os = "windows")]
     {
-        windows::vanguard_running().then_some(
-            "Valorant's anti-cheat (Riot Vanguard) is running on the PC and blocks mouse clicks from other apps. \
-             Close Valorant and the Riot Client (tray icon > Exit Vanguard) to use the mouse.",
+        (windows::vmouse::status() == windows::vmouse::NO_DRIVER && windows::vanguard_running()).then_some(
+            "Valorant's anti-cheat (Riot Vanguard) is running on the PC and blocks normal clicks. To click while it \
+             runs, install usbip-win2 on the PC (Anywhere app > Extras), or close Valorant and the Riot Client.",
         )
     }
     #[cfg(not(target_os = "windows"))]
@@ -303,6 +305,9 @@ pub fn screen_mask(on: bool) -> bool {
     }
 }
 
+/// Is the app already open? Then bring its window forward and say so, so a
+/// second start (Start menu, desktop icon) doesn't open a second copy. A
+/// Mac does this by itself for .app bundles.
 pub fn app_already_open(title: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
