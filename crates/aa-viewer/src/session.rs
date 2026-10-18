@@ -749,6 +749,9 @@ async fn handle_command(
         Some(ViewerCommand::SetHostMute(muted)) => {
             send_control(socket, &ControlMessage::SetHostMute { muted }, seq).await?;
         }
+        Some(ViewerCommand::SetScreenMask(on)) => {
+            send_control(socket, &ControlMessage::SetScreenMask { on }, seq).await?;
+        }
         Some(ViewerCommand::SetMic(on)) => {
             *m.manual = on;
             apply_mic(m.mic, *m.manual || m.call, m.calls, m.start);

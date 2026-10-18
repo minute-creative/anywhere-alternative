@@ -46,6 +46,10 @@ pub enum ControlMessage {
     /// sitting next to the host PC doesn't hear everything twice. The host
     /// always restores on disconnect.
     SetHostMute { muted: bool },
+    /// Viewer → host: black out the host's own monitor (the viewer still
+    /// sees the desktop), so people near the host can't read it. The host
+    /// always takes it off on disconnect. Hosts older than 0.5.9 ignore it.
+    SetScreenMask { on: bool },
     /// Viewer → every host on the LAN (broadcast): who is out there?
     Discover,
     /// Host → viewer: I am, and this is my name. Sent to whoever asked.

@@ -285,6 +285,24 @@ pub fn input_blocker() -> Option<&'static str> {
     }
 }
 
+/// Black out this computer's own monitor while the viewer still sees it
+/// (the viewer's "screen mask" switch). Returns false where it isn't
+/// available yet (a Mac host).
+pub fn screen_mask(on: bool) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::privacy::set(on);
+        true
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if on {
+            tracing::info!("screen mask asked for, not available on this computer yet");
+        }
+        false
+    }
+}
+
 pub fn app_already_open(title: &str) -> bool {
     #[cfg(target_os = "windows")]
     {

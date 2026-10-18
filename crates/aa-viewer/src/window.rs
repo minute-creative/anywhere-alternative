@@ -578,6 +578,9 @@ impl App {
         if self.settings.mute_host != self.applied.mute_host {
             let _ = self.commands.try_send(ViewerCommand::SetHostMute(self.settings.mute_host));
         }
+        if self.settings.mask_host != self.applied.mask_host {
+            let _ = self.commands.try_send(ViewerCommand::SetScreenMask(self.settings.mask_host));
+        }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if (self.settings.volume_boost_db - self.applied.volume_boost_db).abs() > 0.01 {
             aa_platform::audio::set_boost_db(self.settings.volume_boost_db);
@@ -735,6 +738,9 @@ impl ApplicationHandler<Wake> for App {
                     let _ = self.commands.try_send(ViewerCommand::SetMaxBitrate((s.max_mbps * 1000.0) as u32));
                     let _ = self.commands.try_send(ViewerCommand::SetHostMute(s.mute_host));
                     let _ = self.commands.try_send(ViewerCommand::SetMic(s.send_mic));
+                    if s.mask_host {
+                        let _ = self.commands.try_send(ViewerCommand::SetScreenMask(true));
+                    }
                 }
             }
         }

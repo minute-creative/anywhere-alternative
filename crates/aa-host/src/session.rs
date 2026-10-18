@@ -735,6 +735,10 @@ async fn handle_packet(
                         tracing::info!("host mute requested but not supported on this host");
                     }
                 }
+                // Black out (or show again) this computer's own monitor.
+                ControlMessage::SetScreenMask { on } if is_current_viewer => {
+                    aa_platform::screen_mask(on);
+                }
                 // Discovery answers come from any state, even mid-session:
                 // a second Mac asking "who's there" should still learn our
                 // name (it will be told we're busy when it says Hello).
@@ -1060,9 +1064,11 @@ fn set_connected(on: bool) {
     }
 }
 
-/// Put the host's speakers back how we found them. Called on every way a
-/// viewer can leave, so a dropped Wi-Fi link never leaves the PC muted.
+/// Put the host's speakers back how we found them and take the screen mask
+/// off. Called on every way a viewer can leave, so a dropped Wi-Fi link
+/// never leaves the PC muted or its monitor black.
 fn restore_speakers(speaker: &mut Option<Box<dyn aa_platform::audio::SpeakerControl>>) {
+    aa_platform::screen_mask(false);
     if let Some(s) = speaker {
         if let Err(e) = s.restore() {
             tracing::warn!("restoring host speakers failed: {e}");

@@ -26,6 +26,8 @@ pub struct Settings {
     pub volume_boost_db: f32,
     /// Send this Mac's microphone to the PC.
     pub send_mic: bool,
+    /// Black out the PC's own monitor while we work on it.
+    pub mask_host: bool,
 }
 
 impl Settings {
@@ -38,6 +40,7 @@ impl Settings {
             mute_host: false,
             volume_boost_db: 6.0,
             send_mic: false,
+            mask_host: false,
         }
     }
 }
@@ -212,6 +215,9 @@ impl Overlay {
                     ui.heading("Stream");
                     ui.add(egui::Slider::new(&mut settings.max_mbps, 2.0..=150.0).text("Max Mbps").logarithmic(true));
                     ui.checkbox(&mut settings.show_stats, "Show stats");
+                    if !crate::link::host_is_mac() {
+                        ui.checkbox(&mut settings.mask_host, "Black out the PC's screen (you still see it here)");
+                    }
                     ui.add_space(8.0);
                     ui.heading("Audio");
                     let other = if crate::link::host_is_mac() { "Mac" } else { "PC" };
