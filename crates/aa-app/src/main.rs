@@ -2206,7 +2206,7 @@ mod tests {
         assert_eq!(s.viewer.as_deref(), Some("192.168.1.5:5555"));
         assert_eq!(s.warnings, vec!["allow Accessibility".to_owned()]);
         let mut door = lines.clone();
-        door.push("2026-10-18T06:00:00.0Z  INFO aa_platform::portmap: outside: reachable from anywhere at 103.206.1.2:7700 (the router opened a door, UPnP)".into());
+        door.push("2026-10-18T06:00:00.0Z  INFO aa_platform::portmap: outside: reachable from anywhere at 203.0.113.7:7700 (the router opened a door, UPnP)".into());
         let d = read_status(&door);
         assert_eq!(d.outside.as_ref().map(|o| o.1), Some(true));
         assert_eq!(d.warnings.len(), 1, "the outside line is not a warning");

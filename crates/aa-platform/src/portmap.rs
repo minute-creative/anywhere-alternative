@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn public_and_shared_addresses() {
-        assert!(is_public(Ipv4Addr::new(103, 206, 1, 2)));
+        assert!(is_public(Ipv4Addr::new(203, 0, 113, 7)));
         assert!(!is_public(Ipv4Addr::new(10, 113, 0, 1)), "provider-internal");
         assert!(!is_public(Ipv4Addr::new(100, 72, 3, 4)), "CGNAT range");
         assert!(!is_public(Ipv4Addr::new(192, 168, 1, 1)));
@@ -490,9 +490,9 @@ mod tests {
         let (svc, url) = control_url(xml).unwrap();
         assert_eq!(svc, "urn:schemas-upnp-org:service:WANIPConnection:1");
         assert_eq!(url, "/upnp/control/WANIPConn1");
-        let soap = "<s:Body><u:GetExternalIPAddressResponse><NewExternalIPAddress>103.206.1.2\
+        let soap = "<s:Body><u:GetExternalIPAddressResponse><NewExternalIPAddress>203.0.113.7\
                     </NewExternalIPAddress></u:GetExternalIPAddressResponse></s:Body>";
-        assert_eq!(tag(soap, "NewExternalIPAddress").map(str::trim), Some("103.206.1.2"));
+        assert_eq!(tag(soap, "NewExternalIPAddress").map(str::trim), Some("203.0.113.7"));
         assert_eq!(tag("<errorCode>725</errorCode>", "errorCode"), Some("725"));
     }
 
@@ -530,7 +530,7 @@ mod tests {
                 let (status, reply) = if head.starts_with("GET") {
                     (200, "<root><service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType><controlURL>/ctl</controlURL></service></root>".to_owned())
                 } else if head.contains("#GetExternalIPAddress") {
-                    (200, "<NewExternalIPAddress>103.206.1.2</NewExternalIPAddress>".to_owned())
+                    (200, "<NewExternalIPAddress>203.0.113.7</NewExternalIPAddress>".to_owned())
                 } else if body.contains("<NewLeaseDuration>3600<") {
                     (500, "<errorCode>725</errorCode>".to_owned())
                 } else {
@@ -542,7 +542,7 @@ mod tests {
         let g = Gateway::from_location(&format!("http://{addr}/desc.xml")).expect("description");
         assert_eq!(g.control, "/ctl");
         assert_eq!(g.local, Ipv4Addr::LOCALHOST);
-        assert_eq!(g.external_ip(), Some(Ipv4Addr::new(103, 206, 1, 2)));
+        assert_eq!(g.external_ip(), Some(Ipv4Addr::new(203, 0, 113, 7)));
         assert_eq!(g.open(7700), Some(7700), "falls back to a permanent door after error 725");
         let calls = seen.lock().unwrap();
         let add = calls.iter().rfind(|c| c.contains("#AddPortMapping")).expect("asked to open");
@@ -552,9 +552,9 @@ mod tests {
 
     #[test]
     fn describes_each_case_plainly() {
-        let open = Outside::Open { addr: "103.206.1.2:7700".parse().unwrap(), how: "UPnP" };
-        assert!(open.describe().starts_with("reachable from anywhere at 103.206.1.2:7700"));
-        assert_eq!(open.addr(), Some("103.206.1.2:7700".parse().unwrap()));
+        let open = Outside::Open { addr: "203.0.113.7:7700".parse().unwrap(), how: "UPnP" };
+        assert!(open.describe().starts_with("reachable from anywhere at 203.0.113.7:7700"));
+        assert_eq!(open.addr(), Some("203.0.113.7:7700".parse().unwrap()));
         assert!(Outside::Shared { router_outside: Ipv4Addr::new(10, 1, 2, 3) }.describe().contains("Tailscale"));
         assert!(Outside::NoHelp.addr().is_none());
     }

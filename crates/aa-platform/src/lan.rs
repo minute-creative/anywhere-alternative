@@ -203,7 +203,7 @@ mod local_tests {
         ] {
             assert!(is_local_network(local.parse().unwrap()), "{local}");
         }
-        for far in ["103.206.1.2", "8.8.8.8", "2401:4900::1", "::ffff:103.206.1.2"] {
+        for far in ["203.0.113.7", "8.8.8.8", "2401:4900::1", "::ffff:203.0.113.7"] {
             assert!(!is_local_network(far.parse().unwrap()), "{far}");
         }
     }
