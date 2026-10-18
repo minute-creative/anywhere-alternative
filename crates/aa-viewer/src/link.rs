@@ -113,3 +113,34 @@ pub fn update_host_info(f: impl FnOnce(&mut HostInfo)) {
         f(i.get_or_insert_with(HostInfo::default));
     }
 }
+
+/// What happened in this viewing, for the anonymous usage note sent when
+/// it ends (`aa_platform::telemetry`, only with permission). Counts, never
+/// content.
+#[derive(Debug, Clone, Default)]
+pub struct Summary {
+    /// Seconds connected and receiving.
+    pub seconds: u64,
+    /// Seconds with no new picture although the host wasn't paused (after
+    /// the first picture): what the person feels as a freeze.
+    pub frozen_seconds: u64,
+    /// Sum of frames shown each second (average = this / seconds).
+    pub fps_sum: u64,
+    pub max_mbps: f32,
+    pub reconnects: u32,
+    pub game_mouse: bool,
+    pub mic: bool,
+    pub camera: bool,
+}
+
+static SUMMARY: Mutex<Option<Summary>> = Mutex::new(None);
+
+pub fn summary() -> Summary {
+    SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_default()
+}
+
+pub fn update_summary(f: impl FnOnce(&mut Summary)) {
+    if let Ok(mut s) = SUMMARY.lock() {
+        f(s.get_or_insert_with(Summary::default));
+    }
+}

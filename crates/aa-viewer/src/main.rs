@@ -253,6 +253,7 @@ fn main() -> anyhow::Result<()> {
         let status = move |s: window::Wake| {
             let _ = status_proxy.lock().expect("proxy").send_event(s);
         };
+        let started = std::time::Instant::now();
         let result = runtime.block_on(run_reconnecting(
             &session_args,
             host,
@@ -263,6 +264,7 @@ fn main() -> anyhow::Result<()> {
             Some(std::sync::Arc::new(status)),
             pad_out,
         ));
+        send_usage(host, started.elapsed());
         let reason = match result {
             Ok(()) => {
                 tracing::info!("session ended");
@@ -395,6 +397,7 @@ async fn run_reconnecting(
         if let Some(s) = &status {
             s(window::Wake::Reconnecting);
         }
+        link::update_summary(|s| s.reconnects += 1);
         // Back off gently (1 s, then 2 s, at most 5 s) so a long outage
         // doesn't flood the network, but a blip is over in a second.
         attempt += 1;
@@ -431,6 +434,41 @@ async fn next_address(
     } else {
         known[attempt % known.len()]
     }
+}
+
+/// The anonymous "a viewing ended" note (only with the person's permission;
+/// see `aa_platform::telemetry`). Counts and kinds only: how long, how
+/// smooth, how it was connected, which features were used.
+fn send_usage(host: SocketAddr, wall: std::time::Duration) {
+    use serde_json::json;
+    let s = link::summary();
+    if s.seconds == 0 {
+        return; // never got going: nothing worth counting
+    }
+    let info = link::host_info();
+    let connection = if aa_platform::tailscale::is_tailscale_ip(host.ip()) {
+        "tailscale"
+    } else if aa_platform::lan::is_local_network(host.ip()) {
+        "home network"
+    } else {
+        "internet"
+    };
+    aa_platform::telemetry::send(
+        "stream_session",
+        &[
+            ("minutes", json!(wall.as_secs() / 60)),
+            ("avg_fps", json!(s.fps_sum / s.seconds.max(1))),
+            ("frozen_seconds", json!(s.frozen_seconds)),
+            ("reconnects", json!(s.reconnects)),
+            ("max_mbps", json!((s.max_mbps * 10.0).round() / 10.0)),
+            ("codec", json!(info.codec.map(|c| format!("{c:?}")))),
+            ("host_os", json!(if link::host_is_mac() { "macos" } else { "windows" })),
+            ("connection", json!(connection)),
+            ("game_mouse", json!(s.game_mouse)),
+            ("mic", json!(s.mic)),
+            ("camera", json!(s.camera)),
+        ],
+    );
 }
 
 /// `--test-clipboard`: pretend the user copies a new line of text every

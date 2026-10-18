@@ -602,6 +602,9 @@ impl App {
     fn set_game_mouse(&mut self, on: bool) {
         self.game_mouse = on;
         self.mouse_rest = (0.0, 0.0);
+        if on {
+            crate::link::update_summary(|s| s.game_mouse = true);
+        }
         if let Some(w) = &self.window {
             if on {
                 if w.set_cursor_grab(CursorGrabMode::Locked).is_err() {

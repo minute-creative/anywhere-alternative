@@ -42,6 +42,7 @@ pub mod portmap;
 pub mod share;
 pub mod sw;
 pub mod tailscale;
+pub mod telemetry;
 pub mod trust;
 pub mod update;
 pub mod usbip;

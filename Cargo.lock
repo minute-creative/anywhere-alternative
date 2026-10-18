@@ -116,6 +116,7 @@ dependencies = [
  "gilrs",
  "hidapi",
  "pollster",
+ "serde_json",
  "socket2",
  "tokio",
  "tracing",

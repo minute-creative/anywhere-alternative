@@ -378,6 +378,19 @@ app" real test, confirm HEVC on the PC.
   the picture is enlarged (amount from screen pixels per video pixel; 0 at
   1:1). Ask the owner whether the Mac's picture on the PC looks crisper,
   or over-sharpened (halos on text).
+- Built 2026-10-18 (owner's choices): anonymous usage numbers to PostHog
+  (US project, key in `aa_platform::telemetry`). First open asks once, box
+  ticked by default; Settings has a switch; file `usage-stats` holds the
+  choice; nothing is sent before the question is answered. Notes:
+  `app_opened` (once a day: version, os, always-on sharing, number of
+  paired computers) and `stream_session` (minutes, avg fps, frozen
+  seconds, reconnects, max Mbps, codec, host os, connection kind, game
+  mouse/mic/camera used). No person profiles, no GeoIP. Download counts:
+  GitHub release asset counts (include auto-updates).
+- The repo is PUBLIC (owner confirmed 2026-10-18: keep it public). Never
+  commit personal details. A history rewrite removing the owner's home
+  address is prepared (branch `cleaned-history`) and needs the owner's OK
+  for a force push.
 - Beta needs (agreed list): built-in connecting, signed installers (Apple
   developer account and Windows signing still to decide), first-run setup
   without Terminal/sudo, invite a teammate, problem-report button, clear

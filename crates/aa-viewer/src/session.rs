@@ -594,6 +594,20 @@ pub async fn run(
                         loss_pct: (rep.loss_ratio() * 100.0) as f32,
                     });
                 }
+                // For the anonymous usage note at the end (with permission).
+                let mbps = (bytes_this_second as f64 * 8.0 / 1e6) as f32;
+                let (fps_now, paused, have_mic, have_cam) =
+                    (frames_this_second, last_status.is_some(), mic.is_some(), camera.is_some());
+                crate::link::update_summary(|s| {
+                    s.seconds += 1;
+                    s.fps_sum += u64::from(fps_now);
+                    s.max_mbps = s.max_mbps.max(mbps);
+                    if fps_now == 0 && !paused && s.fps_sum > 0 {
+                        s.frozen_seconds += 1;
+                    }
+                    s.mic |= have_mic;
+                    s.camera |= have_cam;
+                });
                 frames_this_second = 0;
                 bytes_this_second = 0;
 
