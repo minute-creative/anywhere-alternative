@@ -345,6 +345,9 @@ impl Settings {
 #[derive(Debug, Default)]
 struct HostStatus {
     addresses: Vec<String>,
+    /// Whether other networks can reach this computer directly (the host's
+    /// `outside:` line, see `aa_platform::portmap`), and if that is good news.
+    outside: Option<(String, bool)>,
     viewer: Option<String>,
     warnings: Vec<String>,
 }
@@ -369,6 +372,10 @@ fn read_status(lines: &[String]) -> HostStatus {
         // for hours after the host had already recovered).
         if l.contains("viewer connected") || l.contains("viewer left") || l.contains("viewer timed out") {
             s.warnings.clear();
+        }
+        if let Some((_, o)) = l.split_once("outside: ") {
+            s.outside = Some((o.trim().to_owned(), o.starts_with("reachable from anywhere")));
+            continue; // shown in its own line, never as a warning banner
         }
         if l.contains(" WARN ") || l.contains(" ERROR ") {
             let p = procs::plain(l).trim_start_matches("⚠ ").to_owned();
@@ -1295,6 +1302,17 @@ impl App {
                     }
                 });
             }
+            if let (true, Some((text, good))) = (sharing, self.status.outside.clone()) {
+                ui.add_space(8.0);
+                ui.add(
+                    egui::Label::new(RichText::new(format!("From other networks: {text}")).small().color(if good {
+                        GOOD
+                    } else {
+                        MUTED
+                    }))
+                    .wrap(),
+                );
+            }
         });
 
         ui.add_space(12.0);
@@ -2187,6 +2205,11 @@ mod tests {
         assert_eq!(s.addresses, vec!["192.168.1.20:7700", "10.0.0.4:7700"]);
         assert_eq!(s.viewer.as_deref(), Some("192.168.1.5:5555"));
         assert_eq!(s.warnings, vec!["allow Accessibility".to_owned()]);
+        let mut door = lines.clone();
+        door.push("2026-10-18T06:00:00.0Z  INFO aa_platform::portmap: outside: reachable from anywhere at 103.206.1.2:7700 (the router opened a door, UPnP)".into());
+        let d = read_status(&door);
+        assert_eq!(d.outside.as_ref().map(|o| o.1), Some(true));
+        assert_eq!(d.warnings.len(), 1, "the outside line is not a warning");
         let mut more = lines.clone();
         more.push("2026-10-08T06:30:00.0Z  INFO aa_host::session: viewer left from=192.168.1.5:5555".into());
         assert_eq!(read_status(&more).viewer, None);

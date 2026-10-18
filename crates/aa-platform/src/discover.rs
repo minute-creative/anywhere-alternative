@@ -16,6 +16,11 @@
 //!
 //! The first version only did (2) on one guessed subnet, and on the owner's
 //! network nothing answered.
+//!
+//! Since 0.5.8 the remembered addresses include the sharing computer's
+//! outside address, when its router opened a door for it
+//! (`aa_platform::portmap`): that is how a paired computer is found from
+//! another network with no Tailscale and no server in between.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -222,6 +227,13 @@ fn add(
     version: String,
     how: &str,
 ) {
+    // A computer answering over the internet doesn't say its name to
+    // strangers (0.5.8); if it is one of ours we know the name already.
+    let name = if name.is_empty() {
+        key.and_then(|k| crate::trust::paired_host(&k)).map(|h| h.name).unwrap_or(name)
+    } else {
+        name
+    };
     // The same computer at another address (Wi-Fi and Tailscale): one entry.
     if let Some(f) = found.iter_mut().find(|f| f.addr == addr || (key.is_some() && f.key == key)) {
         if !f.addrs.contains(&addr) {

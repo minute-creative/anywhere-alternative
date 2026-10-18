@@ -245,6 +245,8 @@ async fn main() -> anyhow::Result<()> {
     // always-on copy waits 30 s and exits; the system starts it again.
     let backends = if args.mock {
         tracing::warn!("using MOCK backends: test pattern, no real screen");
+        // A test host must never open a door on the real router.
+        std::env::set_var("AA_NO_PORTMAP", "1");
         if args.test_clipboard {
             start_test_clipboard("host");
         }

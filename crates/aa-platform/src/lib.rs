@@ -38,6 +38,7 @@ pub mod padhub;
 pub mod padmap;
 pub mod pairing;
 pub mod playout;
+pub mod portmap;
 pub mod share;
 pub mod sw;
 pub mod tailscale;

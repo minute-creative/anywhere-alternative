@@ -220,6 +220,17 @@ impl Net {
     }
 
     async fn pair_request(&self, d: &[u8], from: SocketAddr) {
+        // Pairing happens on the same network or through Tailscale only. Once
+        // the router has a door open for us (portmap), anyone on the internet
+        // could send requests: at one guess every 2 seconds, a six-digit code
+        // falls within weeks, and a stream of requests would block real
+        // pairing. Paired computers still connect from anywhere (0.5.8).
+        if !aa_platform::lan::is_local_network(from.ip()) {
+            tracing::info!(%from, "pairing request from the internet refused (pair on the same network or Tailscale)");
+            let why = "Pair once on the same network (or through Tailscale); after that it connects from anywhere.";
+            let _ = self.sock.send_to(&fail(why), from).await;
+            return;
+        }
         // Pairing step 2: a computer typed a code. One attempt per 2 seconds from
         // anyone; repeats of the same request get the same answer.
         let answer: Vec<u8> = {

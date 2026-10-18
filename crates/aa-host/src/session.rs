@@ -175,6 +175,9 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
 
     // Start announcing ourselves on the network every second.
     start_beacon(listen.port(), socket.public_key_hex());
+    // Open a door on the home router so paired computers can reach this one
+    // from any network (see aa_platform::portmap).
+    let portmap = aa_platform::portmap::PortMap::start(listen.port());
     set_connected(false);
 
     // No viewer yet; start with a sensible bitrate for this screen.
@@ -424,6 +427,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
             // The app asked us to stop: say goodbye, unmute the speakers, end.
             () = stop_requested() => {
                 tracing::info!("asked to stop");
+                portmap.close();
                 set_connected(false);
                 if let Some(v) = viewer.as_ref() {
                     let _ = send_control(&socket, v.addr, &ControlMessage::Bye, &seq).await;
@@ -436,6 +440,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
             // Ctrl+C in a terminal: same as above.
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutting down");
+                portmap.close();
                 set_connected(false);
                 if let Some(v) = viewer.as_ref() {
                     let _ = send_control(&socket, v.addr, &ControlMessage::Bye, &seq).await;
@@ -724,10 +729,22 @@ async fn handle_packet(
                 // questions like a PC firewall would (beacons still go out).
                 ControlMessage::Discover if std::env::var_os("AA_SIMULATE_FIREWALL").is_some() => {}
                 ControlMessage::Discover => {
-                    let name = aa_platform::trust::computer_name();
                     let port = socket.local_addr().map_or(aa_platform::discover::DEFAULT_PORT, |a| a.port());
-                    let addrs =
-                        aa_platform::lan::ipv4_interfaces().iter().map(|i| format!("{}:{port}", i.ip)).collect();
+                    // On a home network or Tailscale: name and every address,
+                    // including the outside one the router door gives (so a
+                    // paired computer can find us later from anywhere). From
+                    // the open internet: only the key, nothing that tells a
+                    // stranger who or where this computer is (0.5.8).
+                    let local = aa_platform::lan::is_local_network(from.ip());
+                    let name = if local { aa_platform::trust::computer_name() } else { String::new() };
+                    let mut addrs: Vec<String> = if local {
+                        aa_platform::lan::ipv4_interfaces().iter().map(|i| format!("{}:{port}", i.ip)).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    if let Some(outside) = aa_platform::portmap::current().and_then(|o| o.addr()).filter(|_| local) {
+                        addrs.push(outside.to_string());
+                    }
                     send_control(
                         socket,
                         from,

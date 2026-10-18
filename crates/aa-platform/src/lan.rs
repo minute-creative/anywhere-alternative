@@ -144,3 +144,50 @@ mod tests {
         assert_eq!(&buf[..n], b"hello");
     }
 }
+
+/// Is `ip` on a home or office network, or Tailscale, rather than the open
+/// internet? Pairing is only allowed from these (see `aa-host` `net.rs`):
+/// once the sharing computer opens a door on its router, anyone on the
+/// internet could otherwise try pairing codes.
+pub fn is_local_network(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private() || v4.is_loopback() || v4.is_link_local() || (o[0] == 100 && (64..128).contains(&o[1]))
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_local_network(IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            // Loopback, unique-local (fc00::/7, also Tailscale's fd7a::/48)
+            // and link-local (fe80::/10).
+            v6.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+#[cfg(test)]
+mod local_tests {
+    use super::is_local_network;
+
+    #[test]
+    fn home_tailscale_and_internet() {
+        for local in [
+            "192.168.1.9",
+            "10.0.0.2",
+            "172.20.1.1",
+            "100.101.102.103",
+            "127.0.0.1",
+            "fe80::1",
+            "fd7a:115c::1",
+            "::ffff:192.168.1.7",
+        ] {
+            assert!(is_local_network(local.parse().unwrap()), "{local}");
+        }
+        for far in ["103.206.1.2", "8.8.8.8", "2401:4900::1", "::ffff:103.206.1.2"] {
+            assert!(!is_local_network(far.parse().unwrap()), "{far}");
+        }
+    }
+}
