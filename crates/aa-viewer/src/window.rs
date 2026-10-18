@@ -396,6 +396,16 @@ impl Gpu {
         }
     }
 
+    /// Nothing to draw into (window minimized, covered, on another desktop,
+    /// display asleep): still hand the picture we just uploaded to the
+    /// graphics card, so its copy is freed. `write_texture` keeps each
+    /// upload until the next `submit`; skipping draws without submitting
+    /// piled up one 20 MB picture per frame, and the owner's Mac showed
+    /// 100+ GB in use (0.5.9).
+    fn flush_uploads(&self) {
+        self.queue.submit(std::iter::empty());
+    }
+
     fn render(
         &mut self,
         rect: VideoRect,
@@ -407,11 +417,16 @@ impl Gpu {
             Cst::Success(t) | Cst::Suboptimal(t) => t,
             Cst::Lost | Cst::Outdated => {
                 self.surface.configure(&self.device, &self.config);
+                self.flush_uploads();
                 return;
             }
-            Cst::Timeout | Cst::Occluded => return,
+            Cst::Timeout | Cst::Occluded => {
+                self.flush_uploads();
+                return;
+            }
             Cst::Validation => {
                 tracing::error!("surface validation error; see wgpu log");
+                self.flush_uploads();
                 return;
             }
         };

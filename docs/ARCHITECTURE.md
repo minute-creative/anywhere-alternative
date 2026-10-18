@@ -658,6 +658,11 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   80 Mbps to 4 and capped regrowth at 7.6 for a minute. One episode now
   keeps its first wall and never cuts below a quarter of it unless loss is
   severe.
+- **`write_texture` without `submit` leaks** (0.5.10): the viewer uploaded
+  each 20 MB picture, then skipped drawing when the surface was occluded
+  (minimized, covered, other Space) and returned before `queue.submit`;
+  wgpu keeps uploads until a submit, so the Mac viewer grew to 100+ GB.
+  Every early return in `render` now submits nothing to flush them.
 - **Injected keys never auto-repeat** (0.5.9): key repeat comes from the
   keyboard driver, not from Windows or macOS, so a held key typed by
   another program fires once. The viewer must forward its own repeats.

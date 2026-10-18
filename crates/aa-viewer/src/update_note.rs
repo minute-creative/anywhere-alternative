@@ -16,6 +16,7 @@ const CHANGES: &[(&str, &[&str])] = &[
     (
         "0.5.10",
         &[
+            "Fixed the stream window using more and more memory while hidden",
             "Game mouse turns on by itself when a game takes the pointer",
             "Smoother streaming while a game uses the whole graphics chip",
             "Usage numbers switch moved to the bottom of Settings",
