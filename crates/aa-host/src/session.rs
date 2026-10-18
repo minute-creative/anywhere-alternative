@@ -401,10 +401,23 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                 // What the person here wants shared (the app keeps it fresh).
                 stream.follow_choice(&ctl, ticks);
                 if let Some(v) = viewer.as_ref() {
+                    // Every 5 s: is something here swallowing the viewer's input?
+                    if ticks % 5 == 1 {
+                        let now = aa_platform::input_blocker();
+                        if now != stream.input_warning {
+                            match now {
+                                Some(w) => tracing::warn!("{w}"),
+                                None if stream.input_warning.is_some() => tracing::info!("input blocker gone"),
+                                None => {}
+                            }
+                            stream.input_warning = now;
+                        }
+                    }
                     let info = ControlMessage::StreamInfo {
                         fps: stream.ladder.current(),
                         kbps: bitrate.current_kbps(),
                         sharing: stream.now.label(),
+                        warning: stream.input_warning.map(str::to_owned),
                     };
                     let _ = send_control(&socket, v.addr, &info, &seq).await;
                 }
@@ -1075,6 +1088,8 @@ struct Stream {
     ladder: FpsLadder,
     /// The most data a second worth sending for this viewer's picture.
     useful_kbps: u32,
+    /// Something here blocking the viewer's input (see `input_blocker`).
+    input_warning: Option<&'static str>,
     codec: aa_core::video::Codec,
     res: aa_core::video::Resolution,
     /// Shared with a watcher thread that checks every few seconds whether
@@ -1107,6 +1122,7 @@ impl Stream {
             share_status: None,
             ladder: FpsLadder::new(fps, false),
             useful_kbps: u32::MAX,
+            input_warning: None,
             codec: aa_core::video::Codec::Hevc,
             res: aa_core::video::Resolution::new(1920, 1080),
         }

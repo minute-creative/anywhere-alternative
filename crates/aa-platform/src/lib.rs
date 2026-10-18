@@ -268,6 +268,23 @@ pub fn keep_awake(on: bool) {
 /// Is the app already open? Then bring its window forward and say so, so a
 /// second start (Start menu, desktop icon) doesn't open a second copy. A
 /// Mac does this by itself for .app bundles.
+/// Something on this computer that stops the other computer's mouse or
+/// keys from working, in plain words for the viewer's corner display. Today:
+/// Riot Vanguard (Valorant's anti-cheat) on a PC, which swallows clicks.
+pub fn input_blocker() -> Option<&'static str> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::vanguard_running().then_some(
+            "Valorant's anti-cheat (Riot Vanguard) is running on the PC and blocks mouse clicks from other apps. \
+             Close Valorant and the Riot Client (tray icon > Exit Vanguard) to use the mouse.",
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
 pub fn app_already_open(title: &str) -> bool {
     #[cfg(target_os = "windows")]
     {

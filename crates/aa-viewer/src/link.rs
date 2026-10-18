@@ -100,6 +100,8 @@ pub struct HostInfo {
     /// Things worth knowing that cost quality ("picture is going through
     /// Tailscale's relay").
     pub notes: Vec<String>,
+    /// The host's current input warning (also one of `notes`).
+    pub warning: Option<String>,
 }
 
 static INFO: Mutex<Option<HostInfo>> = Mutex::new(None);

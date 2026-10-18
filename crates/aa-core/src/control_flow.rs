@@ -114,6 +114,11 @@ pub struct BitrateController {
     hold: u8,
     /// Smoothed loss ratio from recent reports; sizes the FEC.
     loss_avg: f64,
+    /// Reports since the last congestion cut (`u32::MAX`: none yet). Cuts
+    /// close together are one choking episode, not several walls.
+    since_cut: u32,
+    /// The bitrate when the current choking episode began.
+    episode_top: u32,
 }
 
 impl BitrateController {
@@ -145,6 +150,20 @@ impl BitrateController {
     const CEILING_FORGET_AFTER: u32 = 60;
     /// Reports after a cut in which only severe loss cuts again.
     const HOLD_REPORTS: u8 = 1;
+    /// After a halving, a little longer: the queue it filled takes 2-3 s to
+    /// drain over a slow link, and its loss is not new congestion.
+    const HEAVY_HOLD_REPORTS: u8 = 3;
+    /// Cuts within this many reports of the last one belong to the same
+    /// choking episode: they don't move the wall lower, and together they
+    /// never go below `EPISODE_FLOOR` of where the episode began. The owner's
+    /// PC (0.5.9, Mac watching) went 80 -> 68 -> 34 -> 17 -> 8.5 -> 4.25 Mbps
+    /// in 9 s from one Wi-Fi hiccup, then the wall sat at 8.5 so it stayed
+    /// pixelated for a minute.
+    const EPISODE_REPORTS: u32 = 10;
+    const EPISODE_FLOOR: f64 = 0.25;
+    /// Clean growth per second while far (under half) below the wall: get
+    /// back to a sharp picture in a few seconds after a hiccup.
+    const GROW_FAR_BELOW: f64 = 0.25;
     /// After a trim for severe radio loss, reports to wait before another.
     const RADIO_HOLD_REPORTS: u8 = 5;
     /// Growth per clean second while probing (see `probing`).
@@ -179,6 +198,8 @@ impl BitrateController {
             ceiling: None,
             hold: 0,
             loss_avg: 0.0,
+            since_cut: u32::MAX,
+            episode_top: 0,
         }
     }
 
@@ -247,6 +268,7 @@ impl BitrateController {
         // not change what the radio drops, so repeating it only blurs.
         let radio_held = self.hold > 0;
         self.hold = self.hold.saturating_sub(1);
+        self.since_cut = self.since_cut.saturating_add(1);
         // Step 3: decide the new bitrate. Exactly one of these branches runs:
         // - radio loss (Wi-Fi noise): keep or keep growing; parity handles it,
         // - severe radio loss: one gentle trim, then wait,
@@ -283,10 +305,23 @@ impl BitrateController {
         } else if heavy || lossy {
             self.probing = false;
             self.clean_streak = 0;
-            self.ceiling = Some(self.current_kbps);
-            self.hold = Self::HOLD_REPORTS;
+            let same_episode = self.since_cut <= Self::EPISODE_REPORTS;
+            if !same_episode {
+                // A new choke: this is where the link's wall is.
+                self.ceiling = Some(self.current_kbps);
+                self.episode_top = self.current_kbps;
+            }
+            self.since_cut = 0;
+            self.hold = if heavy { Self::HEAVY_HOLD_REPORTS } else { Self::HOLD_REPORTS };
             let factor = if heavy { Self::HEAVY_CUT } else { Self::LIGHT_CUT };
-            (f64::from(self.current_kbps) * factor) as u32
+            let cut = (f64::from(self.current_kbps) * factor) as u32;
+            if same_episode && loss < Self::SEVERE_LOSS {
+                // Don't stack cuts all the way to the bottom for one hiccup.
+                let floor = (f64::from(self.episode_top) * Self::EPISODE_FLOOR) as u32;
+                cut.max(floor.min(self.current_kbps))
+            } else {
+                cut
+            }
         } else {
             self.clean_streak += 1;
             if self.clean_streak > Self::GROW_AFTER {
@@ -295,7 +330,14 @@ impl BitrateController {
                     // Clean for long enough near the old wall: the link got better.
                     self.ceiling = None;
                 }
-                let grow = if near_wall { Self::GROW_NEAR_CEILING } else { Self::GROW };
+                let far_below = self.ceiling.is_some_and(|c| f64::from(self.current_kbps) < f64::from(c) * 0.5);
+                let grow = if near_wall {
+                    Self::GROW_NEAR_CEILING
+                } else if far_below {
+                    Self::GROW_FAR_BELOW
+                } else {
+                    Self::GROW
+                };
                 let step = (f64::from(self.current_kbps) * grow).max(250.0);
                 let next = f64::from(self.current_kbps) + step;
                 match self.ceiling {
@@ -341,6 +383,25 @@ mod tests {
 
     fn noisy(loss_pct: f64, abandoned: u16) -> ReceiverReport {
         ReceiverReport { rtt_tenths_ms: 50, ..report(loss_pct, abandoned) }
+    }
+
+    /// The owner's freeze (0.5.9, Mac watching the PC at 80 Mbps): a few
+    /// seconds of rising delay and abandoned frames, then a clean link. It
+    /// must not end up stuck at a few Mbps.
+    #[test]
+    fn one_hiccup_does_not_sink_the_bitrate() {
+        let mut c = settled(80_000, 2_000, 80_000);
+        for _ in 0..5 {
+            c.on_report(&report(3.0, 4));
+        }
+        assert!(c.current_kbps() >= 20_000, "cut too deep: {}", c.current_kbps());
+        assert_eq!(c.ceiling_kbps(), Some(80_000), "the wall moved down");
+        let mut secs = 0;
+        while c.current_kbps() < 40_000 && secs < 30 {
+            c.on_report(&report(0.0, 0));
+            secs += 1;
+        }
+        assert!(secs <= 15, "took {secs} s to get back above 40 Mbps");
     }
 
     #[test]
@@ -474,11 +535,15 @@ mod tests {
     fn heavy_loss_halves() {
         let mut c = settled(20_000, 2_000, 60_000);
         assert_eq!(c.on_report(&report(20.0, 10)), Some(10_000));
-        // The next report is mostly the old queue draining: hold.
-        assert_eq!(c.on_report(&report(20.0, 10)), None);
-        // Still losing after that: cut again.
+        // The next few reports are mostly the old queue draining: hold.
+        for _ in 0..3 {
+            assert_eq!(c.on_report(&report(20.0, 10)), None);
+        }
+        // Still losing after that: cut again, but one episode never goes
+        // below a quarter of where it began.
         assert_eq!(c.on_report(&report(20.0, 10)), Some(5_000));
-        // Severe loss cuts even straight after a cut.
+        assert_eq!(c.on_report(&report(20.0, 10)), None);
+        // Severe loss cuts even straight after a cut, past the floor.
         assert_eq!(c.on_report(&report(40.0, 10)), Some(2_500));
     }
 

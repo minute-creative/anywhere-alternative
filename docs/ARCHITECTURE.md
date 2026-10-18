@@ -653,6 +653,14 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   Pairing is accepted only from home-network and Tailscale addresses.
 - **"Newest wins" needs a slot, not a queue** (0.5.8): a full bounded
   channel with `try_send` drops the newest item, the opposite of intent.
+- **Cuts in a row are one hiccup, not several walls** (0.5.9): each cut
+  used to set the ceiling at its own level, so a 9-second Wi-Fi hiccup took
+  80 Mbps to 4 and capped regrowth at 7.6 for a minute. One episode now
+  keeps its first wall and never cuts below a quarter of it unless loss is
+  severe.
+- **Anti-cheat drops injected clicks without an error** (0.5.9): with Riot
+  Vanguard running, SendInput returns success and the click vanishes. Detect
+  the `vgc` service instead and tell the viewer.
 
 ## 10. Measured so far
 

@@ -913,6 +913,7 @@ impl ApplicationHandler<Wake> for App {
                             // "pressed" when the light goes on, "released"
                             // when it goes off. Hosts toggle on a press, so
                             // send a whole tap for every change.
+                            tracing::info!("Caps Lock changed: sending a tap");
                             self.send(InputEvent::Key { hid_usage: hid, pressed: true });
                             self.send(InputEvent::Key { hid_usage: hid, pressed: false });
                             return;

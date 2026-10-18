@@ -362,11 +362,23 @@ pub async fn run(
                             tracing::info!("host said bye");
                             return Ok(());
                         }
-                        Ok(ControlMessage::StreamInfo { fps, kbps, sharing }) => {
+                        Ok(ControlMessage::StreamInfo { fps, kbps, sharing, warning }) => {
                             crate::link::update_host_info(|i| {
                                 i.target_fps = fps;
                                 i.target_kbps = kbps;
                                 i.sharing = sharing;
+                                // The host's input warning, kept as one note that
+                                // goes away when the host stops sending it.
+                                if i.warning != warning {
+                                    if let Some(old) = i.warning.take() {
+                                        i.notes.retain(|n| *n != old);
+                                    }
+                                    if let Some(w) = &warning {
+                                        tracing::warn!("host: {w}");
+                                        i.notes.push(w.clone());
+                                    }
+                                    i.warning = warning;
+                                }
                             });
                         }
                         Ok(ControlMessage::Shareables { items, current }) => {

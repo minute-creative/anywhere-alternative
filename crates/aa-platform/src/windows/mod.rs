@@ -488,3 +488,32 @@ pub fn app_already_open(title: &str) -> bool {
         true
     }
 }
+
+/// Is Riot Vanguard's anti-cheat service (`vgc`, installed with Valorant
+/// and League of Legends) running? While it runs it silently swallows mouse
+/// clicks that other programs send, ours included: Windows accepts them and
+/// nothing happens (owner's PC, 0.5.8: clicks from the Mac worked again as
+/// soon as Valorant was closed). Asking costs about a millisecond.
+#[allow(unsafe_code)]
+pub fn vanguard_running() -> bool {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS,
+        SERVICE_RUNNING, SERVICE_STATUS,
+    };
+    // SAFETY: plain service-manager queries; both handles are closed below.
+    unsafe {
+        let Ok(manager) = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) else { return false };
+        let running = match OpenServiceW(manager, w!("vgc"), SERVICE_QUERY_STATUS) {
+            Ok(service) => {
+                let mut status = SERVICE_STATUS::default();
+                let ok = QueryServiceStatus(service, &mut status).is_ok() && status.dwCurrentState == SERVICE_RUNNING;
+                let _ = CloseServiceHandle(service);
+                ok
+            }
+            Err(_) => false, // not installed
+        };
+        let _ = CloseServiceHandle(manager);
+        running
+    }
+}

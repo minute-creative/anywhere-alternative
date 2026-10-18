@@ -338,6 +338,24 @@ Open from before: DualSense drop on the Mac (need the new log line), Mac
 window not reopening from the Dock, softness from 1.5x scaling, "share one
 app" real test, confirm HEVC on the PC.
 
+## 0.5.9 fixes from the owner's Mac-watching-PC test (2026-10-18)
+- Clicks: confirmed Riot Vanguard (clicks worked once Valorant closed).
+  SendInput reports success while Vanguard drops the click, so the
+  "refused" detection never fires. Now the host checks every 5 s whether the
+  `vgc` service runs (`aa_platform::input_blocker`) and sends a plain
+  warning in `StreamInfo.warning` (serde default, old peers fine); the
+  viewer shows it in the corner and removes it when Vanguard stops.
+- Freeze/pixelation: one Wi-Fi hiccup cascaded 80 -> 4.25 Mbps in 9 s and
+  the wall was set at the bottom, so it stayed blurry ~50 s. Cuts within 10
+  reports are now one episode: the wall stays where it began, cuts floor at
+  25% of the start (unless loss >= 25%), a halving holds 3 reports, and
+  growth is 25%/s while under half the wall. Test
+  `one_hiccup_does_not_sink_the_bitrate`.
+- Caps Lock Mac -> PC: injected by key name (VK_CAPITAL) plus scancode;
+  both ends log it ("Caps Lock changed" on the Mac viewer, "Caps Lock from
+  the viewer" on the PC service). If it still fails, those lines say which
+  side stops.
+
 ## Product direction (2026-10-18, owner decisions)
 - Run Anywhere as a product for one month, then decide go/no-go. Priority
   is the best product; selling comes second.

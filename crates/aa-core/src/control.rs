@@ -95,6 +95,11 @@ pub enum ControlMessage {
         kbps: u32,
         /// What is being shared.
         sharing: String,
+        /// Something on the host blocking input (Valorant's anti-cheat
+        /// swallowing clicks), in plain words; shown in the viewer's corner.
+        /// Optional, so older viewers and hosts still understand each other.
+        #[serde(default)]
+        warning: Option<String>,
     },
     /// Host → viewer: an app here is using "Anywhere Camera" / "Anywhere
     /// Microphone" (a call started), or stopped. The viewer turns its own

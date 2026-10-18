@@ -19,7 +19,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
     MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
-    MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_PAUSE,
+    MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_CAPITAL, VK_PAUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SetCursorPos, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
@@ -405,6 +405,16 @@ impl InputInjector for SendInputInjector {
             InputEvent::Key { hid_usage, pressed } => {
                 let up = if pressed { KEYBD_EVENT_FLAGS(0) } else { KEYEVENTF_KEYUP };
                 let ki = match hid_to_scancode(hid_usage) {
+                    Some((scan, _)) if hid_usage == 0x39 => {
+                        // Caps Lock: sent by key name as well as position.
+                        // A position-only tap from the Mac viewer didn't
+                        // switch the PC to capitals (owner, 0.5.9); Windows
+                        // flips its Caps state from the key name.
+                        if pressed {
+                            tracing::info!("Caps Lock from the viewer");
+                        }
+                        KEYBDINPUT { wVk: VK_CAPITAL, wScan: scan, dwFlags: up, time: 0, dwExtraInfo: 0 }
+                    }
                     Some((scan, extended)) => {
                         let mut flags = KEYEVENTF_SCANCODE | up;
                         if extended {
