@@ -368,7 +368,8 @@ pub async fn run(
                             tracing::info!("host said bye");
                             return Ok(());
                         }
-                        Ok(ControlMessage::StreamInfo { fps, kbps, sharing, warning }) => {
+                        Ok(ControlMessage::StreamInfo { fps, kbps, sharing, warning, cursor_captured }) => {
+                            crate::link::HOST_CURSOR_CAPTURED.store(cursor_captured, std::sync::atomic::Ordering::Relaxed);
                             crate::link::update_host_info(|i| {
                                 i.target_fps = fps;
                                 i.target_kbps = kbps;

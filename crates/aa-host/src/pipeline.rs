@@ -135,6 +135,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
     let frame_timeout = Duration::from_millis(100);
     let mut encode_failures = 0u32;
     let mut capture_failures = 0u32;
+    let mut speed = Speed::new();
     let mut current_codec = initial_codec;
     // What the encoder was built for: picture size and frame rate.
     let mut enc_res = capture.resolution();
@@ -298,6 +299,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
         let frame = match capture.next_frame(wait) {
             // A new picture.
             Ok(Some(f)) => {
+                speed.captured += 1;
                 capture_failures = 0;
                 still_since = Instant::now();
                 refined = 0;
@@ -477,7 +479,14 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
         }
 
         // Encode this picture and give it a frame number that only ever goes up.
-        match enc.encode(&frame, force_key) {
+        let encode_start = Instant::now();
+        let result = enc.encode(&frame, force_key);
+        speed.encode_us += encode_start.elapsed().as_micros() as u64;
+        if result.is_ok() {
+            speed.encoded += 1;
+        }
+        speed.report(fps_now);
+        match result {
             Ok(mut packet) => {
                 encode_failures = 0;
                 skipped_in_row = 0;
@@ -714,4 +723,40 @@ pub fn input_thread(
         }
     }
     tracing::info!("input thread exiting");
+}
+
+/// How fast the screen gives pictures and how fast we encode them, logged
+/// every 10 s while streaming. Added after the owner's Valorant test
+/// (0.5.9): the Mac got a steady 24 fps of a 120 fps stream and the log
+/// couldn't say whether capture or the encoder was the slow one.
+struct Speed {
+    since: Instant,
+    captured: u32,
+    encoded: u32,
+    encode_us: u64,
+}
+
+impl Speed {
+    const EVERY: Duration = Duration::from_secs(10);
+
+    fn new() -> Self {
+        Self { since: Instant::now(), captured: 0, encoded: 0, encode_us: 0 }
+    }
+
+    fn report(&mut self, target_fps: u16) {
+        let secs = self.since.elapsed().as_secs_f64();
+        if secs < Self::EVERY.as_secs_f64() {
+            return;
+        }
+        if self.encoded > 0 {
+            tracing::info!(
+                target_fps,
+                screen_fps = format!("{:.0}", f64::from(self.captured) / secs),
+                sent_fps = format!("{:.0}", f64::from(self.encoded) / secs),
+                encode_ms = format!("{:.1}", self.encode_us as f64 / 1000.0 / f64::from(self.encoded)),
+                "video speed"
+            );
+        }
+        *self = Self::new();
+    }
 }

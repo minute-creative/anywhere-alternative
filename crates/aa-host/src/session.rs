@@ -418,6 +418,7 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                         kbps: bitrate.current_kbps(),
                         sharing: stream.now.label(),
                         warning: stream.input_warning.map(str::to_owned),
+                        cursor_captured: aa_platform::cursor_captured(),
                     };
                     let _ = send_control(&socket, v.addr, &info, &seq).await;
                 }

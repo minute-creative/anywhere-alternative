@@ -110,6 +110,10 @@ pub struct HostInfo {
 
 static INFO: Mutex<Option<HostInfo>> = Mutex::new(None);
 
+/// A game on the host has the mouse pointer (see `StreamInfo`); the window
+/// turns game mouse on and off to match.
+pub static HOST_CURSOR_CAPTURED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn host_info() -> HostInfo {
     INFO.lock().ok().and_then(|i| i.clone()).unwrap_or_default()
 }

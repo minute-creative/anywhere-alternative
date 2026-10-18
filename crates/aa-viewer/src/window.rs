@@ -472,6 +472,10 @@ pub struct App {
     /// Game mouse (Ctrl/Cmd+Shift+G): the pointer is captured and moves
     /// are sent as movement, which games' mouse-look needs.
     game_mouse: bool,
+    /// The window has the keyboard focus.
+    focused: bool,
+    /// The host's "a game has the pointer" state last acted on.
+    seen_captured: bool,
     /// Fractions of a pixel left over from raw mouse movement.
     mouse_rest: (f64, f64),
     /// Treat the Mac Command key as Control on the host, so Cmd+C / Cmd+V do
@@ -536,6 +540,8 @@ impl App {
             presented: 0,
             held_keys: Vec::new(),
             game_mouse: false,
+            focused: true,
+            seen_captured: false,
             mouse_rest: (0.0, 0.0),
             cmd_as_ctrl: cfg!(target_os = "macos"),
             cmd_held: false,
@@ -602,6 +608,20 @@ impl App {
     /// Game mouse on or off. On: the pointer is hidden and held in the
     /// window, and the mouse's own movement goes to the other computer
     /// (games turn the camera with it). Off: normal pointer.
+    /// Game mouse on when a game on the host takes the pointer, off when it
+    /// lets go; Cmd/Ctrl+Shift+G still switches it by hand in between.
+    fn follow_host_cursor(&mut self) {
+        let captured = crate::link::HOST_CURSOR_CAPTURED.load(std::sync::atomic::Ordering::Relaxed);
+        if !self.focused || captured == self.seen_captured {
+            return;
+        }
+        self.seen_captured = captured;
+        if captured != self.game_mouse {
+            tracing::info!(captured, "the other computer's game took or released the pointer");
+            self.set_game_mouse(captured);
+        }
+    }
+
     fn set_game_mouse(&mut self, on: bool) {
         self.game_mouse = on;
         self.mouse_rest = (0.0, 0.0);
@@ -839,6 +859,7 @@ impl ApplicationHandler<Wake> for App {
                 self.refit();
             }
             WindowEvent::RedrawRequested => {
+                self.follow_host_cursor();
                 let Some(gpu) = &mut self.gpu else { return };
                 let Some(window) = self.window.clone() else { return };
                 let window = window.as_ref();
@@ -959,7 +980,11 @@ impl ApplicationHandler<Wake> for App {
                     }
                 }
             }
+            WindowEvent::Focused(true) => self.focused = true,
             WindowEvent::Focused(false) => {
+                self.focused = false;
+                // Look again when the window comes back.
+                self.seen_captured = false;
                 // Leaving the window ends game mouse (the pointer must be free
                 // in other apps). 0.5.8: this used to be a separate match arm
                 // that ran instead of the key release below, so a key held in

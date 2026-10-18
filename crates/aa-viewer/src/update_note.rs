@@ -13,7 +13,14 @@
 /// What changed, newest first, in words for the person using it. Add the
 /// new version's lines here with each release.
 const CHANGES: &[(&str, &[&str])] = &[
-    ("0.5.10", &["Usage numbers switch moved to the bottom of Settings"]),
+    (
+        "0.5.10",
+        &[
+            "Game mouse turns on by itself when a game takes the pointer",
+            "Smoother streaming while a game uses the whole graphics chip",
+            "Usage numbers switch moved to the bottom of Settings",
+        ],
+    ),
     (
         "0.5.9",
         &[

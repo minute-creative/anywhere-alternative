@@ -351,6 +351,16 @@ app" real test, confirm HEVC on the PC.
   25% of the start (unless loss >= 25%), a halving holds 3 reports, and
   growth is 25%/s while under half the wall. Test
   `one_hiccup_does_not_sink_the_bitrate`.
+- 0.5.10 (owner's Valorant test, Mac viewing PC): the Mac got a steady
+  24 fps (of 120 negotiated, 2880x1800 HEVC) at ~7 Mbps, no loss, so the
+  PC produced only 24. Likely the game starving capture/encode on the Arc
+  130T iGPU: now the host raises its GPU priority (REALTIME, fallback HIGH,
+  plus SetGPUThreadPriority(7), as Sunshine does) and logs "video speed"
+  (screen_fps / sent_fps / encode_ms) every 10 s. CHECK that line in the
+  next game test. Aiming did nothing because game mouse was never on (and
+  I'd told the owner Ctrl+Shift+G; on a Mac it's Cmd+Shift+G): the host now
+  reports when a game hides and clips the pointer (StreamInfo
+  cursor_captured) and the viewer switches game mouse on/off to match.
 - OPEN: 0.5.8 -> 0.5.9 auto-update on the PC (10:20 UTC) stopped the
   service, then the installer never finished and nothing restarted the
   service (app wouldn't open). Owner started "Anywhere sharing" by hand;

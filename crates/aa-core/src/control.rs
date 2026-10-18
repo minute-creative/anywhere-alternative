@@ -108,6 +108,10 @@ pub enum ControlMessage {
         /// Optional, so older viewers and hosts still understand each other.
         #[serde(default)]
         warning: Option<String>,
+        /// A game on the host has taken the mouse pointer (hidden and
+        /// locked): the viewer switches to game mouse by itself.
+        #[serde(default)]
+        cursor_captured: bool,
     },
     /// Host → viewer: an app here is using "Anywhere Camera" / "Anywhere
     /// Microphone" (a call started), or stopped. The viewer turns its own

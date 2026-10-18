@@ -22,6 +22,7 @@ pub mod convert;
 pub mod decoder;
 pub mod encoder;
 pub mod gamepad;
+pub mod gpu_priority;
 pub mod input;
 pub mod privacy;
 pub mod session;
@@ -517,5 +518,30 @@ pub fn vanguard_running() -> bool {
         };
         let _ = CloseServiceHandle(manager);
         running
+    }
+}
+
+/// The pointer is hidden and held inside a smaller area than the whole
+/// screen: a game has captured it. Both together, so "hide pointer while
+/// typing" alone doesn't count.
+#[allow(unsafe_code)]
+pub fn cursor_captured() -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClipCursor, GetCursorInfo, GetSystemMetrics, CURSORINFO, CURSOR_SHOWING, SM_CXVIRTUALSCREEN,
+        SM_CYVIRTUALSCREEN,
+    };
+    // SAFETY: plain queries into stack structs sized as Windows expects.
+    unsafe {
+        let mut info = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
+        if GetCursorInfo(&mut info).is_err() || info.flags.0 & CURSOR_SHOWING.0 != 0 {
+            return false;
+        }
+        let mut clip = RECT::default();
+        if GetClipCursor(&mut clip).is_err() {
+            return false;
+        }
+        let (w, h) = (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+        clip.right - clip.left < w || clip.bottom - clip.top < h
     }
 }

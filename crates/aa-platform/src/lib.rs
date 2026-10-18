@@ -287,6 +287,22 @@ pub fn input_blocker() -> Option<&'static str> {
     }
 }
 
+/// Has a game taken the mouse pointer here (hidden and locked to its
+/// window)? Then the viewer switches to game mouse by itself, because a
+/// game like that reads mouse movement, not pointer positions (owner,
+/// 0.5.9: aiming in Valorant did nothing until game mouse, which they
+/// didn't know to turn on). Cheap; asked once a second.
+pub fn cursor_captured() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::cursor_captured()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 /// Black out this computer's own monitor while the viewer still sees it
 /// (the viewer's "screen mask" switch). Returns false where it isn't
 /// available yet (a Mac host).

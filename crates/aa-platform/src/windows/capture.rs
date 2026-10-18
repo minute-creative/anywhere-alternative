@@ -179,6 +179,8 @@ impl DxgiCapture {
             created.map_err(|e| win(e, "D3D11CreateDevice"))?;
             let device = device.ok_or_else(|| PlatformError::Unavailable("no D3D11 device".into()))?;
             let context = context.ok_or_else(|| PlatformError::Unavailable("no D3D11 context".into()))?;
+            // Games at 100% GPU must not starve capture and encoding.
+            super::gpu_priority::raise(&device);
 
             // Started while the PC is locked: carry on without a picture
             // and pick the screen up the moment it unlocks, rather than
