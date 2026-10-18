@@ -178,6 +178,10 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
     // What is shared and how big, so a rebuilt capture gets the same.
     let mut sharing = ShareTarget::Screen;
     let mut max_size: Option<Resolution> = None;
+    // Smaller pictures while compressing can't keep up (see SizeGovernor).
+    let mut governor = aa_core::quality::SizeGovernor::new();
+    let mut speed_cap: Option<Resolution> = None;
+    let mut gov_win = GovWindow::new();
     let mut rebuilt = false;
     // Sharing just one app failed (it closed, or this computer can't): show
     // nothing at all rather than the whole screen.
@@ -244,7 +248,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
         }
         let new_share = new_share.or_else(|| (rebuilt || retry).then(|| sharing.clone()));
         if rebuilt {
-            capture.set_max_size(max_size);
+            capture.set_max_size(tighter(max_size, speed_cap));
             rebuilt = false;
         }
         if let Some(target) = new_share {
@@ -264,7 +268,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
         }
         if ctl.max_res_changed.swap(false, Ordering::Relaxed) {
             max_size = *ctl.max_res.lock().expect("max res");
-            capture.set_max_size(max_size);
+            capture.set_max_size(tighter(max_size, speed_cap));
         }
 
         // Tell the viewer when the screen cannot be shown (locked, asleep...).
@@ -300,6 +304,7 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
             // A new picture.
             Ok(Some(f)) => {
                 speed.captured += 1;
+                speed.captured_total += 1;
                 capture_failures = 0;
                 still_since = Instant::now();
                 refined = 0;
@@ -379,7 +384,8 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
 
         // The size we send: the picture as captured, fitted inside the
         // viewer's Resolution setting when the capture doesn't scale itself.
-        let out_res = match *ctl.max_res.lock().expect("max res") {
+        let bound = tighter(*ctl.max_res.lock().expect("max res"), speed_cap);
+        let out_res = match bound {
             Some(max) if !capture.scales_itself() => aa_core::capability::fit_within(frame.resolution, max),
             _ => frame.resolution,
         };
@@ -481,11 +487,31 @@ pub fn capture_thread(p: Pipeline, ctl: &PipelineControl, tx: &mpsc::Sender<Enco
         // Encode this picture and give it a frame number that only ever goes up.
         let encode_start = Instant::now();
         let result = enc.encode(&frame, force_key);
-        speed.encode_us += encode_start.elapsed().as_micros() as u64;
+        let took = encode_start.elapsed();
+        speed.encode_us += took.as_micros() as u64;
         if result.is_ok() {
             speed.encoded += 1;
         }
         speed.report(fps_now);
+        // Every 2 s on a busy screen: is compressing fast enough at this size?
+        gov_win.add(took);
+        if let Some((screen_fps, sent_fps, encode_ms)) = gov_win.take(speed.captured_total) {
+            if let Some(limit) = governor.update(fps_now, screen_fps, sent_fps, encode_ms, enc_res.height) {
+                speed_cap = limit.map(|h| Resolution::new(h * 32 / 9, h));
+                if let Some(h) = limit {
+                    tracing::info!(
+                        height = h,
+                        encode_ms = format!("{encode_ms:.1}"),
+                        "compressing can't keep up: sending a smaller picture"
+                    );
+                } else {
+                    tracing::info!("compressing has room again: full-size picture");
+                }
+                if capture.scales_itself() {
+                    capture.set_max_size(tighter(max_size, speed_cap));
+                }
+            }
+        }
         match result {
             Ok(mut packet) => {
                 encode_failures = 0;
@@ -732,6 +758,8 @@ pub fn input_thread(
 struct Speed {
     since: Instant,
     captured: u32,
+    /// New screen pictures since the stream started (never reset).
+    captured_total: u64,
     encoded: u32,
     encode_us: u64,
 }
@@ -740,7 +768,7 @@ impl Speed {
     const EVERY: Duration = Duration::from_secs(10);
 
     fn new() -> Self {
-        Self { since: Instant::now(), captured: 0, encoded: 0, encode_us: 0 }
+        Self { since: Instant::now(), captured: 0, captured_total: 0, encoded: 0, encode_us: 0 }
     }
 
     fn report(&mut self, target_fps: u16) {
@@ -757,6 +785,57 @@ impl Speed {
                 "video speed"
             );
         }
+        let total = self.captured_total;
         *self = Self::new();
+        self.captured_total = total;
+    }
+}
+
+/// The smaller of two size limits (either may be absent).
+fn tighter(a: Option<Resolution>, b: Option<Resolution>) -> Option<Resolution> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(Resolution::new(a.width.min(b.width), a.height.min(b.height))),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+/// Compress times and new screen pictures over 2-second windows, for the
+/// `SizeGovernor`.
+struct GovWindow {
+    since: Instant,
+    captured_at_start: Option<u64>,
+    encodes: u32,
+    encode: Duration,
+}
+
+impl GovWindow {
+    const EVERY: Duration = Duration::from_secs(2);
+
+    fn new() -> Self {
+        Self { since: Instant::now(), captured_at_start: None, encodes: 0, encode: Duration::ZERO }
+    }
+
+    fn add(&mut self, took: Duration) {
+        self.encodes += 1;
+        self.encode += took;
+    }
+
+    /// At the end of a window: (new screen pictures a second, compressed
+    /// pictures a second, average compress ms). `captured_total` is the
+    /// running count of new pictures.
+    fn take(&mut self, captured_total: u64) -> Option<(f64, f64, f64)> {
+        let start = *self.captured_at_start.get_or_insert(captured_total);
+        let secs = self.since.elapsed().as_secs_f64();
+        if secs < Self::EVERY.as_secs_f64() {
+            return None;
+        }
+        let screen_fps = (captured_total - start) as f64 / secs;
+        let encode_ms =
+            if self.encodes == 0 { 0.0 } else { self.encode.as_secs_f64() * 1000.0 / f64::from(self.encodes) };
+        let sent_fps = f64::from(self.encodes) / secs;
+        *self = Self::new();
+        self.captured_at_start = Some(captured_total);
+        Some((screen_fps, sent_fps, encode_ms))
     }
 }

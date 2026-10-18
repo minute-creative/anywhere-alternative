@@ -226,3 +226,174 @@ mod tests {
         assert_eq!(odd.current(), 165);
     }
 }
+
+/// Lowers the picture size while the host can't compress fast enough, and
+/// raises it again once it can.
+///
+/// In plain words: on the owner's PC (Intel Arc 130T, 2880x1800, Valorant
+/// running) compressing one picture took 15 to 25 ms, so the stream topped
+/// out near 40 fps and every picture arrived late. A smaller picture is
+/// quicker to compress. This watches the compress time every couple of
+/// seconds while the screen is busy (a game, a video) and steps the height
+/// down (1440, 1080, 900, 720) until it fits the frame budget, then back up
+/// when there is clearly room. A still screen never counts: a slow compress
+/// of one picture a second costs nothing.
+#[derive(Debug, Clone)]
+pub struct SizeGovernor {
+    /// Index into [`Self::STEPS`]; 0 = full size.
+    step: usize,
+    /// Consecutive windows that were too slow / had room.
+    slow: u32,
+    roomy: u32,
+    /// Windows left before stepping up is considered (after a step down).
+    hold: u32,
+}
+
+impl Default for SizeGovernor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SizeGovernor {
+    /// Height limits, `0` = none (the picture's own size).
+    pub const STEPS: [u32; 5] = [0, 1440, 1080, 900, 720];
+    /// Use this share of a frame's time at most for compressing it.
+    const BUSY: f64 = 0.85;
+    /// Step up only if the bigger picture would still fit in this share.
+    const ROOM: f64 = 0.6;
+    /// Windows in a row before acting: down quickly, up slowly.
+    const DOWN_AFTER: u32 = 2;
+    const UP_AFTER: u32 = 8;
+    /// Windows to wait after a step down before trying bigger again.
+    const HOLD_AFTER_DOWN: u32 = 15;
+
+    pub fn new() -> Self {
+        Self { step: 0, slow: 0, roomy: 0, hold: 0 }
+    }
+
+    /// The current height limit (None: full size).
+    pub fn limit(&self) -> Option<u32> {
+        Some(Self::STEPS[self.step]).filter(|&h| h > 0)
+    }
+
+    /// Feed one measuring window. `target_fps`: what we try to send (the
+    /// lower of the ladder and the screen). `screen_fps`: new pictures the
+    /// screen gave; `sent_fps`: pictures compressed (new ones plus resends
+    /// of a still picture). `encode_ms`: average compress time. `height`:
+    /// the height we encoded at. Returns the new limit when it changes.
+    pub fn update(
+        &mut self,
+        target_fps: u16,
+        screen_fps: f64,
+        sent_fps: f64,
+        encode_ms: f64,
+        height: u32,
+    ) -> Option<Option<u32>> {
+        let target = f64::from(target_fps.max(1));
+        let budget_ms = 1000.0 / target;
+        // Only a busy screen tells us anything (games, video, scrolling):
+        // nearly every picture we compressed was a new one. Not "the screen
+        // gave many": capture shares a loop with compressing, so a slow
+        // encoder also caps how many new pictures we collect (the owner's
+        // PC in Valorant: 30 new, 33 sent, at 15 ms each).
+        let busy = screen_fps >= 10.0 && screen_fps >= sent_fps * 0.7;
+        self.hold = self.hold.saturating_sub(1);
+        if !busy || encode_ms <= 0.0 {
+            self.slow = 0;
+            self.roomy = 0;
+            return None;
+        }
+        let before = self.step;
+        if encode_ms > budget_ms * Self::BUSY {
+            self.roomy = 0;
+            self.slow += 1;
+            if self.slow >= Self::DOWN_AFTER && self.step + 1 < Self::STEPS.len() {
+                // Jump straight to the step whose pixel count fits (time
+                // grows about with pixels), at least one step.
+                let mut next = self.step + 1;
+                while next + 1 < Self::STEPS.len() {
+                    let h = f64::from(Self::STEPS[next].min(height.max(1)));
+                    let ratio = (h / f64::from(height.max(1))).powi(2);
+                    if encode_ms * ratio <= budget_ms * Self::BUSY {
+                        break;
+                    }
+                    next += 1;
+                }
+                self.step = next;
+                self.slow = 0;
+                self.hold = Self::HOLD_AFTER_DOWN;
+            }
+        } else {
+            self.slow = 0;
+            // Would the next bigger size still fit comfortably?
+            let bigger = if self.step == 0 { None } else { Some(Self::STEPS[self.step - 1]) };
+            let fits = bigger.is_some_and(|b| {
+                let b = if b == 0 { height * 2 } else { b }; // full size: assume up to twice as tall
+                let ratio = (f64::from(b) / f64::from(height.max(1))).powi(2);
+                encode_ms * ratio <= budget_ms * Self::ROOM
+            });
+            if fits && self.hold == 0 {
+                self.roomy += 1;
+                if self.roomy >= Self::UP_AFTER {
+                    self.step -= 1;
+                    self.roomy = 0;
+                }
+            } else {
+                self.roomy = 0;
+            }
+        }
+        (self.step != before).then(|| self.limit())
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    #[test]
+    fn slow_compress_on_a_busy_screen_steps_down_far_enough() {
+        // The owner's PC: 2880x1800, 60 fps target, 23 ms per picture.
+        let mut g = SizeGovernor::new();
+        assert_eq!(g.update(60, 55.0, 55.0, 23.0, 1800), None);
+        let new = g.update(60, 55.0, 55.0, 23.0, 1800);
+        // 16.7 ms budget x 0.85 = 14.2 ms; 1440/1800 squared = 0.64 -> 14.7
+        // ms (too slow), 1080 -> 8.3 ms: straight to 1080.
+        assert_eq!(new, Some(Some(1080)));
+    }
+
+    #[test]
+    fn a_still_screen_never_changes_the_size() {
+        let mut g = SizeGovernor::new();
+        for _ in 0..20 {
+            assert_eq!(g.update(60, 2.0, 8.0, 25.0, 1800), None);
+        }
+        assert_eq!(g.limit(), None);
+    }
+
+    #[test]
+    fn steps_back_up_when_there_is_clearly_room() {
+        let mut g = SizeGovernor::new();
+        g.update(60, 55.0, 55.0, 23.0, 1800);
+        g.update(60, 55.0, 55.0, 23.0, 1800);
+        assert_eq!(g.limit(), Some(1080));
+        // Game closed / lighter scene: 3 ms at 1080. 1440 would be ~5.3 ms.
+        let mut changed = None;
+        for _ in 0..40 {
+            if let Some(c) = g.update(60, 55.0, 55.0, 3.0, 1080) {
+                changed = Some(c);
+                break;
+            }
+        }
+        assert_eq!(changed, Some(Some(1440)));
+    }
+
+    #[test]
+    fn fast_enough_at_full_size_stays_full() {
+        let mut g = SizeGovernor::new();
+        for _ in 0..20 {
+            assert_eq!(g.update(60, 60.0, 60.0, 6.0, 1800), None);
+        }
+        assert_eq!(g.limit(), None);
+    }
+}

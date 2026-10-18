@@ -366,6 +366,16 @@ app" real test, confirm HEVC on the PC.
   `sc start AnywhereHost`) before running the installer, and the installer
   writes C:\ProgramData\AnywhereAlternative\installer.log: READ IT after
   the next update to find the real cause.
+- 0.5.12 automatic picture size (owner chose this over pipelining, for
+  input feel): PC log in Valorant showed encode 15-25 ms per 2880x1800
+  frame on the Intel HEVC MFT (hardware, GPU NV12, zero-copy, realtime GPU
+  priority all confirmed), so ~40 fps max, plus Wi-Fi-like loss of 8-34%
+  and RTT spikes to 2.5 s on the Mac side (asked owner: cable or Wi-Fi?
+  no answer yet). `quality::SizeGovernor` (tests) watches 2 s windows;
+  "busy" = screen_fps >= 10 and >= 0.7 x sent_fps (capture shares the loop
+  with encoding, so screen_fps can't exceed sent); steps 1440/1080/900/720
+  down when encode > 0.85 x budget twice, up slowly. Mock check at
+  2880x1800: 13 -> 39 -> 58 fps. PC monitor reports 60 Hz, so 60 is the cap.
 - Third stall (0.5.9 app stuck on "Installing the update...", 0.5.11
   out). Likely cause: Inno's Restart Manager (CloseApplications defaults
   on) trying to close the shared Windows camera service that loads
