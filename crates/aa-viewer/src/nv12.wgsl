@@ -32,9 +32,29 @@ fn to_linear(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.04045));
 }
 
+// Light sharpening, only when the picture is enlarged (a 1080p stream on a
+// 2880-wide laptop screen is stretched 1.5x and looks soft, 0.5.8). How
+// much: from how many video pixels one screen pixel covers. At 1:1 or when
+// shrinking it is zero, so a picture shown at its own size is untouched.
+// The detail comes from brightness only (an "unsharp mask" of the four
+// neighbours), which sharpens edges without adding colour fringes.
+fn sharpen_amount(uv: vec2<f32>) -> f32 {
+    let dims = vec2<f32>(textureDimensions(y_tex));
+    let texels_per_pixel = max(fwidth(uv.x) * dims.x, fwidth(uv.y) * dims.y);
+    return clamp((1.0 - texels_per_pixel) * 0.9, 0.0, 0.45);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let y = (textureSample(y_tex, smp, in.uv).r - 16.0 / 255.0) * (255.0 / 219.0);
+    let amount = sharpen_amount(in.uv);
+    let texel = 1.0 / vec2<f32>(textureDimensions(y_tex));
+    let centre = textureSample(y_tex, smp, in.uv).r;
+    let around = textureSample(y_tex, smp, in.uv + vec2<f32>(texel.x, 0.0)).r
+        + textureSample(y_tex, smp, in.uv - vec2<f32>(texel.x, 0.0)).r
+        + textureSample(y_tex, smp, in.uv + vec2<f32>(0.0, texel.y)).r
+        + textureSample(y_tex, smp, in.uv - vec2<f32>(0.0, texel.y)).r;
+    let luma = clamp(centre + amount * (centre - around * 0.25), 0.0, 1.0);
+    let y = (luma - 16.0 / 255.0) * (255.0 / 219.0);
     let c = (textureSample(uv_tex, smp, in.uv).rg - vec2<f32>(128.0 / 255.0)) * (255.0 / 224.0);
     let rgb = vec3<f32>(
         y + 1.5748 * c.y,

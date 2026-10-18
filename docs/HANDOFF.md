@@ -374,6 +374,10 @@ app" real test, confirm HEVC on the PC.
   pressing Alt alone afterwards must not leave the stream window stuck in
   Windows' menu mode. Mac viewer (Cmd+Tab) not done: needs an event tap
   with Accessibility permission.
+- Built 2026-10-18 (in 0.5.8): light sharpening in `nv12.wgsl`, only when
+  the picture is enlarged (amount from screen pixels per video pixel; 0 at
+  1:1). Ask the owner whether the Mac's picture on the PC looks crisper,
+  or over-sharpened (halos on text).
 - Beta needs (agreed list): built-in connecting, signed installers (Apple
   developer account and Windows signing still to decide), first-run setup
   without Terminal/sudo, invite a teammate, problem-report button, clear
