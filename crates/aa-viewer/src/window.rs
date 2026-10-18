@@ -616,7 +616,20 @@ impl App {
                 w.set_title(&self.title);
             }
         }
+        self.update_system_keys();
         tracing::info!(on, "game mouse");
+    }
+
+    /// Windows: send the Windows key, Alt+Tab, Alt+F4 and friends to the
+    /// other computer while the stream is full screen or in game mouse, and
+    /// the settings panel is closed (see `aa_platform::windows::syskeys`).
+    #[cfg_attr(not(target_os = "windows"), allow(clippy::unused_self))] // Windows-only body
+    fn update_system_keys(&self) {
+        #[cfg(target_os = "windows")]
+        {
+            let panel_open = self.overlay.as_ref().is_some_and(|o| o.open);
+            aa_platform::windows::syskeys::set_active((self.settings.fullscreen || self.game_mouse) && !panel_open);
+        }
     }
 
     fn layout(&self, res: Resolution, size: PhysicalSize<u32>) -> VideoRect {
@@ -663,7 +676,24 @@ impl ApplicationHandler<Wake> for App {
                 return;
             }
         }
+        #[cfg(target_os = "windows")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(h) = window.window_handle() {
+                if let RawWindowHandle::Win32(w) = h.as_raw() {
+                    let commands = self.commands.clone();
+                    aa_platform::windows::syskeys::install(
+                        w.hwnd.get(),
+                        Box::new(move |hid, pressed| {
+                            let hid_usage = shortcut_key(hid, false, crate::link::host_is_mac());
+                            let _ = commands.try_send(ViewerCommand::Input(InputEvent::Key { hid_usage, pressed }));
+                        }),
+                    );
+                }
+            }
+        }
         self.window = Some(window);
+        self.update_system_keys();
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, ev: Wake) {
@@ -739,6 +769,7 @@ impl ApplicationHandler<Wake> for App {
             {
                 if let Some(o) = &mut self.overlay {
                     o.toggle();
+                    self.update_system_keys();
                     // The host must not be left thinking Ctrl/Shift are down.
                     for hid in std::mem::take(&mut self.held_keys) {
                         self.send(InputEvent::Key { hid_usage: hid, pressed: false });
@@ -828,6 +859,7 @@ impl ApplicationHandler<Wake> for App {
                 });
                 self.settings = settings;
                 self.apply_settings();
+                self.update_system_keys();
                 if let Some(o) = self.overlay.as_mut() {
                     for r in o.requests.drain(..) {
                         let _ = self.commands.try_send(r);

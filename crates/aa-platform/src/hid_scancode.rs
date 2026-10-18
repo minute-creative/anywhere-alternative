@@ -125,9 +125,29 @@ pub fn hid_to_scancode(usage: u16) -> Option<(u16, bool)> {
     })
 }
 
+/// The reverse: a PC scan code (and its extended flag) → USB HID usage.
+/// The viewer uses it for keys it takes from Windows before Windows acts on
+/// them (the Windows key, Alt+Tab; see `windows::syskeys`).
+pub fn scancode_to_hid(scancode: u16, extended: bool) -> Option<u16> {
+    (0x04..=0xE7).find(|&u| hid_to_scancode(u) == Some((scancode, extended)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reverse_lookup_matches() {
+        assert_eq!(scancode_to_hid(0x5B, true), Some(0xE3), "left Windows key");
+        assert_eq!(scancode_to_hid(0x0F, false), Some(0x2B), "Tab");
+        assert_eq!(scancode_to_hid(0x3E, false), Some(0x3D), "F4");
+        assert_eq!(scancode_to_hid(0x01, false), Some(0x29), "Esc");
+        for u in 0x04..=0xE7 {
+            if let Some((sc, ext)) = hid_to_scancode(u) {
+                assert_eq!(scancode_to_hid(sc, ext), Some(u), "usage {u:#x}");
+            }
+        }
+    }
 
     #[test]
     fn common_keys() {

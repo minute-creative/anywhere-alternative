@@ -25,6 +25,7 @@ pub mod gamepad;
 pub mod input;
 pub mod session;
 pub mod share;
+pub mod syskeys;
 pub mod vcam;
 
 use aa_core::capability::Capabilities;

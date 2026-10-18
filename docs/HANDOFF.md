@@ -367,6 +367,13 @@ app" real test, confirm HEVC on the PC.
   carry only the key. Owner's router: ZTE F670L (fibre box), login needed
   to check its WAN address and whether UPnP is on. Not built: trying from
   both ends at once (needs a meeting point we chose not to run).
+- Built 2026-10-18 (in 0.5.8, needs a real test): a Windows viewer in
+  full screen or game mouse sends the Windows key, Alt+Tab, Alt+Esc,
+  Ctrl+Esc and Alt+F4 to the other computer (low-level keyboard hook,
+  `windows/syskeys.rs`); Ctrl+Shift+G / Ctrl+Shift+S still work. Check:
+  pressing Alt alone afterwards must not leave the stream window stuck in
+  Windows' menu mode. Mac viewer (Cmd+Tab) not done: needs an event tap
+  with Accessibility permission.
 - Beta needs (agreed list): built-in connecting, signed installers (Apple
   developer account and Windows signing still to decide), first-run setup
   without Terminal/sudo, invite a teammate, problem-report button, clear
