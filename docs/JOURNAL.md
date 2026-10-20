@@ -649,3 +649,11 @@ owner's choice of how it tells play from menus.
 The session restarted midway; the restarted turn found its own unfinished
 edits (button remap committed, text-focus host code uncommitted) and
 carried on from them rather than redoing them.
+
+Later: owner chose automatic play/menu switching for Elden Ring. The Mac
+host now reports `cursor_captured` (pulled-back pointer, or hidden in a
+full-screen app) and the phone has an "Elden Ring" layout. Owner also
+reported uneven 60 fps on the iPhone 14 Plus: newest-only frame hand-off
+on a fixed-refresh screen repeats and skips frames; a two-frame ordered
+queue fixes it. 75 fps isn't possible on a 60 Hz phone screen; the
+setting now says so. All CI green; version 0.6.1 awaiting release.

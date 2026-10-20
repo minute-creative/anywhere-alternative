@@ -130,9 +130,21 @@ Ring's PC keys (play: F jump, Space dodge, R item, E interact, clicks,
 Shift+click, X crouch, Q lock-on, arrows, G map, Esc; menus: E OK, Q back).
 A, B and L1/R1 differ between play and menus, so it needs to know which:
 `cursor_captured` is Windows-only today (always false on a Mac host).
-Waiting on the owner: automatic (Mac capture detection), manual (⧉
-toggles) or both. Also tell them: in game, "Device for On-Screen Prompts"
-= Keyboard and Mouse.
+Owner chose **automatic**; built in 0.6.1: `macos/pointer.rs` (pulled-back
+pointer + CGCursorIsVisible in a full-screen app; logs "game pointer
+capture changed" with both signs) and the phone's "Elden Ring" controls
+(play / menu layouts, `shiftClick` action, "Play keys"/"Menu keys" note).
+To confirm in the owner's test: the note flips; A/B work in menus; L1/R1
+(Z/X) switch menu tabs. In game, "Device for On-Screen Prompts" =
+Keyboard and Mouse.
+Smoothness (owner: "doesn't feel like a consistent 60" on an iPhone 14
+Plus, a 60 Hz screen): the phone took only the newest frame each refresh
+(repeat-then-skip on uneven arrival); now `FrameSlot::queued(2)` shows
+frames in order. 75 fps is only offered on >60 Hz screens; a Mac with a
+60 Hz monitor captures 60 anyway (Phone mode's virtual display could run
+faster).
+**Version is 0.6.1**; the owner releases it (0.6.0 was published before
+the text-field and game-pointer host code).
 Flaky test: `usbip_server_survives_garbage_and_still_serves` (50 ms sleep
 before checking the connection was forgotten) failed once on macOS CI.
 
