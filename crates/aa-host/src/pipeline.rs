@@ -597,6 +597,10 @@ fn rebuild_pipeline(
                 *capture = cap;
                 *factory = Some(fac);
                 ctl.force_keyframe.store(true, Ordering::Relaxed);
+                // The new capture starts at full size: apply the viewer's
+                // Resolution setting again. Before 2026-10-20 it was lost on
+                // every rebuild (a 4K Mac then sent 4K to a phone).
+                ctl.max_res_changed.store(true, Ordering::Relaxed);
                 return true;
             }
             Err(e) => {
