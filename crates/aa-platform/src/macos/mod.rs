@@ -36,6 +36,7 @@ pub mod gamepad;
 pub mod pointer;
 pub mod speaker;
 pub mod textfocus;
+pub mod vdisplay;
 pub mod wininfo;
 
 /// Query what this Mac can do. Until the backends exist this reports what a
@@ -53,6 +54,7 @@ pub fn probe_capabilities() -> Capabilities {
         fixed_fps: false,
         loss_recovery: false,
         text_focus: false,
+        phone_display: None,
     }
 }
 
@@ -120,6 +122,7 @@ pub fn host_backends() -> Result<HostBackends> {
             fixed_fps: false,
             loss_recovery,
             text_focus: false,
+            phone_display: None,
         },
     })
 }

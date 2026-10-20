@@ -44,6 +44,12 @@ pub struct Capabilities {
     /// real keyboard and say no, so the host does no work for them.
     #[serde(default)]
     pub text_focus: bool,
+    /// Viewer only: "give me a screen of this shape" (logical points,
+    /// width × height): Phone mode. The Mac host then adds a phone-shaped
+    /// screen while this viewer watches, so text is readable and buttons
+    /// are big enough on the phone. `None`: show the normal screen.
+    #[serde(default)]
+    pub phone_display: Option<[u16; 2]>,
 }
 
 /// The result of a successful negotiation. Both sides compute this
@@ -147,6 +153,7 @@ mod tests {
             fixed_fps: false,
             loss_recovery: false,
             text_focus: false,
+            phone_display: None,
         }
     }
 

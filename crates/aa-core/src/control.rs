@@ -195,6 +195,7 @@ mod tests {
             fixed_fps: false,
             loss_recovery: false,
             text_focus: false,
+            phone_display: None,
         }
     }
 
@@ -217,12 +218,20 @@ mod tests {
         assert_eq!(m, ControlMessage::TextFocus { field: None, secure: false });
         // A viewer older than 0.6.1 sends no `text_focus`: it didn't ask.
         let mut json = serde_json::to_value(ControlMessage::hello(caps())).unwrap();
-        json["capabilities"].as_object_mut().unwrap().remove("text_focus");
+        let obj = json["capabilities"].as_object_mut().unwrap();
+        obj.remove("text_focus");
+        obj.remove("phone_display");
         let ControlMessage::Hello { capabilities, .. } = ControlMessage::decode(json.to_string().as_bytes()).unwrap()
         else {
             panic!("not a hello")
         };
         assert!(!capabilities.text_focus);
+        assert_eq!(capabilities.phone_display, None, "no phone mode from a viewer that doesn't ask");
+        // A phone asking for Phone mode is understood.
+        let mut c = caps();
+        c.phone_display = Some([1080, 500]);
+        let m = ControlMessage::hello(c);
+        assert_eq!(ControlMessage::decode(&m.encode()).unwrap(), m);
     }
 
     #[test]

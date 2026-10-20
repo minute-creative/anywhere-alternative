@@ -159,6 +159,7 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
             fixed_fps: false,
             loss_recovery: false,
             text_focus: false,
+            phone_display: None,
         },
     })
 }
@@ -341,6 +342,7 @@ pub fn viewer_backends() -> Result<ViewerBackends> {
             fixed_fps: false,
             loss_recovery: false,
             text_focus: false,
+            phone_display: None,
         },
     })
 }

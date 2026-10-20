@@ -760,6 +760,20 @@ async fn handle_packet(
                             stream.start(ctl, &negotiated, host_caps, full_access);
                             stream.text_wanted.store(capabilities.text_focus, Ordering::Relaxed);
                             stream.text_told = (None, Instant::now());
+                            // Phone mode: a phone-shaped main screen while it
+                            // watches. Rearranging screens takes ~1 s, so not
+                            // here; the capture follows the new main screen.
+                            if let Some([w, h]) = capabilities.phone_display {
+                                stream.phone_display = true;
+                                let _ = std::thread::Builder::new().name("aa-phone-display".into()).spawn(move || {
+                                    if !aa_platform::phone_display_begin((w, h)) {
+                                        tracing::info!("phone mode not available here; showing the normal screen");
+                                    }
+                                });
+                            } else if std::mem::take(&mut stream.phone_display) {
+                                // A viewer without it replaced one with it.
+                                let _ = std::thread::Builder::new().spawn(aa_platform::phone_display_end);
+                            }
                             ctl.force_keyframe.store(true, Ordering::Relaxed);
                             ctl.streaming.store(true, Ordering::Relaxed);
                         }
@@ -1205,6 +1219,8 @@ struct Stream {
     /// What the viewer was last told, and when (repeated every second
     /// while a field is focused: control messages can be lost).
     text_told: (Option<TextField>, Instant),
+    /// Phone mode is on for this viewer (to turn it off when it leaves).
+    phone_display: bool,
 }
 
 /// A focused text field: where (fractions of the screen: x, y, width,
@@ -1260,6 +1276,7 @@ impl Stream {
             text_wanted,
             text_field,
             text_told: (None, Instant::now()),
+            phone_display: false,
             now: ShareTarget::Screen,
             local: ShareTarget::Screen,
             viewer_choice: None,
@@ -1314,6 +1331,9 @@ impl Stream {
             self.follow_choice(ctl, 0);
         }
         self.full_access = false;
+        if std::mem::take(&mut self.phone_display) {
+            let _ = std::thread::Builder::new().name("aa-phone-display".into()).spawn(aa_platform::phone_display_end);
+        }
         self.text_wanted.store(false, Ordering::Relaxed);
         self.text_told = (None, Instant::now());
     }

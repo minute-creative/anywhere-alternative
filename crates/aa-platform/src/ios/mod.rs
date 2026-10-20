@@ -23,6 +23,10 @@ pub mod decoder;
 /// 60 or 120, and 75 is the ceiling that keeps heat and battery sane).
 pub const MAX_FPS: u16 = 75;
 
+/// Phone mode: the screen shape to ask the Mac for (logical points), set by
+/// the app before connecting; `None` = the normal screen.
+pub static PHONE_DISPLAY: std::sync::Mutex<Option<[u16; 2]>> = std::sync::Mutex::new(None);
+
 pub fn viewer_backends() -> Result<ViewerBackends> {
     let hardware = decoder::VtDecoder::new(Codec::H264).is_ok();
     let mut codecs = if hardware { vec![Codec::Hevc, Codec::H264] } else { vec![Codec::H264] };
@@ -42,6 +46,7 @@ pub fn viewer_backends() -> Result<ViewerBackends> {
         loss_recovery: true,
         // Opens its keyboard when the Mac focuses a text field.
         text_focus: true,
+        phone_display: PHONE_DISPLAY.lock().ok().and_then(|g| *g),
     };
     let decoder: crate::DecoderFactory = Box::new(move |codec| -> Result<Box<dyn crate::VideoDecoder>> {
         if hardware {

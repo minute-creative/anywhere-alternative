@@ -313,6 +313,29 @@ pub fn cursor_captured() -> bool {
     }
 }
 
+/// Phone mode (Mac host): while a phone watches, give this computer a
+/// screen of the phone's shape (`points`, logical size) and make it the
+/// main one, so the stream fills the phone with readable text. False where
+/// that isn't possible; the stream then shows the normal screen. Takes
+/// about a second (screens are rearranged): call it off the network loop.
+pub fn phone_display_begin(points: (u16, u16)) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::vdisplay::begin(points)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = points;
+        false
+    }
+}
+
+/// The phone left: give the main screen back and remove the phone screen.
+pub fn phone_display_end() {
+    #[cfg(target_os = "macos")]
+    macos::vdisplay::end();
+}
+
 /// The text field here that has the keyboard focus, if any: where it is
 /// (fractions of the main display: x, y, width, height) and whether it is
 /// a password field. The phone opens its keyboard and zooms to it (owner,

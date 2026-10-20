@@ -130,6 +130,8 @@ pub struct SckCapture {
     /// The viewer's Resolution setting.
     max: Option<Resolution>,
     display: Retained<SCDisplay>,
+    /// When we last checked that `display` is still the main screen.
+    main_checked: Instant,
 }
 
 // SAFETY: the SCStream and our output object are thread-safe Objective-C
@@ -421,6 +423,7 @@ impl SckCapture {
             source: (w, h),
             max: None,
             display,
+            main_checked: Instant::now(),
         })
     }
 
@@ -468,6 +471,17 @@ impl Drop for SckCapture {
 
 impl ScreenCapture for SckCapture {
     fn next_frame(&mut self, timeout: Duration) -> Result<Option<CapturedFrame>> {
+        // The main screen changed (Phone mode made the phone-shaped screen
+        // main, or gave the main screen back; or the person did it in
+        // System Settings): capture the new one. The pipeline rebuilds on
+        // DeviceLost, and a new capture starts on the main screen.
+        if self.main_checked.elapsed() > Duration::from_secs(1) {
+            self.main_checked = Instant::now();
+            // SAFETY: plain property read.
+            if unsafe { self.display.displayID() } != CGMainDisplayID() {
+                return Err(PlatformError::DeviceLost("the main screen changed".into()));
+            }
+        }
         // A newer picture wins over a repeat.
         let fresh = match self.wake.recv_timeout(if self.repeat { Duration::ZERO } else { timeout }) {
             Ok(()) => self.latest.lock().ok().and_then(|mut l| l.take()),

@@ -373,6 +373,7 @@ fn mock_capabilities(res: Resolution, fps: u16) -> Capabilities {
         fixed_fps: false,
         loss_recovery: false,
         text_focus: false,
+        phone_display: None,
     }
 }
 
