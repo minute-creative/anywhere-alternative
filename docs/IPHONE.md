@@ -94,9 +94,29 @@ While watching the Mac — **Desktop** controls (the default):
 | L1 (hold) | Command ⌘ |
 | R1 (hold) | Shift ⇧ |
 | D-pad | Arrow keys |
-| Menu ≡ | Return |
-| Options ⧉ | Escape |
+| Menu ≡ | Quick menu |
+| Options ⧉ | Return |
 | Home | Quick menu |
+
+**Elden Ring** controls: the game's own PC keys laid out like its Xbox
+controls, switching between play and menus by itself (the Mac tells the
+phone when the game holds the mouse; "Play keys" / "Menu keys" flashes
+at the top). In game, set *Device for On-Screen Prompts* to Keyboard and
+Mouse.
+
+| Control | In play | In menus |
+|---|---|---|
+| Left stick / right stick | Move (W A S D) / camera | Navigate / – |
+| A | Jump (F) | OK (E) |
+| B | Dodge, roll, dash (Space) | Back (Q) |
+| X | Use item (R) | R |
+| Y | Interact (E) | F |
+| L1 / R1 | Guard / attack | Tabs (Z / X, to confirm) |
+| L2 / R2 | Skill / strong attack (Shift + click) | – |
+| L3 / R3 | Crouch (X) / lock-on (Q) | – |
+| D-pad | Spells, items, weapons (arrows) | Navigate |
+| ⧉ / ≡ | Map (G) / menu (Esc) | Map / close |
+| L4 / R4 | Quick menu / launcher | same |
 
 **Game** controls (keyboard + mouse games, e.g. through CrossOver): left
 stick = W A S D, right stick = mouse look, R2 / L2 = mouse buttons, A
@@ -123,9 +143,15 @@ the Mac, Anywhere → Share → the iPhone in the paired list → *Full
 access* (once). Without it, opening still works, on the whole desktop.
 Icons arrive a moment after the list.
 
-Keyboard (X): d-pad moves, A types, B deletes, X space, Y shift, Menu
-return, L1 symbols, R1 tab, Options closes. *Phone keyboard* on the last
-row brings up iOS's keyboard for longer text.
+Typing: clicking a text field on the Mac opens the **iPhone keyboard** by
+itself (autocorrect, suggestions, dictation; Settings → Typing chooses
+iPhone keyboard, Controller keyboard or Off). The picture above it zooms
+to the field. X there swaps to the controller keyboard.
+
+Controller keyboard (X): d-pad moves, A types, B deletes, X space, Y
+shift, ⧉ return, L1 symbols, **L2 ⌘** (sticky: ⌘ then L is Chrome's
+address bar, ⌘ then C / V / A / Z), R1 tab, ≡ menu. *iOS ⌨* on the last
+row brings up iOS's keyboard. Quick menu: L1 / R1 jump four tiles.
 
 The quick menu (Home) is a control bar along the bottom: Launcher,
 Keyboard, Whole Mac, Controls, Show controls, Zoom, Full screen, Close window,
@@ -152,10 +178,14 @@ menu.
 
 ## Settings
 
-Picture 1080p / 720p, frame rate 60 / 75, data cap, controls profile,
-pointer speed, mute the Mac's speakers, stats corner, and *Problems* (the
-engine's log; the full file is `viewer.log` in the app's Documents
-folder — Files app → On My iPhone → Anywhere).
+Picture 1080p / 720p, frame rate (75 only on a 120 Hz screen), data cap,
+**Phone mode** (on: the Mac adds a screen shaped like the phone with
+large text while connected — its menu bar, Dock and the front app move
+there, the Mac monitor keeps its other windows, all put back on
+disconnect), controls profile, Typing, pointer speed, mute the Mac's
+speakers, launcher on connect, stats corner, and *Problems* (the engine's
+log, L1 / R1 to scroll; the full file is `viewer.log` in the app's
+Documents folder — Files app → On My iPhone → Anywhere).
 
 ## How it is built
 

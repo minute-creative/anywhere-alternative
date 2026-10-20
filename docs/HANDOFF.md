@@ -143,6 +143,21 @@ Plus, a 60 Hz screen): the phone took only the newest frame each refresh
 frames in order. 75 fps is only offered on >60 Hz screens; a Mac with a
 60 Hz monitor captures 60 anyway (Phone mode's virtual display could run
 faster).
+Handheld audit (owner: "everything operable with the Kishi V2, best
+experience"): pairing pad fitted (~330 pt, was ~420), home cards scale,
+button-hint pills (multi-character glyphs showed "…"), Problems log pages
+with L1/R1, the app claims the pad's Home button
+(`preferredSystemGestureState = .disabled`; before, only ≡+⧉ worked),
+sticky ⌘ on the controller keyboard (L2), X from the iPhone keyboard to
+pad keys, quick menu L1/R1 jumps, exit hints while connecting.
+**Phone mode** built (owner: phone screen becomes main, Large text):
+`macos/vdisplay.rs` (CGVirtualDisplay, HiDPI, made main for the session,
+front window moved over), capture rebuilds when the main screen changes,
+`Capabilities::phone_display` from the phone (Settings → Phone mode, on).
+Also fixed: a pipeline rebuild dropped the viewer's Resolution setting.
+To test on hardware: Phone mode on/off, menu bar + front app on the phone
+screen, the Mac monitor keeps working, everything back on disconnect,
+and a host crash leaves the Mac normal.
 **Version is 0.6.1**; the owner releases it (0.6.0 was published before
 the text-field and game-pointer host code).
 Flaky test: `usbip_server_survives_garbage_and_still_serves` (50 ms sleep

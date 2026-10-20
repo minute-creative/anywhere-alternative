@@ -657,3 +657,11 @@ reported uneven 60 fps on the iPhone 14 Plus: newest-only frame hand-off
 on a fixed-refresh screen repeats and skips frames; a two-frame ordered
 queue fixes it. 75 fps isn't possible on a 60 Hz phone screen; the
 setting now says so. All CI green; version 0.6.1 awaiting release.
+
+Later still: handheld audit of every phone screen for a landscape phone
+and Kishi-only use (findings and fixes in HANDOFF), and Phone mode: a
+CGVirtualDisplay the phone's shape, made main while the phone watches.
+Phone mode is private API, so it is looked up at run time and the host
+falls back to the normal screen if it is missing. Noticed along the way:
+the Mac host's pipeline rebuild never re-applied the viewer's Resolution
+setting.
