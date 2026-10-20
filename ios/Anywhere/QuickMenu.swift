@@ -125,7 +125,7 @@ struct QuickMenu: View {
                     .font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.muted)
             }
             Spacer()
-            HintBar(hints: [("A", "Choose"), ("B", "Close")])
+            HintBar(hints: [("A", "Choose"), ("L1 R1", "Jump"), ("B", "Close")])
         }
         .padding(.horizontal, 28)
     }
@@ -148,6 +148,9 @@ struct QuickMenu: View {
         switch ev {
         case .left: focus = max(0, focus - 1)
         case .right: focus = min(items.count - 1, focus + 1)
+        // 17 items in one row: the bumpers jump four at a time.
+        case .l1: focus = max(0, focus - 4)
+        case .r1: focus = min(items.count - 1, focus + 4)
         case .confirm: items[focus].action()
         case .back, .home, .menu: overlay = .none
         default: break

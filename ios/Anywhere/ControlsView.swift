@@ -44,7 +44,7 @@ struct ControlsView: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 Text("How it works").font(.system(size: 18, weight: .semibold))
-                Text("Sticks can be the pointer, mouse look, scroll, W A S D or arrow keys. Buttons can be a key (held while the button is held), a mouse button, or an app action: Keyboard, Launcher, Quick menu, Pointer speed.")
+                Text("Sticks can be the pointer, mouse look, scroll, W A S D or arrow keys. Buttons can be a key (held while the button is held), a mouse button, Back, or an app action: Keyboard, Launcher, Quick menu, Pointer speed, Zoom, Magnify (while held).")
                     .font(.system(size: 14)).foregroundStyle(Theme.muted)
                 Text("Choose \"Custom\" under Controls (Settings or the quick menu) to use this layout. The Home button always opens the quick menu.")
                     .font(.system(size: 14)).foregroundStyle(Theme.muted)
@@ -77,8 +77,10 @@ struct ControlsView: View {
         case .left: cycle(-1, big: pad.r1Held)
         case .y: engine.prefs.customMap[controls[focus]] = ControlMap.game[controls[focus]]
         case .options:
-            // Alternate between the two ready-made layouts as a base.
-            engine.prefs.customMap = engine.prefs.customMap == .game ? .desktop : .game
+            // Cycle the ready-made layouts as a starting point.
+            let bases: [ControlMap] = [.game, .desktop, .eldenPlay]
+            let i = bases.firstIndex(of: engine.prefs.customMap) ?? -1
+            engine.prefs.customMap = bases[(i + 1) % bases.count]
         case .back, .home: router.screen = .settings
         default: break
         }

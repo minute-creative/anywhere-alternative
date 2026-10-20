@@ -111,6 +111,10 @@ final class Pad: ObservableObject {
         controller = c
         connected = true
         name = c.vendorName ?? "Controller"
+        // iOS keeps a pad's Home button for itself (Game Center, the
+        // Razer app) unless the app asks for it; 0.6.0 didn't, so on the
+        // Kishi "Home opens the quick menu" only worked as ≡ + ⧉.
+        c.physicalInputProfile.buttons[GCInputButtonHome]?.preferredSystemGestureState = .disabled
         pad.valueChangedHandler = { [weak self] gp, _ in
             guard let self else { return }
             var s = PadState()

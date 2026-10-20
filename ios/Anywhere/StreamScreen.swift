@@ -170,12 +170,20 @@ struct StreamScreen: View {
 
     @ViewBuilder private var notice: some View {
         let st = engine.status
+        // Waiting screens say how to get out: Home (or ≡ + ⧉) opens the
+        // quick menu, which has Disconnect.
         if st.state == "connecting" {
-            Notice(symbol: "antenna.radiowaves.left.and.right", title: "Connecting…", detail: "Finding the Mac and setting up the secure link.")
-                .background(Color.black.opacity(0.6)).clipShape(RoundedRectangle(cornerRadius: 24))
+            VStack(spacing: 4) {
+                Notice(symbol: "antenna.radiowaves.left.and.right", title: "Connecting…", detail: "Finding the Mac and setting up the secure link.")
+                HintBar(hints: [("Home", "Menu · Disconnect")]).padding(.bottom, 18)
+            }
+            .background(Color.black.opacity(0.6)).clipShape(RoundedRectangle(cornerRadius: 24))
         } else if st.state == "reconnecting" {
-            Notice(symbol: "arrow.triangle.2.circlepath", title: "Reconnecting…", detail: "The Mac stopped answering; trying again until it is back.")
-                .background(Color.black.opacity(0.6)).clipShape(RoundedRectangle(cornerRadius: 24))
+            VStack(spacing: 4) {
+                Notice(symbol: "arrow.triangle.2.circlepath", title: "Reconnecting…", detail: "The Mac stopped answering; trying again until it is back.")
+                HintBar(hints: [("Home", "Menu · Disconnect")]).padding(.bottom, 18)
+            }
+            .background(Color.black.opacity(0.6)).clipShape(RoundedRectangle(cornerRadius: 24))
         } else if st.state == "ended" {
             VStack(spacing: 14) {
                 Notice(symbol: "xmark.circle", title: "Disconnected", detail: st.reason)

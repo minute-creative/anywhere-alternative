@@ -12,6 +12,8 @@ struct KeyboardView: View {
     @State private var row = 1
     @State private var col = 0
     @State private var shift = false
+    /// ⌘ for the next key (⌘L, ⌘C, ⌘V, ⌘A, ⌘Z…), like a sticky key.
+    @State private var command = false
     @State private var symbols = false
     @State private var token = 0
     @State private var typed = ""
@@ -56,14 +58,16 @@ struct KeyboardView: View {
         out.append([
             Key(id: "sym", label: symbols ? "abc" : "123", width: 64) { symbols.toggle() },
             Key(id: "shift", label: "⇧", width: 48) { shift.toggle() },
-            Key(id: "space", label: "space", width: 176) { engine.tap(HID.space) },
-            Key(id: "bs", label: "⌫", width: 56) { engine.tap(HID.backspace) },
-            Key(id: "ret", label: "return", width: 76) { engine.tap(HID.enter) },
-            Key(id: "esc", label: "esc", width: 52) { engine.tap(HID.escape) },
-            Key(id: "tab", label: "tab", width: 52) { engine.tap(HID.tab) },
-            Key(id: "cmd-tab", label: "⌘⇥", width: 52) { engine.tap(HID.tab, modifiers: [HID.leftGui]) },
-            Key(id: "left", label: "←", width: 40) { engine.tap(HID.left) },
-            Key(id: "right", label: "→", width: 40) { engine.tap(HID.right) },
+            Key(id: "space", label: "space", width: 176) { send(HID.space) },
+            Key(id: "bs", label: "⌫", width: 56) { send(HID.backspace) },
+            Key(id: "ret", label: "return", width: 76) { send(HID.enter) },
+            Key(id: "esc", label: "esc", width: 52) { send(HID.escape) },
+            Key(id: "tab", label: "tab", width: 52) { send(HID.tab) },
+            // Replaces 0.6.0's ⌘⇥ key: ⌘ then tab does the same, and ⌘ then
+            // a letter gives every shortcut (owner: Chrome on the phone).
+            Key(id: "cmd", label: "⌘", width: 52) { command.toggle() },
+            Key(id: "left", label: "←", width: 40) { send(HID.left) },
+            Key(id: "right", label: "→", width: 40) { send(HID.right) },
             Key(id: "phone", label: "iOS ⌨", width: 60) { phoneKeyboard = true },
         ])
         return out
@@ -78,7 +82,7 @@ struct KeyboardView: View {
                         ForEach(Array(line.enumerated()), id: \.element.id) { ci, k in
                             FocusTile(focused: ri == row && ci == col, width: k.width, height: 34) {
                                 Text(k.label).font(.system(size: 16, weight: .medium, design: .rounded))
-                                    .foregroundStyle((k.id == "shift" && shift) || (k.id == "sym" && symbols) ? Theme.accent : Theme.text)
+                                    .foregroundStyle((k.id == "shift" && shift) || (k.id == "sym" && symbols) || (k.id == "cmd" && command) ? Theme.accent : Theme.text)
                             }
                             .onTapGesture { row = ri; col = ci; k.press() }
                         }
@@ -92,6 +96,7 @@ struct KeyboardView: View {
                     ButtonHint(glyph: "⧉", text: "Return")
                     ButtonHint(glyph: "≡", text: "Menu")
                     ButtonHint(glyph: "L1", text: "123")
+                    ButtonHint(glyph: "L2", text: command ? "⌘ on" : "⌘")
                     Spacer()
                     // Hidden field for the phone's own keyboard.
                     TextField("", text: $typed)
@@ -114,8 +119,19 @@ struct KeyboardView: View {
 
     private func typeChar(_ s: String) {
         guard let ch = s.first, let u = HID.usage(for: ch) else { return }
-        engine.tap(u.0, modifiers: u.1 ? [HID.leftShift] : [])
+        // With ⌘ on, the plain key: ⌘L, not ⌘⇧L, even with shift showing.
+        send(u.0, shifted: u.1 && !command)
         if shift && !symbols { shift = false }
+    }
+
+    /// One key, with ⌘ if it is on (then ⌘ turns off, like a sticky key).
+    private func send(_ usage: UInt16, shifted: Bool = false) {
+        var mods: [UInt16] = shifted ? [HID.leftShift] : []
+        if command {
+            mods.append(HID.leftGui)
+            command = false
+        }
+        engine.tap(usage, modifiers: mods)
     }
 
     /// The phone's keyboard: send whatever was added or removed.
@@ -135,12 +151,13 @@ struct KeyboardView: View {
         case .left: col = max(0, col - 1)
         case .right: col = min(r[row].count - 1, col + 1)
         case .confirm: r[row][col].press()
-        case .back: engine.tap(HID.backspace)
-        case .x: engine.tap(HID.space)
+        case .back: send(HID.backspace)
+        case .x: send(HID.space)
         case .y: shift.toggle()
-        case .options: engine.tap(HID.enter)
+        case .options: send(HID.enter)
         case .l1: symbols.toggle()
-        case .r1: engine.tap(HID.tab)
+        case .l2: command.toggle()
+        case .r1: send(HID.tab)
         case .menu, .home: overlay = .quickMenu
         default: break
         }
@@ -238,6 +255,8 @@ struct TypingView: View {
                         .padding(.horizontal, 10).padding(.vertical, 8)
                         .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.1)))
                 }
+                // Kishi only, no touch: X swaps to the controller keyboard.
+                if pad.connected { ButtonHint(glyph: "X", text: "Pad keys") }
                 Button("Done") { close() }
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Theme.accent)
@@ -295,6 +314,9 @@ struct TypingView: View {
     private func handle(_ ev: NavEvent) {
         switch ev {
         case .back: close()
+        case .x:
+            focused = false
+            overlay = .keyboard
         case .menu, .home: overlay = .quickMenu
         default: break
         }
