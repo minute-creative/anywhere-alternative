@@ -33,6 +33,7 @@ pub mod input;
 
 pub mod camera;
 pub mod gamepad;
+pub mod pointer;
 pub mod speaker;
 pub mod textfocus;
 pub mod wininfo;

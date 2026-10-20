@@ -294,13 +294,20 @@ pub fn input_blocker() -> Option<&'static str> {
 /// window)? Then the viewer switches to game mouse by itself, because a
 /// game like that reads mouse movement, not pointer positions (owner,
 /// 0.5.9: aiming in Valorant did nothing until game mouse, which they
-/// didn't know to turn on). Cheap; asked once a second.
+/// didn't know to turn on). Cheap; asked once a second. On a Mac it was
+/// always false until 2026-10-20 (Elden Ring on the phone: the stick
+/// stayed a pointer and the controls never switched to the game's keys);
+/// see `macos::pointer` for how a Mac tells.
 pub fn cursor_captured() -> bool {
     #[cfg(target_os = "windows")]
     {
         windows::cursor_captured()
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::pointer::captured()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         false
     }

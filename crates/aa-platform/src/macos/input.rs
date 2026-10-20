@@ -227,6 +227,9 @@ pub struct MacInput {
     keys: Vec<u16>,
     clicks: ClickCounter,
     limit: Option<Limit>,
+    /// When the last mouse move was posted (to tell a game pulling the
+    /// pointer back from the person moving it at the Mac).
+    moved_at: Option<Instant>,
 }
 
 // SAFETY: the event source is an immutable CF object only used from the
@@ -267,6 +270,7 @@ impl MacInput {
                 c
             },
             limit: None,
+            moved_at: None,
         })
     }
 
@@ -492,6 +496,11 @@ impl InputInjector for MacInput {
                 // a huge jump each time (the camera spun, 0.5.4).
                 if let Some(now) = CGEvent::new(None) {
                     let at = CGEvent::location(Some(&now));
+                    // Was it pulled back since our last move? That tells
+                    // the viewer a game holds the mouse (see `pointer`).
+                    if let Some(t) = self.moved_at {
+                        super::pointer::observe((self.x, self.y), (at.x, at.y), t.elapsed().as_millis() as u64);
+                    }
                     self.x = at.x;
                     self.y = at.y;
                 }
@@ -499,6 +508,7 @@ impl InputInjector for MacInput {
                 self.y += f64::from(dy);
                 self.clamp_to_screen();
                 self.moved(f64::from(dx), f64::from(dy));
+                self.moved_at = Some(Instant::now());
             }
             InputEvent::MouseButton { button, pressed } => self.button(button, pressed),
             InputEvent::MouseScroll { dx, dy } => self.scroll(dx, dy),
