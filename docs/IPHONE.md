@@ -85,6 +85,10 @@ stick = W A S D, right stick = mouse look, R2 / L2 = mouse buttons, A
 Space, B Ctrl, X R, Y E, L1 Shift, R1 Q, L3 Shift, R3 F, d-pad 1 2 3 4,
 Menu Esc, Options Tab.
 
+**Custom** is your own layout: Settings → *Edit controls* sets what every
+button and stick does (any key, mouse button, pointer, mouse look, scroll,
+W A S D, arrows, or an app action), starting from the Game layout.
+
 **Controller pass-through** sends the pad as a controller. That works when
 the host can show a virtual controller: a PC with ViGEmBus. **A Mac
 cannot**, without Apple's virtual-HID entitlement (paid program +
@@ -97,6 +101,13 @@ jump rows. Icons arrive a moment after the list.
 Keyboard (X): d-pad moves, A types, B deletes, X space, Y shift, Menu
 return, L1 symbols, R1 tab, Options closes. *Phone keyboard* on the last
 row brings up iOS's keyboard for longer text.
+
+Clipboard: text the Mac copies lands on the phone's clipboard; quick menu →
+*Send clipboard* pastes the phone's text to the Mac.
+
+Also handled: locking the phone or switching apps lets go of every held
+key and button on the Mac (the session stays); a controller unplugging
+does the same; a phone call pauses the sound and it resumes after.
 
 Touch, with no controller: tap = click, long press = right-click, drag =
 move the pointer, two fingers = scroll, the ≡ button top-right = quick
@@ -122,6 +133,8 @@ folder — Files app → On My iPhone → Anywhere).
   `StreamView.swift` draws frames with Metal and handles touch;
   `LauncherView`, `QuickMenu`, `KeyboardView`, `HomeView`, `PairView`,
   `SettingsView` are the screens.
+- A PC host lists its Start menu shortcuts and Steam games too (no icons
+  yet; opening only).
 - The launcher protocol: `AppList` → `Apps` pages → icons as a named blob
   on the clipboard transfer (`aa_core::apps`). On the Mac,
   `aa_platform::apps` lists `/Applications`, `~/Applications` (incl.

@@ -126,10 +126,17 @@ look later. See `docs/IPHONE.md` for the result and the controls table.
 - CI job "iPhone app": Rust for `aarch64-apple-ios-sim`, then xcodegen +
   xcodebuild (simulator, unsigned). Expect API-drift rounds: nothing in
   `ios/` or the iOS Rust target has been compiled before the first push.
+- Second pass the same day (owner: "add the missing pieces"): editable
+  Custom control layout (`ios/Anywhere/Bindings.swift`, `ControlsView`);
+  clipboard both ways (`ViewerCommand::CopyItem`, `link::take_clip`,
+  C `aa_mobile_copy_text` / `aa_mobile_take_clip_text`); held keys
+  released on background/lock/pad-disconnect; audio restarts after a
+  call; a half-received launcher list is re-asked (`apps_pending`);
+  Windows host lists Start-menu shortcuts + Steam (open only, no icons).
 - Known limits, told to the owner: no virtual controller on a Mac host
   (entitlement), so games on the Mac get keys + mouse from the pad; the
-  phone sends no mic/camera/clipboard yet; Windows host has no launcher
-  list yet.
+  phone sends no mic/camera; icons only on a Mac host; CPU frame upload
+  (fine at 1080p75, not zero-copy).
 Ask for: whether the app installs and pairs; `viewer.log` from the phone
 (Settings → Problems, or the Files app); fps/Mbps in the corner at 1080p75
 on Wi-Fi and over Tailscale; whether the launcher lists Steam games and

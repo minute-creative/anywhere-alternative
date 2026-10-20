@@ -46,6 +46,7 @@ struct Status: Codable {
     var host_mac: Bool = false
     var apps_version: UInt32 = 0
     var full_access: Bool = false
+    var apps_pending: Bool = false
 
     var connected: Bool { state == "connected" }
     var live: Bool { state == "connecting" || state == "connected" || state == "reconnecting" }
@@ -70,6 +71,17 @@ struct Prefs: Codable {
     var profile: InputProfile = .desktop
     var pointerSpeed: Double = 1.0
     var usageStats: Bool = true
+    /// The editable layout ("Custom" controls); starts as the game layout.
+    var customMap: ControlMap = .game
+
+    /// The control map the chosen profile means.
+    var activeMap: ControlMap {
+        switch profile {
+        case .desktop: return .desktop
+        case .game: return .game
+        case .custom, .controller: return customMap
+        }
+    }
 
     static func load() -> Prefs {
         if let data = UserDefaults.standard.data(forKey: "prefs"),
@@ -92,6 +104,8 @@ enum InputProfile: String, Codable, CaseIterable {
     case desktop
     /// WASD on the left stick, mouse on the right, FPS-style buttons.
     case game
+    /// Your own layout (Settings → Controls).
+    case custom
     /// The controller itself, as-is (works when the host can show a
     /// virtual controller: a PC with ViGEmBus; a Mac needs Apple's
     /// entitlement, which needs the paid developer program).
@@ -101,6 +115,7 @@ enum InputProfile: String, Codable, CaseIterable {
         switch self {
         case .desktop: return "Desktop"
         case .game: return "Game (keys + mouse)"
+        case .custom: return "Custom"
         case .controller: return "Controller pass-through"
         }
     }
@@ -122,6 +137,7 @@ final class Engine: ObservableObject {
     weak var pad: Pad?
 
     private var seenAppsVersion: UInt32 = 0
+    private var appsPendingTicks = 0
     private var timer: Timer?
     private var pendingIcons = false
 
@@ -189,6 +205,9 @@ final class Engine: ObservableObject {
         aa_mobile_set_max_mbps(v)
     }
 
+    /// Text copied on the phone → the other computer's clipboard.
+    func copyText(_ text: String) { aa_mobile_copy_text(text) }
+
     func setMuteMac(_ on: Bool) {
         prefs.muteMac = on
         aa_mobile_set_mute_host(on)
@@ -246,6 +265,16 @@ final class Engine: ObservableObject {
                 if !list.isEmpty { apps = list }
                 loadIcons()
             }
+        }
+        // Text the other computer copied → the phone's clipboard.
+        let clip = take(aa_mobile_take_clip_text())
+        if !clip.isEmpty { UIPasteboard.general.string = clip }
+        // A launcher list stuck half-way (a lost page): ask again.
+        if status.apps_pending, status.connected {
+            appsPendingTicks += 1
+            if appsPendingTicks >= 12 { appsPendingTicks = 0; aa_mobile_request_apps() }
+        } else {
+            appsPendingTicks = 0
         }
         let text = take(aa_mobile_take_log())
         if !text.isEmpty {

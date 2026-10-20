@@ -374,6 +374,8 @@ struct StatusJson {
     host_mac: bool,
     apps_version: u32,
     full_access: bool,
+    /// A launcher list was asked for and not every page has arrived.
+    apps_pending: bool,
 }
 
 #[no_mangle]
@@ -396,6 +398,7 @@ pub unsafe extern "C" fn aa_mobile_status() -> *mut c_char {
             host_mac: false,
             apps_version: 0,
             full_access: false,
+            apps_pending: false,
         });
     };
     // Newest stats line, if the session produced one since last time.
@@ -429,6 +432,7 @@ pub unsafe extern "C" fn aa_mobile_status() -> *mut c_char {
         host_mac: link::host_is_mac(),
         apps_version: info.apps_version,
         full_access: info.full_access,
+        apps_pending: info.apps_pages.0 == 0 || info.apps_pages.1.len() < usize::from(info.apps_pages.0),
     })
 }
 
@@ -627,6 +631,29 @@ pub unsafe extern "C" fn aa_mobile_app_action(id: *const c_char, action: *const 
         }
     };
     command(ViewerCommand::AppAction(id, action));
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard: text copied on the phone goes to the host; text copied on the
+// host waits here for the app.
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn aa_mobile_copy_text(text: *const c_char) {
+    // SAFETY: C string from the caller, or null.
+    let text = unsafe { cstr(text) };
+    if !text.is_empty() {
+        command(ViewerCommand::CopyItem(aa_core::clipboard::ClipItem::Text(text)));
+    }
+}
+
+/// Text the host copied since the last call, or an empty string.
+#[no_mangle]
+pub unsafe extern "C" fn aa_mobile_take_clip_text() -> *mut c_char {
+    match link::take_clip() {
+        Some(aa_core::clipboard::ClipItem::Text(t)) => to_c(&t),
+        _ => to_c(""),
+    }
 }
 
 #[no_mangle]

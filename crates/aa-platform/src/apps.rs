@@ -7,17 +7,20 @@
 //! permissions). Everything goes through small command-line tools rather
 //! than private frameworks, so it works for the always-on host too.
 //!
-//! On Windows the list is empty for now (the PC launcher is a later step);
-//! other systems (Linux CI) return a pretend list so the flow can be tested.
+//! On a PC the list is the Start menu's shortcuts and Steam's library
+//! (no icons yet: the viewer shows a lettered tile). Other systems (Linux
+//! CI) return a pretend list so the flow can be tested.
 //!
-//! In plain words: this file answers "what can I open on that Mac?" and
-//! "open/quit this one" for the iPhone app's console-style menu.
+//! In plain words: this file answers "what can I open on that computer?"
+//! and "open/quit this one" for the iPhone app's console-style menu.
 
 #![allow(clippy::doc_markdown)] // app and tool names read better plain
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use aa_core::apps::{AppAction, AppEntry, AppKind, IconPack};
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+use aa_core::apps::AppKind;
+use aa_core::apps::{AppAction, AppEntry, IconPack};
 
 /// Everything the launcher can show, sorted: running first, then by name.
 /// Never includes Anywhere itself.
@@ -89,18 +92,130 @@ fn remember_recent_in(dir: &Path, id: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// Steam's library, the same files on every system: `steamapps/
+// appmanifest_<id>.acf` holds `"appid"` and `"name"`; `libraryfolders.vdf`
+// lists extra library folders.
+// ---------------------------------------------------------------------------
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod steam {
+    use std::path::{Path, PathBuf};
+
+    use aa_core::apps::{AppEntry, AppKind};
+
+    /// `"key"    "value"` → value, for Valve's key-value files.
+    pub fn vdf_value(line: &str, key: &str) -> Option<String> {
+        let line = line.trim();
+        let rest = line.strip_prefix('"')?.strip_prefix(key)?.strip_prefix('"')?.trim_start();
+        let v = rest.strip_prefix('"')?;
+        let end = v.find('"')?;
+        Some(v[..end].replace("\\\\", "\\"))
+    }
+
+    /// Installed games under `steam` (the Steam folder).
+    pub fn games(steam: &Path) -> Vec<AppEntry> {
+        let mut folders = vec![steam.join("steamapps")];
+        if let Ok(vdf) = std::fs::read_to_string(steam.join("steamapps/libraryfolders.vdf")) {
+            for line in vdf.lines() {
+                if let Some(p) = vdf_value(line, "path") {
+                    folders.push(PathBuf::from(p).join("steamapps"));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for f in folders {
+            let Ok(entries) = std::fs::read_dir(&f) else { continue };
+            for e in entries.flatten() {
+                let path = e.path();
+                let is_manifest = path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("appmanifest_"))
+                    && path.extension().is_some_and(|x| x.eq_ignore_ascii_case("acf"));
+                if !is_manifest {
+                    continue;
+                }
+                let Ok(acf) = std::fs::read_to_string(&path) else { continue };
+                let appid = acf.lines().find_map(|l| vdf_value(l, "appid"));
+                let title = acf.lines().find_map(|l| vdf_value(l, "name"));
+                if let (Some(appid), Some(title)) = (appid, title) {
+                    // Steam's own tools (redistributables, Proton) are not games.
+                    if title.contains("Redistributable")
+                        || title.starts_with("Proton")
+                        || title.starts_with("Steam Linux")
+                    {
+                        continue;
+                    }
+                    out.push(AppEntry {
+                        id: format!("steam:{appid}"),
+                        name: title,
+                        kind: AppKind::Steam,
+                        running: false,
+                        last_used: 0,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// The largest picture Steam cached for a game, if any (its layouts
+    /// have changed over the years; try each).
+    pub fn picture(steam: &Path, appid: &str) -> Option<PathBuf> {
+        let cache = steam.join("appcache/librarycache");
+        let candidates = [
+            cache.join(format!("{appid}_icon.jpg")),
+            cache.join(format!("{appid}_library_600x900.jpg")),
+            cache.join(appid).join("library_600x900.jpg"),
+        ];
+        if let Some(p) = candidates.iter().find(|p| p.exists()) {
+            return Some(p.clone());
+        }
+        let mut best: Option<(u64, PathBuf)> = None;
+        for e in std::fs::read_dir(cache.join(appid)).ok()?.flatten() {
+            let p = e.path();
+            let picture = p.extension().is_some_and(|x| x.eq_ignore_ascii_case("jpg") || x.eq_ignore_ascii_case("png"));
+            if picture {
+                let len = e.metadata().map_or(0, |m| m.len());
+                if best.as_ref().map_or(true, |(l, _)| len > *l) {
+                    best = Some((len, p));
+                }
+            }
+        }
+        best.map(|(_, p)| p)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn vdf_lines_parse() {
+            assert_eq!(super::vdf_value("\t\"appid\"\t\t\"1245620\"", "appid").as_deref(), Some("1245620"));
+            assert_eq!(super::vdf_value("\"name\" \"Elden Ring\"", "name").as_deref(), Some("Elden Ring"));
+            assert_eq!(super::vdf_value("\"name\" \"x\"", "appid"), None);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // macOS
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use super::*;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    use aa_core::apps::{AppAction, AppEntry, AppKind};
+
+    fn home() -> PathBuf {
+        std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
+    }
+
+    fn steam_dir() -> PathBuf {
+        home().join("Library/Application Support/Steam")
+    }
 
     /// Where apps live. `~/Applications/CrossOver` holds CrossOver's
     /// launchers for Windows programs, which `open` runs like any app.
     fn app_folders() -> Vec<(PathBuf, AppKind)> {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
+        let home = home();
         vec![
             (PathBuf::from("/Applications"), AppKind::App),
             (PathBuf::from("/Applications/Utilities"), AppKind::System),
@@ -111,8 +226,6 @@ mod mac {
         ]
     }
 
-    /// Apps people would want to open from a menu: not background-only
-    /// helpers, not menu-bar-only tools.
     struct Bundle {
         path: PathBuf,
         id: String,
@@ -120,6 +233,8 @@ mod mac {
         icon_file: Option<String>,
     }
 
+    /// Apps people would want to open from a menu: not background-only
+    /// helpers, not menu-bar-only tools.
     fn read_bundle(path: &Path) -> Option<Bundle> {
         let plist = path.join("Contents/Info.plist");
         let out = Command::new("/usr/bin/plutil").args(["-convert", "json", "-o", "-"]).arg(&plist).output().ok()?;
@@ -158,61 +273,6 @@ mod mac {
         out
     }
 
-    /// Steam's installed games: `steamapps/appmanifest_<id>.acf` holds
-    /// `"appid"` and `"name"` lines. The library can live in several
-    /// folders (`libraryfolders.vdf`); we read them all.
-    fn steam_games() -> Vec<AppEntry> {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        let steam = home.join("Library/Application Support/Steam");
-        let mut folders = vec![steam.join("steamapps")];
-        if let Ok(vdf) = std::fs::read_to_string(steam.join("steamapps/libraryfolders.vdf")) {
-            for line in vdf.lines() {
-                if let Some(p) = vdf_value(line, "path") {
-                    folders.push(PathBuf::from(p).join("steamapps"));
-                }
-            }
-        }
-        let mut out = Vec::new();
-        for f in folders {
-            let Ok(entries) = std::fs::read_dir(&f) else { continue };
-            for e in entries.flatten() {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if !name.starts_with("appmanifest_") || e.path().extension().is_none_or(|x| x != "acf") {
-                    continue;
-                }
-                let Ok(acf) = std::fs::read_to_string(e.path()) else { continue };
-                let appid = acf.lines().find_map(|l| vdf_value(l, "appid"));
-                let title = acf.lines().find_map(|l| vdf_value(l, "name"));
-                if let (Some(appid), Some(title)) = (appid, title) {
-                    // Steam's own tools (redistributables, Proton) are not games.
-                    if title.contains("Redistributable")
-                        || title.starts_with("Proton")
-                        || title.starts_with("Steam Linux")
-                    {
-                        continue;
-                    }
-                    out.push(AppEntry {
-                        id: format!("steam:{appid}"),
-                        name: title,
-                        kind: AppKind::Steam,
-                        running: false,
-                        last_used: 0,
-                    });
-                }
-            }
-        }
-        out
-    }
-
-    /// `"key"		"value"` → value, for Valve's key-value files.
-    fn vdf_value(line: &str, key: &str) -> Option<String> {
-        let line = line.trim();
-        let rest = line.strip_prefix('"')?.strip_prefix(key)?.strip_prefix('"')?.trim_start();
-        let v = rest.strip_prefix('"')?;
-        let end = v.find('"')?;
-        Some(v[..end].replace("\\\\", "\\"))
-    }
-
     /// Executable paths of everything running, for the "open" dot.
     fn running_paths() -> Vec<String> {
         Command::new("/bin/ps")
@@ -233,7 +293,7 @@ mod mac {
                 AppEntry { id: b.id, name: b.name, kind, running: is_running, last_used: 0 }
             })
             .collect();
-        out.extend(steam_games());
+        out.extend(super::steam::games(&steam_dir()));
         out
     }
 
@@ -253,15 +313,14 @@ mod mac {
     pub fn act_here(id: &str, action: AppAction) -> anyhow::Result<()> {
         if let Some(appid) = id.strip_prefix("steam:") {
             let appid: u64 = appid.parse()?;
-            return match action {
-                // `open` hands the URL to Steam, which starts the game (and
-                // Steam itself first if needed).
-                AppAction::Open => run(Command::new("/usr/bin/open").arg(format!("steam://rungameid/{appid}"))),
-                AppAction::Quit | AppAction::Hide => {
-                    // Steam games have no bundle id we know; quit through Steam.
-                    run(Command::new("/usr/bin/open").arg(format!("steam://close/{appid}")))
-                }
+            // `open` hands the URL to Steam, which starts the game (and
+            // Steam itself first if needed). Steam games have no bundle id
+            // we know, so quitting goes through Steam too.
+            let url = match action {
+                AppAction::Open => format!("steam://rungameid/{appid}"),
+                AppAction::Quit | AppAction::Hide => format!("steam://close/{appid}"),
             };
+            return run(Command::new("/usr/bin/open").arg(url));
         }
         let b = bundle_path(id).ok_or_else(|| anyhow::anyhow!("no app with id {id}"))?;
         match action {
@@ -269,15 +328,15 @@ mod mac {
             AppAction::Open => run(Command::new("/usr/bin/open").arg("-a").arg(&b.path)),
             // AppleScript's "quit" is what Cmd+Q does: the app may ask to
             // save. Falls back to a polite TERM signal if scripting is
-            // refused (the first time macOS asks for Automation permission).
+            // refused (macOS asks for Automation permission the first time;
+            // the always-on host has nobody to answer it).
             AppAction::Quit => {
                 let script = format!("tell application id \"{}\" to quit", b.id);
                 if run(Command::new("/usr/bin/osascript").args(["-e", &script])).is_err() {
                     let prefix = format!("{}/Contents/MacOS/", b.path.display());
                     let pids = Command::new("/bin/ps").args(["-axo", "pid=,comm="]).output()?;
                     for line in String::from_utf8_lossy(&pids.stdout).lines() {
-                        let mut parts = line.trim().splitn(2, ' ');
-                        if let (Some(pid), Some(comm)) = (parts.next(), parts.next()) {
+                        if let Some((pid, comm)) = line.trim().split_once(' ') {
                             if comm.trim().starts_with(&prefix) {
                                 let _ = Command::new("/bin/kill").args(["-TERM", pid]).status();
                             }
@@ -327,37 +386,14 @@ mod mac {
     /// The image file an app's icon comes from.
     fn icon_source(id: &str) -> Option<PathBuf> {
         if let Some(appid) = id.strip_prefix("steam:") {
-            let home = std::env::var_os("HOME").map(PathBuf::from)?;
-            let cache = home.join("Library/Application Support/Steam/appcache/librarycache");
-            // Steam has used a few layouts over the years; try each.
-            let candidates = [
-                cache.join(format!("{appid}_icon.jpg")),
-                cache.join(format!("{appid}_library_600x900.jpg")),
-                cache.join(appid).join("library_600x900.jpg"),
-            ];
-            if let Some(p) = candidates.iter().find(|p| p.exists()) {
-                return Some(p.clone());
-            }
-            // Newest layout: a folder of hashed names; take the largest jpg.
-            let dir = cache.join(appid);
-            let mut best: Option<(u64, PathBuf)> = None;
-            for e in std::fs::read_dir(dir).ok()?.flatten() {
-                let p = e.path();
-                if p.extension().is_some_and(|x| x == "jpg" || x == "png") {
-                    let len = e.metadata().map(|m| m.len()).unwrap_or(0);
-                    if best.as_ref().is_none_or(|(l, _)| len > *l) {
-                        best = Some((len, p));
-                    }
-                }
-            }
-            return best.map(|(_, p)| p);
+            return super::steam::picture(&steam_dir(), appid);
         }
         let b = bundle_path(id)?;
         let res = b.path.join("Contents/Resources");
         let mut names = Vec::new();
         if let Some(f) = &b.icon_file {
             names.push(f.clone());
-            if !f.ends_with(".icns") {
+            if Path::new(f).extension().is_none() {
                 names.push(format!("{f}.icns"));
             }
         }
@@ -370,23 +406,105 @@ mod mac {
 use mac::{act_here, icon_here, list_here};
 
 // ---------------------------------------------------------------------------
-// Windows: nothing yet (the launcher is built for the Mac host first).
+// Windows: the Start menu's shortcuts and Steam. Opening goes through
+// `cmd /c start`, which runs shortcuts and `steam://` links alike.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-fn list_here() -> Vec<AppEntry> {
-    Vec::new()
+mod win {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use aa_core::apps::{AppAction, AppEntry, AppKind};
+
+    fn start_menus() -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Some(p) = std::env::var_os("ProgramData") {
+            out.push(PathBuf::from(p).join(r"Microsoft\Windows\Start Menu\Programs"));
+        }
+        if let Some(p) = std::env::var_os("APPDATA") {
+            out.push(PathBuf::from(p).join(r"Microsoft\Windows\Start Menu\Programs"));
+        }
+        out
+    }
+
+    fn steam_dir() -> PathBuf {
+        let pf = std::env::var_os("ProgramFiles(x86)").or_else(|| std::env::var_os("ProgramFiles"));
+        pf.map_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam"), |p| PathBuf::from(p).join("Steam"))
+    }
+
+    /// Shortcuts two folders deep (the Start menu is "Programs/<Vendor>/App.lnk").
+    fn shortcuts(dir: &Path, depth: u8, out: &mut Vec<AppEntry>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if depth > 0 {
+                    shortcuts(&p, depth - 1, out);
+                }
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk")) {
+                continue;
+            }
+            let name = p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let lower = name.to_lowercase();
+            // Noise nobody opens from a game menu.
+            if lower.contains("uninstall")
+                || lower.contains("readme")
+                || lower.contains("help")
+                || lower.contains("website")
+            {
+                continue;
+            }
+            let folder = dir.to_string_lossy();
+            let kind = if folder.contains("Accessories") || folder.contains("System Tools") {
+                AppKind::System
+            } else {
+                AppKind::App
+            };
+            out.push(AppEntry { id: format!("lnk:{}", p.display()), name, kind, running: false, last_used: 0 });
+            if out.len() >= 400 {
+                return;
+            }
+        }
+    }
+
+    pub fn list_here() -> Vec<AppEntry> {
+        let mut out = Vec::new();
+        for m in start_menus() {
+            shortcuts(&m, 1, &mut out);
+        }
+        out.extend(super::steam::games(&steam_dir()));
+        out
+    }
+
+    pub fn act_here(id: &str, action: AppAction) -> anyhow::Result<()> {
+        let target = if let Some(appid) = id.strip_prefix("steam:") {
+            let appid: u64 = appid.parse()?;
+            match action {
+                AppAction::Open => format!("steam://rungameid/{appid}"),
+                AppAction::Quit | AppAction::Hide => format!("steam://close/{appid}"),
+            }
+        } else if let Some(path) = id.strip_prefix("lnk:") {
+            anyhow::ensure!(action == AppAction::Open, "only opening is supported for shortcuts on a PC yet");
+            path.to_owned()
+        } else {
+            anyhow::bail!("unknown launcher id {id}");
+        };
+        // `start ""`: the first quoted argument is the window title.
+        let status = Command::new("cmd").args(["/c", "start", "", &target]).status()?;
+        anyhow::ensure!(status.success(), "start failed with {status}");
+        Ok(())
+    }
+
+    pub fn icon_here(_id: &str) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 #[cfg(target_os = "windows")]
-fn act_here(id: &str, _action: AppAction) -> anyhow::Result<()> {
-    anyhow::bail!("the launcher is not available on a Windows host yet (asked for {id})")
-}
-
-#[cfg(target_os = "windows")]
-fn icon_here(_id: &str) -> Option<Vec<u8>> {
-    None
-}
+use win::{act_here, icon_here, list_here};
 
 // ---------------------------------------------------------------------------
 // Anywhere else (Linux CI, the mock host): a pretend list, so the viewer
@@ -444,6 +562,6 @@ mod tests {
     fn mock_list_is_sorted_running_first() {
         let l = list();
         assert!(l[0].running && !l[l.len() - 1].running);
-        assert!(icons(&["test.editor".into(), "test.terminal".into()]).icons.len() == 1);
+        assert_eq!(icons(&["test.editor".into(), "test.terminal".into()]).icons.len(), 1);
     }
 }

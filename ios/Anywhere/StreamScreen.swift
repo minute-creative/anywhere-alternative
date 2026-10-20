@@ -23,6 +23,7 @@ struct StreamScreen: View {
     @State private var audio = AudioOutput()
     @State private var pointerTimer: Timer?
     @State private var endedToken = 0
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
@@ -77,7 +78,21 @@ struct StreamScreen: View {
         }
         .onChange(of: engine.prefs.profile) { _, p in
             pad.mapper.profile = p
+            pad.mapper.map = engine.prefs.activeMap
             pad.mapper.reset()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Phone locked or app switched away: let go of every key and
+            // button so nothing stays held on the Mac; keep the session.
+            if phase != .active {
+                pad.mapper.releaseAll()
+                if overlay == .none { pad.mode = .ui }
+            } else if overlay == .none, engine.status.live {
+                pad.mode = .stream
+            }
+        }
+        .onChange(of: pad.connected) { _, on in
+            if !on { pad.mapper.releaseAll() }
         }
         .onChange(of: engine.status.state) { _, s in
             if s == "ended" && overlay != .none { overlay = .none }
@@ -116,6 +131,7 @@ struct StreamScreen: View {
 
     private func start() {
         pad.mapper.profile = engine.prefs.profile
+        pad.mapper.map = engine.prefs.activeMap
         pad.mapper.pointerSpeed = engine.prefs.pointerSpeed
         pad.mapper.reset()
         pad.mode = .stream

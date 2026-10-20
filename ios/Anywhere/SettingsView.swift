@@ -40,6 +40,8 @@ struct SettingsView: View {
                 let i = all.firstIndex(of: p.profile) ?? 0
                 engine.prefs.profile = all[(i + (d == 0 ? 1 : d) + all.count) % all.count]
             },
+            Row(title: "Edit controls", help: "Set what every button and stick does in the Custom layout.",
+                value: "Custom layout") { _ in router.screen = .controls },
             Row(title: "Pointer speed", help: "How fast the stick moves the pointer (L3 toggles slow/fast too).",
                 value: String(format: "%.2f×", p.pointerSpeed)) { d in
                 engine.prefs.pointerSpeed = max(0.5, min(2.5, p.pointerSpeed + (d == 0 ? 0.25 : Double(d) * 0.25)))

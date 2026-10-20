@@ -68,7 +68,7 @@ struct LauncherView: View {
                                             .padding(.horizontal, 36)
                                         ScrollViewReader { hproxy in
                                             ScrollView(.horizontal, showsIndicators: false) {
-                                                HStack(spacing: 16) {
+                                                LazyHStack(spacing: 16) {
                                                     ForEach(Array(r.apps.enumerated()), id: \.element.id) { ci, app in
                                                         tile(app, focused: ri == row && ci == col).id("\(r.id)-\(ci)")
                                                             .onTapGesture { row = ri; col = ci; engine.open(app); overlay = .none }

@@ -70,6 +70,8 @@ final class Pad: ObservableObject {
     var onStreamEvent: ((NavEvent) -> Void)?
 
     private(set) var state = PadState()
+    /// For menus that use a bumper as a modifier ("R1 + right = jump").
+    var r1Held: Bool { state.r1 }
     private var previous = PadState()
     private var link: CADisplayLink?
     private var lastTick = CACurrentMediaTime()
@@ -130,6 +132,7 @@ final class Pad: ObservableObject {
     }
 
     private func detach() {
+        mapper.releaseAll()
         controller = nil
         connected = false
         state = PadState()

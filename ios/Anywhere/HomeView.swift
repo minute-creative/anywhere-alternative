@@ -122,7 +122,7 @@ struct HomeView: View {
             return f.tailscale ? "Reachable through Tailscale" : "On this Wi-Fi · \(f.addr)"
         }
         if searching { return "Looking…" }
-        return "Not answering. Is it sharing, and are you on the same Wi-Fi or Tailscale?"
+        return "Not answering. Is it sharing, and are you on the same Wi-Fi or Tailscale? If iOS asked about the local network and you said no: Settings → Anywhere → Local Network."
     }
 
     private func handle(_ ev: NavEvent) {

@@ -1,24 +1,7 @@
 // Turns the controller into input for the other computer while watching
-// it, following the chosen profile. Runs 120 times a second from `Pad`.
-//
-// Desktop profile (using the Mac):
-//   left stick   pointer        right stick  scroll
-//   A            click          B            right-click
-//   R2 (hold)    click & drag   L2           right-click
-//   X            keyboard       Y            launcher
-//   L1 (hold)    Command ⌘      R1 (hold)    Shift ⇧
-//   D-pad        arrow keys     L3           pointer speed slow / fast
-//   R3           middle click   Menu ≡       Return      Options ⧉  Escape
-//
-// Game profile (keyboard + mouse games, e.g. through CrossOver):
-//   left stick   W A S D        right stick  mouse look (game mouse)
-//   R2 / L2      left / right mouse button
-//   A Space      B Left Ctrl    X R          Y E
-//   L1 Shift     R1 Q           L3 Shift     R3 F
-//   D-pad 1 2 3 4               Menu Esc     Options Tab
-//
-// Controller profile: the pad itself, sent as a controller report (needs
-// a host that can show a virtual controller).
+// it, following the control map (`Bindings.swift`). Runs 120 times a
+// second from `Pad`. The "Controller pass-through" profile skips the map
+// and sends the pad itself as a controller report.
 
 import Foundation
 
@@ -26,14 +9,18 @@ import Foundation
 final class InputMapper {
     weak var engine: Engine?
     var profile: InputProfile = .desktop
+    var map: ControlMap = .desktop
     var pointerSpeed: Double = 1.0
     /// Where the pointer is, across the Mac's picture (0…1).
     private(set) var pointer = CGPoint(x: 0.5, y: 0.5)
     private var fast = true
     private var scrollAcc = CGPoint.zero
     private var heldKeys = Set<UInt16>()
+    private var heldMouse = Set<UInt8>()
+    private var stickKeys = Set<UInt16>()
     private var lastPadSend: TimeInterval = 0
-    private var dpadRepeat: (UInt16, TimeInterval)?
+    /// Keys bound to the d-pad repeat while held (arrows in a text field).
+    private var repeatKey: (UInt16, TimeInterval)?
 
     /// Call when the stream starts and whenever the profile changes.
     func reset() {
@@ -41,14 +28,16 @@ final class InputMapper {
         scrollAcc = .zero
     }
 
-    /// Let go of everything held (leaving the stream, opening a menu).
+    /// Let go of everything held (leaving the stream, opening a menu, the
+    /// pad disconnecting, the app going to the background).
     func releaseAll() {
         guard let e = engine else { return }
-        for k in heldKeys { e.key(k, false) }
+        for k in heldKeys.union(stickKeys) { e.key(k, false) }
         heldKeys.removeAll()
-        e.mouseButton(0, false)
-        e.mouseButton(1, false)
-        dpadRepeat = nil
+        stickKeys.removeAll()
+        for b in heldMouse { e.mouseButton(b, false) }
+        heldMouse.removeAll()
+        repeatKey = nil
     }
 
     /// The pointer was moved by touch: keep the stick in step.
@@ -58,114 +47,96 @@ final class InputMapper {
 
     func tick(_ s: PadState, _ p: PadState, dt: Double, events: ((NavEvent) -> Void)?) {
         guard let e = engine else { return }
-        // Shared: X opens the keyboard, Y the launcher (desktop profile only;
-        // games get those from the quick menu).
-        switch profile {
-        case .desktop: desktopTick(s, p, dt: dt, e, events)
-        case .game: gameTick(s, p, dt: dt, e, events)
-        case .controller: controllerTick(s, p, e)
+        if profile == .controller {
+            controllerTick(s, p, e)
+            return
         }
-    }
-
-    // MARK: Desktop
-
-    private func desktopTick(_ s: PadState, _ p: PadState, dt: Double, _ e: Engine, _ events: ((NavEvent) -> Void)?) {
-        if s.x && !p.x { events?(.x) }
-        if s.y && !p.y { events?(.y) }
-        if s.l3 && !p.l3 { fast.toggle() }
-
-        // Pointer: the stick's deflection squared feels precise near the
-        // centre and quick at the edge. Full deflection crosses the screen
-        // in about 1.6 s (fast) or 4 s (slow).
-        let (dx, dy) = curve(s.lx, s.ly)
-        if dx != 0 || dy != 0 {
-            let speed = (fast ? 0.62 : 0.25) * pointerSpeed * dt
-            pointer.x = min(1, max(0, pointer.x + CGFloat(dx) * speed))
-            pointer.y = min(1, max(0, pointer.y - CGFloat(dy) * speed))
-            e.mouseAbs(x: pointer.x, y: pointer.y)
-        }
-
-        // Scroll: right stick, in 1/120ths of a notch; whole units only.
-        let (sx, sy) = curve(s.rx, s.ry)
-        scrollAcc.x += CGFloat(sx) * 1100 * dt
-        scrollAcc.y += CGFloat(sy) * 1100 * dt
-        let ix = Int(scrollAcc.x), iy = Int(scrollAcc.y)
-        if ix != 0 || iy != 0 {
-            e.scroll(dx: ix, dy: iy)
-            scrollAcc.x -= CGFloat(ix)
-            scrollAcc.y -= CGFloat(iy)
-        }
-
-        // Clicks (A and R2 both left, so a drag can use the trigger).
-        let leftNow = s.a || s.r2, leftBefore = p.a || p.r2
-        if leftNow != leftBefore { e.mouseButton(0, leftNow) }
-        let rightNow = s.b || s.l2, rightBefore = p.b || p.l2
-        if rightNow != rightBefore { e.mouseButton(1, rightNow) }
-        if s.r3 != p.r3 { e.mouseButton(2, s.r3) }
-
-        // Modifiers held while the bumper is held.
-        hold(HID.leftGui, s.l1, e)
-        hold(HID.leftShift, s.r1, e)
-
-        // Arrow keys, repeating while held.
-        arrows(s, p, e)
-
-        if s.menu && !p.menu { e.tap(HID.enter) }
-        if s.options && !p.options { e.tap(HID.escape) }
-    }
-
-    private func arrows(_ s: PadState, _ p: PadState, _ e: Engine) {
-        let keys: [(Bool, Bool, UInt16)] = [
-            (s.up, p.up, HID.up), (s.down, p.down, HID.down), (s.left, p.left, HID.left), (s.right, p.right, HID.right),
+        stick(map[.leftStick], s.lx, s.ly, dt, e)
+        stick(map[.rightStick], s.rx, s.ry, dt, e)
+        let buttons: [(PadControl, Bool, Bool)] = [
+            (.a, s.a, p.a), (.b, s.b, p.b), (.x, s.x, p.x), (.y, s.y, p.y),
+            (.l1, s.l1, p.l1), (.r1, s.r1, p.r1), (.l2, s.l2, p.l2), (.r2, s.r2, p.r2),
+            (.l3, s.l3, p.l3), (.r3, s.r3, p.r3),
+            (.up, s.up, p.up), (.down, s.down, p.down), (.left, s.left, p.left), (.right, s.right, p.right),
+            (.menu, s.menu, p.menu), (.options, s.options, p.options),
         ]
         let now = Date().timeIntervalSinceReferenceDate
-        for (down, before, usage) in keys {
-            if down && !before {
-                e.tap(usage)
-                dpadRepeat = (usage, now + 0.4)
-            }
-            if !down && before, dpadRepeat?.0 == usage {
-                dpadRepeat = nil
-            }
+        for (control, down, before) in buttons where down != before {
+            button(control, map[control], down, now, e, events)
         }
-        if let r = dpadRepeat, now >= r.1 {
+        if let r = repeatKey, now >= r.1 {
             e.tap(r.0)
-            dpadRepeat = (r.0, now + 0.05)
+            repeatKey = (r.0, now + 0.05)
         }
     }
 
-    // MARK: Game
+    // MARK: Sticks
 
-    private func gameTick(_ s: PadState, _ p: PadState, dt: Double, _ e: Engine, _ events: ((NavEvent) -> Void)?) {
-        // WASD from the left stick (press past 0.45, release under 0.35).
-        let w = HID.letter("w")!, a = HID.letter("a")!, sKey = HID.letter("s")!, d = HID.letter("d")!
-        hold(w, axisOn(s.ly, heldKeys.contains(w)), e)
-        hold(sKey, axisOn(-s.ly, heldKeys.contains(sKey)), e)
-        hold(d, axisOn(s.lx, heldKeys.contains(d)), e)
-        hold(a, axisOn(-s.lx, heldKeys.contains(a)), e)
-
-        // Mouse look from the right stick: relative pixels per tick.
-        let (rx, ry) = curve(s.rx, s.ry)
-        if rx != 0 || ry != 0 {
-            let gain = 1500.0 * pointerSpeed * dt
-            e.mouseRel(dx: Int((Double(rx) * gain).rounded()), dy: Int((-Double(ry) * gain).rounded()))
+    private func stick(_ b: Binding, _ x: Float, _ y: Float, _ dt: Double, _ e: Engine) {
+        switch b {
+        case .pointer:
+            // Deflection squared feels precise near the centre and quick at
+            // the edge. Full deflection crosses the screen in ~1.6 s (fast)
+            // or ~4 s (slow).
+            let (dx, dy) = curve(x, y)
+            if dx != 0 || dy != 0 {
+                let speed = (fast ? 0.62 : 0.25) * pointerSpeed * dt
+                pointer.x = min(1, max(0, pointer.x + CGFloat(dx) * speed))
+                pointer.y = min(1, max(0, pointer.y - CGFloat(dy) * speed))
+                e.mouseAbs(x: pointer.x, y: pointer.y)
+            }
+        case .look:
+            let (rx, ry) = curve(x, y)
+            if rx != 0 || ry != 0 {
+                let gain = 1500.0 * pointerSpeed * dt
+                e.mouseRel(dx: Int((Double(rx) * gain).rounded()), dy: Int((-Double(ry) * gain).rounded()))
+            }
+        case .scroll:
+            // In 1/120ths of a notch; whole units only.
+            let (sx, sy) = curve(x, y)
+            scrollAcc.x += CGFloat(sx) * 1100 * dt
+            scrollAcc.y += CGFloat(sy) * 1100 * dt
+            let ix = Int(scrollAcc.x), iy = Int(scrollAcc.y)
+            if ix != 0 || iy != 0 {
+                e.scroll(dx: ix, dy: iy)
+                scrollAcc.x -= CGFloat(ix)
+                scrollAcc.y -= CGFloat(iy)
+            }
+        case .wasd, .arrows:
+            let keys: [UInt16] = b == .wasd
+                ? [HID.letter("w")!, HID.letter("s")!, HID.letter("d")!, HID.letter("a")!]
+                : [HID.up, HID.down, HID.right, HID.left]
+            // Press past 0.45, release under 0.35, so a wobble doesn't chatter.
+            holdStick(keys[0], axisOn(y, stickKeys.contains(keys[0])), e)
+            holdStick(keys[1], axisOn(-y, stickKeys.contains(keys[1])), e)
+            holdStick(keys[2], axisOn(x, stickKeys.contains(keys[2])), e)
+            holdStick(keys[3], axisOn(-x, stickKeys.contains(keys[3])), e)
+        default:
+            break
         }
+    }
 
-        if s.r2 != p.r2 { e.mouseButton(0, s.r2) }
-        if s.l2 != p.l2 { e.mouseButton(1, s.l2) }
-        hold(HID.space, s.a, e)
-        hold(HID.leftCtrl, s.b, e)
-        hold(HID.letter("r")!, s.x, e)
-        hold(HID.letter("e")!, s.y, e)
-        hold(HID.leftShift, s.l1 || s.l3, e)
-        hold(HID.letter("q")!, s.r1, e)
-        hold(HID.letter("f")!, s.r3, e)
-        hold(HID.one, s.up, e)
-        hold(HID.two, s.right, e)
-        hold(HID.three, s.down, e)
-        hold(HID.four, s.left, e)
-        hold(HID.escape, s.menu, e)
-        hold(HID.tab, s.options, e)
+    // MARK: Buttons
+
+    private func button(_ control: PadControl, _ b: Binding, _ down: Bool, _ now: TimeInterval, _ e: Engine,
+                        _ events: ((NavEvent) -> Void)?) {
+        switch b {
+        case .key(let u):
+            hold(u, down, e)
+            // D-pad keys repeat while held, like a keyboard key.
+            let dpad = control == .up || control == .down || control == .left || control == .right
+            if dpad {
+                if down { repeatKey = (u, now + 0.4) } else if repeatKey?.0 == u { repeatKey = nil }
+            }
+        case .mouse(let btn):
+            if down { heldMouse.insert(btn) } else { heldMouse.remove(btn) }
+            e.mouseButton(btn, down)
+        case .keyboard: if down { events?(.x) }
+        case .launcher: if down { events?(.y) }
+        case .quickMenu: if down { events?(.home) }
+        case .speedToggle: if down { fast.toggle() }
+        default: break
+        }
     }
 
     // MARK: Controller pass-through
@@ -197,6 +168,16 @@ final class InputMapper {
             e.key(usage, true)
         } else if !down && heldKeys.contains(usage) {
             heldKeys.remove(usage)
+            e.key(usage, false)
+        }
+    }
+
+    private func holdStick(_ usage: UInt16, _ down: Bool, _ e: Engine) {
+        if down && !stickKeys.contains(usage) {
+            stickKeys.insert(usage)
+            e.key(usage, true)
+        } else if !down && stickKeys.contains(usage) {
+            stickKeys.remove(usage)
             e.key(usage, false)
         }
     }

@@ -42,6 +42,10 @@ struct QuickMenu: View {
                 let i = steps.firstIndex { $0 >= p.maxMbps } ?? 0
                 engine.setMaxMbps(steps[(i + 1) % steps.count])
             },
+            Item(symbol: "doc.on.clipboard", title: "Send clipboard", value: "Paste the phone's text there") {
+                if let t = UIPasteboard.general.string, !t.isEmpty { engine.copyText(t) }
+                overlay = .none
+            },
             Item(symbol: "xmark.circle", title: "Disconnect", value: "Back to Home") { router.screen = .home },
         ]
     }

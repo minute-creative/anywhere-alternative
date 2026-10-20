@@ -67,7 +67,8 @@ void aa_mobile_disconnect(void);
 
 /// JSON: {state: "idle"|"connecting"|"connected"|"reconnecting"|"ended",
 /// reason, paused, fps, mbps, rtt_ms, loss_pct, codec, target_fps,
-/// sharing, notes, warning, host_mac, apps_version}.
+/// target_kbps, sharing, notes, warning, host_mac, apps_version,
+/// full_access, apps_pending}.
 char *aa_mobile_status(void);
 
 /// Newest decoded frame, if there is one since the last call. Returns 1
@@ -103,6 +104,12 @@ char *aa_mobile_apps(void);
 size_t aa_mobile_icon(const char *id, uint8_t *buf, size_t cap);
 /// `action`: "open", "quit" or "hide".
 void aa_mobile_app_action(const char *id, const char *action);
+
+// Clipboard.
+/// Text copied on the phone, for pasting on the other computer.
+void aa_mobile_copy_text(const char *text);
+/// Text the other computer copied since the last call ("" if none).
+char *aa_mobile_take_clip_text(void);
 
 /// The version of the Rust side ("0.6.0").
 const char *aa_mobile_version(void);

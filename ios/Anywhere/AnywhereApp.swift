@@ -41,6 +41,7 @@ enum Screen: Equatable {
     case pair
     case stream
     case settings
+    case controls
 }
 
 @MainActor
@@ -59,6 +60,7 @@ struct RootView: View {
             case .pair: PairView()
             case .stream: StreamScreen()
             case .settings: SettingsView()
+            case .controls: ControlsView()
             }
         }
     }

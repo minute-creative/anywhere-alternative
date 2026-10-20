@@ -360,6 +360,9 @@ pub async fn run(
                             Some(item) => {
                                 if let Some(link) = clip_link.as_ref() {
                                     let _ = link.paste_here.send(item);
+                                } else {
+                                    // No system clipboard here (the phone): the app takes it.
+                                    crate::link::clip_received(item);
                                 }
                             }
                             None => {}
@@ -506,7 +509,14 @@ pub async fn run(
                     other => Some(other),
                 };
                 if let Some(c) = follow_up {
-                    let mut mic_state = MicState { mic: &mut mic, manual: &mut manual_mic, call: call_mic, calls: &calls, start: start_mic };
+                    let mut mic_state = MicState {
+                        mic: &mut mic,
+                        manual: &mut manual_mic,
+                        call: call_mic,
+                        calls: &calls,
+                        start: start_mic,
+                        clip: &mut clip,
+                    };
                     if handle_command(c, &socket, &seq, &mut mic_state).await? {
                         return Ok(());
                     }
@@ -770,6 +780,8 @@ struct MicState<'a> {
     call: bool,
     calls: &'a CallPrefs,
     start: MicStart,
+    /// The clipboard transfer, for items the app copies (the phone).
+    clip: &'a mut aa_core::clipboard::ClipSync,
 }
 
 /// One command from the window other than mouse/keys. `None` means the
@@ -809,6 +821,11 @@ async fn handle_command(
         }
         Some(ViewerCommand::AppAction(id, action)) => {
             send_control(socket, &ControlMessage::AppAction { id, action }, seq).await?;
+        }
+        Some(ViewerCommand::CopyItem(item)) => {
+            if !m.clip.copied(&item) {
+                tracing::warn!(item = item.describe(), "too large to share");
+            }
         }
         Some(ViewerCommand::Pad(msg)) => send_pad(socket, &msg, seq).await?,
         Some(ViewerCommand::Quit) | None => {

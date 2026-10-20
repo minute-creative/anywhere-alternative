@@ -10,8 +10,17 @@ final class AudioOutput {
     private var node: AVAudioSourceNode?
     private var scratch = [Int16](repeating: 0, count: 4096)
 
+    private var interruption: NSObjectProtocol?
+
     func start() {
         let session = AVAudioSession.sharedInstance()
+        // A phone call or Siri stops the engine; start it again after.
+        interruption = NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
+            guard let self, let raw = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
+            try? session.setActive(true)
+            if !self.engine.isRunning { try? self.engine.start() }
+        }
         try? session.setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
         try? session.setPreferredSampleRate(48_000)
         try? session.setPreferredIOBufferDuration(0.01)
@@ -42,6 +51,8 @@ final class AudioOutput {
     }
 
     func stop() {
+        if let interruption { NotificationCenter.default.removeObserver(interruption) }
+        interruption = nil
         engine.stop()
         if let node { engine.detach(node) }
         node = nil

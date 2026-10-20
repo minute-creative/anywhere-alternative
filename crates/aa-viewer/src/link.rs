@@ -35,6 +35,8 @@ pub enum ViewerCommand {
     AppList,
     /// The launcher: open, hide or quit one of them.
     AppAction(String, aa_core::apps::AppAction),
+    /// Something copied on this device (the phone), for the host's clipboard.
+    CopyItem(aa_core::clipboard::ClipItem),
     /// The window closed; send `Bye` and exit.
     Quit,
 }
@@ -157,6 +159,20 @@ pub fn set_icons(pack: aa_core::apps::IconPack) {
 
 pub fn icon(id: &str) -> Option<bytes::Bytes> {
     ICONS.lock().ok().and_then(|i| i.as_ref().and_then(|m| m.get(id).cloned()))
+}
+
+/// What the host copied, on systems where the app owns the clipboard
+/// (iOS): kept until the app takes it.
+static CLIP_IN: Mutex<Option<aa_core::clipboard::ClipItem>> = Mutex::new(None);
+
+pub fn clip_received(item: aa_core::clipboard::ClipItem) {
+    if let Ok(mut c) = CLIP_IN.lock() {
+        *c = Some(item);
+    }
+}
+
+pub fn take_clip() -> Option<aa_core::clipboard::ClipItem> {
+    CLIP_IN.lock().ok().and_then(|mut c| c.take())
 }
 
 /// Decoded sound waiting to be played, for systems where the Swift/UI side
