@@ -47,6 +47,29 @@ pub fn ipv4_interfaces() -> Vec<Iface> {
         .collect()
 }
 
+/// Every other address on this computer's small home subnets (/24 or
+/// smaller), for systems that may not broadcast: an iPhone app without
+/// Apple's multicast entitlement can still ask each address by name,
+/// which the local-network permission allows. Empty for big subnets.
+pub fn subnet_hosts() -> Vec<Ipv4Addr> {
+    let Ok(list) = if_addrs::get_if_addrs() else { return Vec::new() };
+    let mut out = Vec::new();
+    for i in list.into_iter().filter(|i| !i.is_loopback()) {
+        let if_addrs::IfAddr::V4(v4) = i.addr else { continue };
+        if v4.ip.is_link_local() {
+            continue;
+        }
+        let mask = u32::from(v4.netmask);
+        let bits = mask.leading_ones();
+        if !(24..32).contains(&bits) {
+            continue;
+        }
+        let base = u32::from(v4.ip) & mask;
+        out.extend((1..!mask).map(|n| Ipv4Addr::from(base | n)).filter(|a| *a != v4.ip));
+    }
+    out
+}
+
 /// Send `payload` out of every adapter: its subnet broadcast, the
 /// all-ones broadcast and the beacon multicast group, all to `port`.
 /// Errors are returned as text for logging (the caller decides how loud).

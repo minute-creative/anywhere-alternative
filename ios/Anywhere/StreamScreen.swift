@@ -100,7 +100,7 @@ struct StreamScreen: View {
         .onChange(of: engine.status.state) { old, s in
             if s == "ended" && overlay != .none { overlay = .none }
             // Like a console: the launcher greets you on the first connect.
-            if s == "connected", old == "connecting", engine.prefs.launcherOnConnect, engine.status.host_mac {
+            if s == "connected", old == "connecting", engine.prefs.launcherOnConnect, engine.status.has_launcher {
                 open(.launcher)
             }
         }

@@ -53,10 +53,15 @@ struct LauncherView: View {
                 }
                 .padding(.horizontal, 36).padding(.top, 20)
 
-                if rows.isEmpty {
+                if !engine.status.has_launcher {
+                    Spacer()
+                    Notice(symbol: "arrow.down.circle", title: "Update the Mac's Anywhere",
+                           detail: "It runs \(engine.status.host_version.isEmpty ? "an older version" : engine.status.host_version); the launcher needs 0.6.0 or newer. On the Mac: Anywhere → Settings → Update now. Press B to go back to the picture.")
+                    Spacer()
+                } else if rows.isEmpty {
                     Spacer()
                     Notice(symbol: "hourglass", title: "Asking the Mac…",
-                           detail: waited > 6 ? "No list yet. The Mac may run an older Anywhere (the launcher needs 0.6 or newer)." : "")
+                           detail: waited > 6 ? "No list yet. Press B and open the launcher again." : "")
                     Spacer()
                 } else {
                     ScrollViewReader { vproxy in

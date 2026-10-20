@@ -131,6 +131,12 @@ pub async fn find_hosts(port: u16) -> anyhow::Result<Vec<Found>> {
     let mut targets: Vec<SocketAddr> =
         crate::lan::ipv4_interfaces().iter().map(|i| SocketAddr::new(IpAddr::V4(i.broadcast), port)).collect();
     targets.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), port));
+    // An iPhone app may not broadcast (Apple's multicast entitlement), so
+    // there every address of the home subnet is asked one by one: 254
+    // small packets, three times, which the permission does allow.
+    if cfg!(target_os = "ios") {
+        targets.extend(crate::lan::subnet_hosts().into_iter().map(|h| SocketAddr::new(IpAddr::V4(h), port)));
+    }
     if let Some(last) = remembered() {
         targets.push(last);
     }

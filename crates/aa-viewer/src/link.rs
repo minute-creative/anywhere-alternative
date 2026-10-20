@@ -127,6 +127,8 @@ pub struct HostInfo {
     pub sharing: String,
     /// We may choose what is shared.
     pub full_access: bool,
+    /// The host program's version ("0.6.0"); empty from hosts before 0.5.9.
+    pub host_version: String,
     /// The host's list of apps and windows (asked for from the panel).
     pub shareables: Vec<aa_core::share::ShareTarget>,
     /// Things worth knowing that cost quality ("picture is going through

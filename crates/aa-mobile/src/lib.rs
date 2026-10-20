@@ -386,6 +386,17 @@ struct StatusJson {
     full_access: bool,
     /// A launcher list was asked for and not every page has arrived.
     apps_pending: bool,
+    /// The host's version ("0.6.0"); empty when unknown (old hosts).
+    host_version: String,
+    /// The host can answer the launcher (0.6 or newer).
+    has_launcher: bool,
+}
+
+/// Does a host version string mean "0.6 or newer"? Unknown (empty) means no.
+fn launcher_capable(version: &str) -> bool {
+    let mut parts = version.trim().split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    major > 0 || minor >= 6
 }
 
 #[no_mangle]
@@ -409,6 +420,8 @@ pub unsafe extern "C" fn aa_mobile_status() -> *mut c_char {
             apps_version: 0,
             full_access: false,
             apps_pending: false,
+            host_version: String::new(),
+            has_launcher: false,
         });
     };
     // Newest stats line, if the session produced one since last time.
@@ -443,6 +456,8 @@ pub unsafe extern "C" fn aa_mobile_status() -> *mut c_char {
         apps_version: info.apps_version,
         full_access: info.full_access,
         apps_pending: info.apps_pages.0 == 0 || info.apps_pages.1.len() < usize::from(info.apps_pages.0),
+        has_launcher: launcher_capable(&info.host_version),
+        host_version: info.host_version,
     })
 }
 
@@ -716,6 +731,14 @@ mod tests {
             assert!(s.contains("\"state\":\"idle\""));
             assert_eq!(cstr(aa_mobile_apps()), "[]");
         }
+    }
+
+    #[test]
+    fn launcher_needs_a_new_enough_host() {
+        assert!(launcher_capable("0.6.0"));
+        assert!(launcher_capable("1.0.2"));
+        assert!(!launcher_capable("0.5.13"));
+        assert!(!launcher_capable(""));
     }
 
     #[test]
