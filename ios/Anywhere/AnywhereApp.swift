@@ -13,7 +13,7 @@ struct AnywhereApp: App {
     @StateObject private var pad: Pad
     @StateObject private var router = Router()
 
-    init() {
+    @MainActor init() {
         let e = Engine()
         let p = Pad()
         e.pad = p

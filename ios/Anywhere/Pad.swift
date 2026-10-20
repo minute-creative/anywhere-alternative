@@ -17,6 +17,7 @@ import Combine
 import Foundation
 import GameController
 import QuartzCore
+import UIKit
 
 /// What a menu screen receives.
 enum NavEvent {
@@ -79,6 +80,9 @@ final class Pad: ObservableObject {
     private var repeatAt: TimeInterval = 0
     private var controller: GCController?
     let mapper = InputMapper()
+    /// A small tick from the phone when the focus moves (the Kishi has no
+    /// rumble of its own).
+    private let haptic = UISelectionFeedbackGenerator()
 
     init() {
         let center = NotificationCenter.default
@@ -168,10 +172,12 @@ final class Pad: ObservableObject {
         if dir != repeatDir {
             repeatDir = dir
             if let d = dir {
+                haptic.selectionChanged()
                 onNav?(d)
                 repeatAt = now + 0.38
             }
         } else if let d = dir, now >= repeatAt {
+            haptic.selectionChanged()
             onNav?(d)
             repeatAt = now + 0.1
         }

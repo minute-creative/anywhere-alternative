@@ -102,6 +102,13 @@ Keyboard (X): d-pad moves, A types, B deletes, X space, Y shift, Menu
 return, L1 symbols, R1 tab, Options closes. *Phone keyboard* on the last
 row brings up iOS's keyboard for longer text.
 
+Quick menu extras: **Zoom** (2× / 3× around the pointer — Mac text is
+small on a phone; a touch still lands where it looks), **Full-screen app**
+(⌃⌘F) and **Hide other apps** (⌥⌘H) for the app on the Mac, and **Send
+clipboard**. "Zoom" can also go on any button in the Custom layout. With
+*Launcher on connect* (Settings, on by default) the launcher greets you
+as soon as the Mac appears, like a console home.
+
 Clipboard: text the Mac copies lands on the phone's clipboard; quick menu →
 *Send clipboard* pastes the phone's text to the Mac.
 

@@ -31,9 +31,9 @@ struct StreamScreen: View {
             StreamView(fps: Int(engine.prefs.fps)) { r in videoRect = r }
                 .ignoresSafeArea()
 
-            if engine.prefs.profile == .desktop, overlay == .none, engine.status.connected, videoRect.width > 0 {
+            if showsPointer, overlay == .none, engine.status.connected, videoRect.width > 0 {
                 PointerView()
-                    .position(x: videoRect.minX + pointer.x * videoRect.width, y: videoRect.minY + pointer.y * videoRect.height)
+                    .position(pointerOnScreen)
                     .allowsHitTesting(false)
                     .ignoresSafeArea()
             }
@@ -94,9 +94,29 @@ struct StreamScreen: View {
         .onChange(of: pad.connected) { _, on in
             if !on { pad.mapper.releaseAll() }
         }
-        .onChange(of: engine.status.state) { _, s in
+        .onChange(of: engine.status.state) { old, s in
             if s == "ended" && overlay != .none { overlay = .none }
+            // Like a console: the launcher greets you on the first connect.
+            if s == "connected", old == "connecting", engine.prefs.launcherOnConnect, engine.status.host_mac {
+                open(.launcher)
+            }
         }
+    }
+
+    /// Where the pointer lands on screen, through the zoom (the zoomed
+    /// window follows the pointer, so it sits near the middle when zoomed).
+    private var pointerOnScreen: CGPoint {
+        let z = engine.zoom
+        let win = ZoomWindow.around(pointer, zoom: z)
+        let x = videoRect.minX + (pointer.x - win.minX) / win.width * videoRect.width
+        let y = videoRect.minY + (pointer.y - win.minY) / win.height * videoRect.height
+        return CGPoint(x: x, y: y)
+    }
+
+    /// The pointer is drawn when a stick moves it (not in mouse-look games).
+    private var showsPointer: Bool {
+        let m = engine.prefs.activeMap
+        return engine.prefs.profile != .controller && (m[.leftStick] == .pointer || m[.rightStick] == .pointer)
     }
 
     @ViewBuilder private var notice: some View {

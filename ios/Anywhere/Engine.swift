@@ -73,6 +73,8 @@ struct Prefs: Codable {
     var usageStats: Bool = true
     /// The editable layout ("Custom" controls); starts as the game layout.
     var customMap: ControlMap = .game
+    /// Open the launcher as soon as the Mac appears, like a console home.
+    var launcherOnConnect: Bool = true
 
     /// The control map the chosen profile means.
     var activeMap: ControlMap {
@@ -81,6 +83,24 @@ struct Prefs: Codable {
         case .game: return .game
         case .custom, .controller: return customMap
         }
+    }
+
+    init() {}
+
+    /// Settings saved by an older version may lack newer fields: each one
+    /// falls back to its default instead of throwing everything away.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        resolution = try c.decodeIfPresent(String.self, forKey: .resolution) ?? resolution
+        fps = try c.decodeIfPresent(UInt16.self, forKey: .fps) ?? fps
+        maxMbps = try c.decodeIfPresent(Float.self, forKey: .maxMbps) ?? maxMbps
+        muteMac = try c.decodeIfPresent(Bool.self, forKey: .muteMac) ?? muteMac
+        showStats = try c.decodeIfPresent(Bool.self, forKey: .showStats) ?? showStats
+        profile = (try? c.decodeIfPresent(InputProfile.self, forKey: .profile)) ?? profile
+        pointerSpeed = try c.decodeIfPresent(Double.self, forKey: .pointerSpeed) ?? pointerSpeed
+        usageStats = try c.decodeIfPresent(Bool.self, forKey: .usageStats) ?? usageStats
+        customMap = (try? c.decodeIfPresent(ControlMap.self, forKey: .customMap)) ?? customMap
+        launcherOnConnect = try c.decodeIfPresent(Bool.self, forKey: .launcherOnConnect) ?? launcherOnConnect
     }
 
     static func load() -> Prefs {
@@ -135,6 +155,9 @@ final class Engine: ObservableObject {
 
     /// The controller, so touch and stick can share one pointer.
     weak var pad: Pad?
+    /// Picture zoom (1, 2 or 3×) around the pointer: Mac text is small on
+    /// a phone. The Metal view and the pointer overlay both read it.
+    @Published var zoom: CGFloat = 1
 
     private var seenAppsVersion: UInt32 = 0
     private var appsPendingTicks = 0
@@ -304,7 +327,7 @@ final class Engine: ObservableObject {
         }
     }
 
-    private static func decode<T: Decodable>(_ type: T.Type, _ json: String) -> T? {
+    nonisolated private static func decode<T: Decodable>(_ type: T.Type, _ json: String) -> T? {
         guard let data = json.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }

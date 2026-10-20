@@ -78,7 +78,7 @@ struct HomeView: View {
             pad.mode = .ui
             hosts = engine.paired()
             token = pad.push(handle)
-            Task { await refreshLoop() }
+            Task { @MainActor in await refreshLoop() }
         }
         .onDisappear { pad.pop(token) }
     }

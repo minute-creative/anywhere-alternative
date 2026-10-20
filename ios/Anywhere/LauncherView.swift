@@ -100,7 +100,7 @@ struct LauncherView: View {
         }
         .onAppear {
             token = pad.push(handle)
-            Task { await nudge() }
+            Task { @MainActor in await nudge() }
         }
         .onDisappear { pad.pop(token) }
     }
@@ -169,7 +169,7 @@ struct LauncherView: View {
     }
 
     private func refreshSoon() {
-        Task {
+        Task { @MainActor in
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             engine.requestApps()
         }

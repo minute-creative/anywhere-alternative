@@ -104,7 +104,7 @@ struct PairView: View {
         .onAppear {
             pad.mode = .ui
             token = pad.push(handle)
-            Task { await search() }
+            Task { @MainActor in await search() }
         }
         .onDisappear { pad.pop(token) }
     }
@@ -160,7 +160,7 @@ struct PairView: View {
         guard let c = chosen, code.count == 6 else { return }
         busy = true
         error = ""
-        Task {
+        Task { @MainActor in
             let result = await engine.pair(addr: c.addr, code: code)
             busy = false
             if let result {

@@ -24,7 +24,6 @@
 
 use std::ffi::{c_char, CStr, CString};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use aa_core::input::{GamepadKind, GamepadState, InputEvent, MouseButton};
@@ -186,7 +185,7 @@ pub unsafe extern "C" fn aa_mobile_pair(addr: *const c_char, code: *const c_char
 #[derive(Debug, Clone, Default)]
 struct State {
     /// idle, connecting, connected, reconnecting, ended.
-    state: &'static str,
+    phase: &'static str,
     reason: String,
     /// Why the picture is paused (host locked…), if it is.
     paused: Option<String>,
@@ -200,8 +199,6 @@ struct Session {
     frames: FrameSlot,
     state: Arc<Mutex<State>>,
     stats_rx: Mutex<std::sync::mpsc::Receiver<LiveStats>>,
-    /// Set when the session thread has finished (the window "closed").
-    done: Arc<AtomicBool>,
 }
 
 static SESSION: Mutex<Option<Arc<Session>>> = Mutex::new(None);
@@ -249,18 +246,16 @@ pub unsafe extern "C" fn aa_mobile_connect(
     let frames = FrameSlot::new(|| {});
     let (stats_tx, stats_rx) = std::sync::mpsc::channel();
     let state = Arc::new(Mutex::new(State {
-        state: "connecting",
+        phase: "connecting",
         max_kbps: (max_mbps.max(0.0) * 1000.0) as u32,
         mute_host,
         ..State::default()
     }));
-    let done = Arc::new(AtomicBool::new(false));
     let s = Arc::new(Session {
         cmd_tx: cmd_tx.clone(),
         frames: frames.clone(),
         state: Arc::clone(&state),
         stats_rx: Mutex::new(stats_rx),
-        done: Arc::clone(&done),
     });
     if let Ok(mut g) = SESSION.lock() {
         *g = Some(Arc::clone(&s));
@@ -272,7 +267,7 @@ pub unsafe extern "C" fn aa_mobile_connect(
         let mut st = status_state.lock().expect("state");
         match w {
             Wake::Connected => {
-                st.state = "connected";
+                st.phase = "connected";
                 st.reason.clear();
                 if st.max_kbps > 0 {
                     let _ = status_tx.try_send(ViewerCommand::SetMaxBitrate(st.max_kbps));
@@ -281,67 +276,82 @@ pub unsafe extern "C" fn aa_mobile_connect(
                     let _ = status_tx.try_send(ViewerCommand::SetHostMute(true));
                 }
             }
-            Wake::Reconnecting => st.state = "reconnecting",
+            Wake::Reconnecting => st.phase = "reconnecting",
             Wake::HostStatus(m) => st.paused = m,
             Wake::Frame | Wake::SessionEnded(_) => {}
         }
     });
-    let spawned = std::thread::Builder::new().name("aa-session".into()).spawn(move || {
-        let outcome = (|| -> anyhow::Result<()> {
-            let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
-            let target: SocketAddr = runtime.block_on(async {
-                if let Some(hex) = host.strip_prefix("key:") {
-                    let key = aa_core::secure::from_hex(hex).ok_or_else(|| anyhow::anyhow!("bad key"))?;
-                    // Wherever that computer is now: this Wi-Fi, or any address
-                    // it was seen at (its Tailscale one when away from home).
-                    for attempt in 0..8u32 {
-                        if let Some(a) = aa_platform::discover::locate(&key).await {
-                            return Ok(a);
-                        }
-                        if let Some(h) = aa_platform::trust::paired_host(&key) {
-                            if let Some(a) =
-                                h.addrs.iter().filter_map(|a| a.parse::<SocketAddr>().ok()).nth(attempt as usize)
-                            {
-                                return Ok(a);
-                            }
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    }
-                    anyhow::bail!("that computer is not answering (is it sharing, and on the same Wi-Fi or Tailscale?)")
-                } else {
-                    aa_platform::discover::resolve(prefs.host.as_deref()).await
-                }
-            })?;
-            let started = std::time::Instant::now();
-            let result = runtime.block_on(reconnect::run_reconnecting(
-                &prefs,
-                target,
-                Some(frames),
-                &mut cmd_rx,
-                Some(stats_tx),
-                MicStart::Off,
-                Some(status),
-                None,
-            ));
-            reconnect::send_usage(target, started.elapsed(), "iphone");
-            result
-        })();
-        let mut st = state.lock().expect("state");
-        st.state = "ended";
-        st.reason = match outcome {
-            Ok(()) => String::new(),
-            Err(e) => {
-                tracing::error!("session failed: {e:#}");
-                format!("{e:#}")
-            }
-        };
-        done.store(true, Ordering::Relaxed);
-    });
+    let spawned = std::thread::Builder::new()
+        .name("aa-session".into())
+        .spawn(move || session_thread(&host, &prefs, frames, &mut cmd_rx, stats_tx, status, &state));
     if let Err(e) = spawned {
         tracing::error!("could not start the session thread: {e}");
         return 1;
     }
     0
+}
+
+/// Where a "key:<hex>" host is right now: on this Wi-Fi, or any address it
+/// was seen at (its Tailscale one when away from home). Tries for ~4 s.
+async fn find_by_key(hex: &str) -> anyhow::Result<SocketAddr> {
+    let key = aa_core::secure::from_hex(hex).ok_or_else(|| anyhow::anyhow!("bad key"))?;
+    for attempt in 0..8usize {
+        if let Some(a) = aa_platform::discover::locate(&key).await {
+            return Ok(a);
+        }
+        if let Some(h) = aa_platform::trust::paired_host(&key) {
+            if let Some(a) = h.addrs.iter().filter_map(|a| a.parse::<SocketAddr>().ok()).nth(attempt) {
+                return Ok(a);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    anyhow::bail!("that computer is not answering (is it sharing, and on the same Wi-Fi or Tailscale?)")
+}
+
+/// The session, on its own thread with its own runtime (like the desktop
+/// viewer): find the host, run until the app disconnects or the host is
+/// gone for good, then record how it ended.
+fn session_thread(
+    host: &str,
+    prefs: &ConnectPrefs,
+    frames: FrameSlot,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<ViewerCommand>,
+    stats_tx: std::sync::mpsc::Sender<LiveStats>,
+    status: reconnect::StatusFn,
+    state: &Mutex<State>,
+) {
+    let outcome = (|| -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+        let target: SocketAddr = runtime.block_on(async {
+            match host.strip_prefix("key:") {
+                Some(hex) => find_by_key(hex).await,
+                None => aa_platform::discover::resolve(prefs.host.as_deref()).await,
+            }
+        })?;
+        let started = std::time::Instant::now();
+        let result = runtime.block_on(reconnect::run_reconnecting(
+            prefs,
+            target,
+            Some(frames),
+            cmd_rx,
+            Some(stats_tx),
+            MicStart::Off,
+            Some(status),
+            None,
+        ));
+        reconnect::send_usage(target, started.elapsed(), "iphone");
+        result
+    })();
+    let mut st = state.lock().expect("state");
+    st.phase = "ended";
+    st.reason = match outcome {
+        Ok(()) => String::new(),
+        Err(e) => {
+            tracing::error!("session failed: {e:#}");
+            format!("{e:#}")
+        }
+    };
 }
 
 /// End the session (sends Bye) and forget it.
@@ -416,7 +426,7 @@ pub unsafe extern "C" fn aa_mobile_status() -> *mut c_char {
     let st = s.state.lock().map(|g| g.clone()).unwrap_or_default();
     let info = link::host_info();
     json(&StatusJson {
-        state: if st.state.is_empty() { "connecting" } else { st.state },
+        state: if st.phase.is_empty() { "connecting" } else { st.phase },
         reason: st.reason,
         paused: st.paused,
         fps: st.stats.fps,

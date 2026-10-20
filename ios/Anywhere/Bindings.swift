@@ -39,7 +39,7 @@ enum PadControl: String, Codable, CaseIterable {
 }
 
 /// What a control does.
-enum Binding: Codable, Equatable, Hashable {
+enum PadAction: Codable, Equatable, Hashable {
     case none
     /// Hold a key (USB HID usage) while the control is held.
     case key(UInt16)
@@ -56,11 +56,13 @@ enum Binding: Codable, Equatable, Hashable {
     case launcher
     case quickMenu
     case speedToggle
+    /// Cycle the picture zoom 1× → 2× → 3× → 1×.
+    case zoom
 
     var label: String {
         switch self {
         case .none: return "Nothing"
-        case .key(let u): return Binding.keyName(u)
+        case .key(let u): return PadAction.keyName(u)
         case .mouse(let b): return ["Click", "Right-click", "Middle click"][Int(min(b, 2))]
         case .pointer: return "Pointer"
         case .look: return "Mouse look"
@@ -71,6 +73,7 @@ enum Binding: Codable, Equatable, Hashable {
         case .launcher: return "Launcher"
         case .quickMenu: return "Quick menu"
         case .speedToggle: return "Pointer speed"
+        case .zoom: return "Zoom"
         }
     }
 
@@ -103,23 +106,23 @@ enum Binding: Codable, Equatable, Hashable {
     }
 
     /// Everything a button can be set to, in the order the editor cycles.
-    static let buttonChoices: [Binding] = {
-        var out: [Binding] = [.none, .mouse(0), .mouse(1), .mouse(2), .keyboard, .launcher, .quickMenu, .speedToggle]
-        out += [HID.space, HID.enter, HID.escape, HID.tab, HID.backspace, HID.leftShift, HID.leftCtrl, HID.leftAlt, HID.leftGui].map(Binding.key)
-        out += [HID.up, HID.down, HID.left, HID.right].map(Binding.key)
-        out += (0x04...0x1D).map { Binding.key(UInt16($0)) } // A–Z
-        out += (0x1E...0x27).map { Binding.key(UInt16($0)) } // 1–0
-        out += (0x3A...0x45).map { Binding.key(UInt16($0)) } // F1–F12
+    static let buttonChoices: [PadAction] = {
+        var out: [PadAction] = [.none, .mouse(0), .mouse(1), .mouse(2), .keyboard, .launcher, .quickMenu, .speedToggle, .zoom]
+        out += [HID.space, HID.enter, HID.escape, HID.tab, HID.backspace, HID.leftShift, HID.leftCtrl, HID.leftAlt, HID.leftGui].map(PadAction.key)
+        out += [HID.up, HID.down, HID.left, HID.right].map(PadAction.key)
+        out += (0x04...0x1D).map { PadAction.key(UInt16($0)) } // A–Z
+        out += (0x1E...0x27).map { PadAction.key(UInt16($0)) } // 1–0
+        out += (0x3A...0x45).map { PadAction.key(UInt16($0)) } // F1–F12
         return out
     }()
 
-    static let stickChoices: [Binding] = [.none, .pointer, .look, .scroll, .wasd, .arrows]
+    static let stickChoices: [PadAction] = [.none, .pointer, .look, .scroll, .wasd, .arrows]
 }
 
 struct ControlMap: Codable, Equatable {
-    var bindings: [PadControl: Binding]
+    var bindings: [PadControl: PadAction]
 
-    subscript(c: PadControl) -> Binding {
+    subscript(c: PadControl) -> PadAction {
         get { bindings[c] ?? .none }
         set { bindings[c] = newValue }
     }

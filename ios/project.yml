@@ -50,6 +50,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.minutecreative.anywhere.ios
         PRODUCT_NAME: Anywhere
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_OBJC_BRIDGING_HEADER: Anywhere/Bridging.h
         HEADER_SEARCH_PATHS:

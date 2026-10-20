@@ -42,6 +42,17 @@ struct QuickMenu: View {
                 let i = steps.firstIndex { $0 >= p.maxMbps } ?? 0
                 engine.setMaxMbps(steps[(i + 1) % steps.count])
             },
+            Item(symbol: "plus.magnifyingglass", title: "Zoom", value: engine.zoom == 1 ? "Off" : "\(Int(engine.zoom))× around the pointer") {
+                engine.zoom = engine.zoom >= 3 ? 1 : engine.zoom + 1
+            },
+            Item(symbol: "arrow.up.left.and.arrow.down.right", title: "Full-screen app", value: "⌃⌘F on the Mac") {
+                engine.tap(HID.letter("f")!, modifiers: [HID.leftCtrl, HID.leftGui])
+                overlay = .none
+            },
+            Item(symbol: "rectangle.on.rectangle.slash", title: "Hide other apps", value: "⌥⌘H on the Mac") {
+                engine.tap(HID.letter("h")!, modifiers: [HID.leftAlt, HID.leftGui])
+                overlay = .none
+            },
             Item(symbol: "doc.on.clipboard", title: "Send clipboard", value: "Paste the phone's text there") {
                 if let t = UIPasteboard.general.string, !t.isEmpty { engine.copyText(t) }
                 overlay = .none

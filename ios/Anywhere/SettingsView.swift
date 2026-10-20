@@ -48,6 +48,8 @@ struct SettingsView: View {
             },
             Row(title: "Mac speakers", help: "Mute the Mac's own speakers while connected (sound plays here only).",
                 value: p.muteMac ? "Muted" : "Playing") { _ in engine.prefs.muteMac.toggle() },
+            Row(title: "Launcher on connect", help: "Open the launcher as soon as the Mac appears, like a console home.",
+                value: p.launcherOnConnect ? "On" : "Off") { _ in engine.prefs.launcherOnConnect.toggle() },
             Row(title: "Stats corner", help: "fps, Mbps, delay and loss in the corner of the picture.",
                 value: p.showStats ? "On" : "Off") { _ in engine.prefs.showStats.toggle() },
             Row(title: "Problems", help: "What the engine logged, for sending to the project.",

@@ -72,7 +72,7 @@ final class InputMapper {
 
     // MARK: Sticks
 
-    private func stick(_ b: Binding, _ x: Float, _ y: Float, _ dt: Double, _ e: Engine) {
+    private func stick(_ b: PadAction, _ x: Float, _ y: Float, _ dt: Double, _ e: Engine) {
         switch b {
         case .pointer:
             // Deflection squared feels precise near the centre and quick at
@@ -118,7 +118,7 @@ final class InputMapper {
 
     // MARK: Buttons
 
-    private func button(_ control: PadControl, _ b: Binding, _ down: Bool, _ now: TimeInterval, _ e: Engine,
+    private func button(_ control: PadControl, _ b: PadAction, _ down: Bool, _ now: TimeInterval, _ e: Engine,
                         _ events: ((NavEvent) -> Void)?) {
         switch b {
         case .key(let u):
@@ -135,6 +135,7 @@ final class InputMapper {
         case .launcher: if down { events?(.y) }
         case .quickMenu: if down { events?(.home) }
         case .speedToggle: if down { fast.toggle() }
+        case .zoom: if down { e.zoom = e.zoom >= 3 ? 1 : e.zoom + 1 }
         default: break
         }
     }

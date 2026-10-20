@@ -61,7 +61,7 @@ struct ControlsView: View {
 
     private func cycle(_ dir: Int, big: Bool) {
         let c = controls[focus]
-        let choices = c.isStick ? Binding.stickChoices : Binding.buttonChoices
+        let choices = c.isStick ? PadAction.stickChoices : PadAction.buttonChoices
         let current = engine.prefs.customMap[c]
         let i = choices.firstIndex(of: current) ?? 0
         let step = big ? 10 : 1

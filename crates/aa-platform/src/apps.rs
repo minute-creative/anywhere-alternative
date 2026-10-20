@@ -157,7 +157,9 @@ mod steam {
     }
 
     /// The largest picture Steam cached for a game, if any (its layouts
-    /// have changed over the years; try each).
+    /// have changed over the years; try each). Mac only so far: the PC
+    /// sends no icons yet.
+    #[cfg(target_os = "macos")]
     pub fn picture(steam: &Path, appid: &str) -> Option<PathBuf> {
         let cache = steam.join("appcache/librarycache");
         let candidates = [
@@ -532,6 +534,7 @@ fn list_here() -> Vec<AppEntry> {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn act_here(id: &str, action: AppAction) -> anyhow::Result<()> {
+    anyhow::ensure!(list_here().iter().any(|a| a.id == id), "no app with id {id}");
     tracing::info!(id, ?action, "mock launcher action");
     Ok(())
 }

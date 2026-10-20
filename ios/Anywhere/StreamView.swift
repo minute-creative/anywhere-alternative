@@ -8,6 +8,18 @@ import MetalKit
 import SwiftUI
 import UIKit
 
+/// The part of the picture shown when zoomed: a window of 1/zoom around
+/// the pointer, kept inside the picture.
+enum ZoomWindow {
+    static func around(_ p: CGPoint, zoom: CGFloat) -> CGRect {
+        let z = max(1, zoom)
+        let w = 1 / z
+        let x = min(1 - w, max(0, p.x - w / 2))
+        let y = min(1 - w, max(0, p.y - w / 2))
+        return CGRect(x: x, y: y, width: w, height: w)
+    }
+}
+
 struct StreamView: UIViewRepresentable {
     @EnvironmentObject var engine: Engine
     let fps: Int
@@ -39,6 +51,8 @@ final class StreamMetalView: MTKView, MTKViewDelegate {
     private var videoSize = CGSize.zero
     private var reported = CGRect.zero
     private var hasPicture = false
+    /// The window of the picture on screen (all of it, or the zoomed part).
+    private var window = CGRect(x: 0, y: 0, width: 1, height: 1)
 
     // Touch state.
     private var lastPan: CGPoint?
@@ -113,8 +127,15 @@ final class StreamMetalView: MTKView, MTKViewDelegate {
                 onLayout?(videoRect)
             }
             var rect = SIMD4<Float>(Float(x / vw * 2 - 1), Float(1 - y / vh * 2), Float((x + w) / vw * 2 - 1), Float(1 - (y + h) / vh * 2))
+            // Zoom follows the pointer.
+            if let engine {
+                let p = engine.pad?.mapper.pointer ?? CGPoint(x: 0.5, y: 0.5)
+                window = ZoomWindow.around(p, zoom: engine.zoom)
+            }
+            var win = SIMD4<Float>(Float(window.minX), Float(window.minY), Float(window.width), Float(window.height))
             enc.setRenderPipelineState(pipeline)
             enc.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
+            enc.setVertexBytes(&win, length: MemoryLayout<SIMD4<Float>>.size, index: 1)
             enc.setFragmentTexture(texture, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
@@ -130,7 +151,8 @@ final class StreamMetalView: MTKView, MTKViewDelegate {
         let x = (p.x - videoRect.minX) / videoRect.width
         let y = (p.y - videoRect.minY) / videoRect.height
         guard x >= 0, x <= 1, y >= 0, y <= 1 else { return nil }
-        return CGPoint(x: x, y: y)
+        // Through the zoom window: a touch lands where it looks.
+        return CGPoint(x: window.minX + x * window.width, y: window.minY + y * window.height)
     }
 
     private func move(to p: CGPoint) {
