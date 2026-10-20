@@ -60,30 +60,52 @@ struct SettingsView: View {
     var body: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Settings").font(.system(size: 30, weight: .bold, design: .rounded)).padding(.bottom, 8)
-                ForEach(Array(rows.enumerated()), id: \.offset) { i, r in
-                    FocusTile(focused: focus == i, width: 420, height: 50) {
-                        HStack {
-                            Text(r.title).font(.system(size: 16, weight: .semibold))
-                            Spacer()
-                            Text(r.value).font(.system(size: 15)).foregroundStyle(Theme.accent)
+                Text("Settings").font(.system(size: 30, weight: .bold, design: .rounded))
+                // 0.6.0 on the phone: ten rows are taller than a phone held
+                // sideways, and the list didn't scroll, so the last rows
+                // could not be reached and the d-pad focus went off screen.
+                // Now it scrolls by touch and follows the focused row.
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(Array(rows.enumerated()), id: \.offset) { i, r in
+                                FocusTile(focused: focus == i, width: 420, height: 50) {
+                                    HStack {
+                                        Text(r.title).font(.system(size: 16, weight: .semibold))
+                                        Spacer()
+                                        Text(r.value).font(.system(size: 15)).foregroundStyle(Theme.accent)
+                                    }
+                                    .padding(.horizontal, 16)
+                                }
+                                .id(i)
+                                .onTapGesture { focus = i; r.change(0) }
+                            }
                         }
-                        .padding(.horizontal, 16)
+                        // Room for the focused tile's glow and 1.05x growth.
+                        .padding(.horizontal, 14).padding(.vertical, 12)
                     }
-                    .onTapGesture { focus = i; r.change(0) }
+                    .onChange(of: focus) { _, f in
+                        withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(f, anchor: .center) }
+                    }
                 }
-                Spacer()
                 HintBar(hints: [("A", "Change"), ("◀ ▶", "Adjust"), ("B", "Back")])
             }
-            .padding(32)
+            .padding(.horizontal, 18).padding(.top, 20).padding(.bottom, 12)
 
             VStack(alignment: .leading, spacing: 10) {
                 if showLog {
                     Text("Log").font(.system(size: 18, weight: .semibold))
-                    ScrollView {
-                        Text(engine.log.suffix(120).joined(separator: "\n"))
-                            .font(.system(size: 10, design: .monospaced)).foregroundStyle(Theme.muted)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                    // Opens on the newest lines (the ones that matter).
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            Text(engine.log.suffix(120).joined(separator: "\n"))
+                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(Theme.muted)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                            Color.clear.frame(height: 1).id("end")
+                        }
+                        .onAppear { proxy.scrollTo("end", anchor: .bottom) }
+                        .onChange(of: engine.log.count) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
                     }
                     Text("The full file is viewer.log in the app's Documents folder (Files app → Anywhere).")
                         .font(.system(size: 12)).foregroundStyle(Theme.muted)
