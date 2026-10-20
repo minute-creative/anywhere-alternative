@@ -714,6 +714,19 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   `basedOnDependencyAnalysis: false`; cargo's own incremental build keeps
   it cheap.
 
+- **A green run is not a release.** The Release workflow took whatever
+  version was typed: "0.5.6" for the 0.6.0 code passed every step and
+  quietly replaced the old 0.5.6 downloads, and the updater saw nothing
+  new. The build now checks the typed version against Cargo.toml first.
+- **Phone screens are short.** A layout that fits a Mac window (ten
+  settings rows, a 150 pt launcher hero plus a strip) doesn't fit a phone
+  held sideways; anything that can grow belongs in a scroll view or is
+  sized from the real height. Check the smallest landscape height (~350 pt).
+- **Clearing a mirrored text box is an edit too.** The phone sends the
+  difference between the old and new text to the Mac; a box emptied by
+  code to keep it short sent hundreds of deletes. Programmatic resets skip
+  the next change.
+
 ## 10. Measured so far
 
 | Date | Machine | Path | Result |

@@ -98,6 +98,44 @@ through Anywhere**; **code once, then remembered**.
 
 ## Shipped but NOT yet confirmed by the owner (ask for results first)
 
+**After 0.6.0 (2026-10-20 evening), owner's first phone test, CI only, not yet released:**
+Owner tested the phone (0.6.0 phone build, Mac on 0.5.13 or the mislabelled
+release, see below) and sent screenshots. Fixed and on `main`:
+- Settings list didn't scroll (10 rows taller than a landscape phone):
+  scrolls, follows the d-pad, log opens on the newest lines.
+- Launcher strip sank under the screen edge (the Full access note wrapped
+  in the hint row): hero sized from the real height, note moved into it.
+- Desktop controls (owner's request): B = Back (⌘[), Y = right-click,
+  R4 = launcher (needs a job in the Razer Nexus app to reach apps; also in
+  the quick menu), hold L2 = magnify.
+- Text fields: the Mac host reports the focused text field over
+  Accessibility (`macos/textfocus.rs`, `TextFocus` message, only to viewers
+  with `text_focus` in their hello); the phone opens the iPhone keyboard by
+  itself (Settings → Typing: iPhone / Controller / Off), with autocorrect
+  and dictation, sending edits as a diff. While typing the picture is a
+  wide band zoomed to the field instead of the whole screen shrunk small.
+- Release workflow: refuses a typed version that differs from Cargo.toml.
+  The first 0.6.0 run had "0.5.6" typed, built 0.6.0 under that name and
+  replaced the 0.5.6 downloads; no v0.6.0 release existed. Owner asked to
+  remove those three files from the 0.5.6 release (the session couldn't
+  delete release assets). CI actions moved off Node 20.
+Owner decisions still to build: **Phone mode** (a phone-shaped virtual
+display on the Mac with HiDPI, streamed while the phone watches; owner
+chose this over changing the Mac's own resolution), window actions in the
+quick menu, and an **Elden Ring layout** (below).
+Elden Ring with the Kishi (owner: menus and gameplay don't respond): no
+virtual controller on a Mac host (root refused, Day 6), and the phone was
+on Desktop controls. Plan offered: a layout mapping the pad to Elden
+Ring's PC keys (play: F jump, Space dodge, R item, E interact, clicks,
+Shift+click, X crouch, Q lock-on, arrows, G map, Esc; menus: E OK, Q back).
+A, B and L1/R1 differ between play and menus, so it needs to know which:
+`cursor_captured` is Windows-only today (always false on a Mac host).
+Waiting on the owner: automatic (Mac capture detection), manual (⧉
+toggles) or both. Also tell them: in game, "Device for On-Screen Prompts"
+= Keyboard and Mouse.
+Flaky test: `usbip_server_survives_garbage_and_still_serves` (50 ms sleep
+before checking the connection was forgotten) failed once on macOS CI.
+
 **0.6.0 (2026-10-20), the newest — the iPhone app and the launcher, CI only:**
 Owner asked (2026-10-20): the Mac on the iPhone, "custom macOS designed for
 iPhone", console-style, everything operable with a Razer Kishi V2 (touch

@@ -626,3 +626,26 @@ the 0.6.0 Release run was cancelled; the owner starts it by hand.
 
 Housekeeping: CLAUDE.md and HANDOFF still said the repo was private; it
 has been public since the 18th. Fixed both.
+
+## Day 18, evening — first phone test feedback (after v0.6.0)
+
+Owner's screenshots from the phone watching the Mac: Settings wouldn't
+scroll; the launcher's strip sat under the screen edge (only green "open"
+dots visible); small Mac window buttons were hard to hit; clicking a text
+field gave no way to type; the controller keyboard shrank the picture to a
+strip. The 0.6.0 Release hadn't published: the run was started with
+"0.5.6" typed. Fixed on `main` (CI): scroll, launcher sizing, B/Y/R4
+remap, auto keyboard from the Mac's Accessibility focus, band zoom while
+typing, a version check in the Release workflow. Also found: the
+controller keyboard's hidden box sent 200 deletes when it cleared itself.
+
+Elden Ring with the Kishi on the Mac: not a bug in the pad path. The Mac
+can't host a virtual controller (Day 6) and Desktop controls send clicks
+and ⌘[; the game ignores those. `cursor_captured` exists only on Windows,
+so a Mac host never switches the stick to mouse look by itself (the old
+"camera spins" note). Offered a game-specific key layout; waiting on the
+owner's choice of how it tells play from menus.
+
+The session restarted midway; the restarted turn found its own unfinished
+edits (button remap committed, text-focus host code uncommitted) and
+carried on from them rather than redoing them.
