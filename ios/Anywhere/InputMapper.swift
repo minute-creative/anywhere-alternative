@@ -23,6 +23,8 @@ final class InputMapper {
     private var lastPadSend: TimeInterval = 0
     /// Keys bound to the d-pad repeat while held (arrows in a text field).
     private var repeatKey: (UInt16, TimeInterval)?
+    /// The zoom to return to when a held Magnify button is let go.
+    private var zoomBeforeMagnify: CGFloat?
 
     /// Call when the stream starts and whenever the profile changes.
     func reset() {
@@ -40,6 +42,10 @@ final class InputMapper {
         for b in heldMouse { e.mouseButton(b, false) }
         heldMouse.removeAll()
         repeatKey = nil
+        if let z = zoomBeforeMagnify {
+            e.zoom = z
+            zoomBeforeMagnify = nil
+        }
     }
 
     /// The pointer was moved by touch: keep the stick in step.
@@ -143,6 +149,15 @@ final class InputMapper {
         case .quickMenu: if down { events?(.home) }
         case .speedToggle: if down { fast.toggle() }
         case .zoom: if down { e.zoom = e.zoom >= 3 ? 1 : e.zoom + 1 }
+        case .back: if down { e.tap(HID.openBracket, modifiers: [HID.leftGui]) }
+        case .magnify:
+            if down, zoomBeforeMagnify == nil {
+                zoomBeforeMagnify = e.zoom
+                e.zoom = min(3, e.zoom + 1)
+            } else if !down, let z = zoomBeforeMagnify {
+                e.zoom = z
+                zoomBeforeMagnify = nil
+            }
         default: break
         }
     }

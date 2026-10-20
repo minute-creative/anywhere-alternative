@@ -85,10 +85,12 @@ While watching the Mac — **Desktop** controls (the default):
 | Left stick | Pointer (L3 toggles slow / fast) |
 | Right stick | Scroll |
 | A / R2 | Click (hold R2 to drag) |
-| B / L2 | Right-click |
+| B | Back (⌘[: browsers, Finder) |
+| Y | Right-click |
+| L2 (hold) | Magnify around the pointer |
 | R3 | Middle click |
-| X | On-screen keyboard |
-| Y | Launcher |
+| X / L4 | On-screen keyboard |
+| R4 | Launcher (give R4 a job in the Razer Nexus app first; also in the quick menu) |
 | L1 (hold) | Command ⌘ |
 | R1 (hold) | Shift ⇧ |
 | D-pad | Arrow keys |
@@ -110,7 +112,7 @@ the host can show a virtual controller: a PC with ViGEmBus. **A Mac
 cannot**, without Apple's virtual-HID entitlement (paid program +
 approval; see JOURNAL Day 6) — use Desktop or Game controls on the Mac.
 
-Launcher (Y): one strip of tiles along the bottom with the focused app
+Launcher (R4, or the quick menu): one strip of tiles along the bottom with the focused app
 large in the middle; tabs *Open now*, *Recent*, *Games* (Steam,
 CrossOver), *Apps*, *System* on L1 / R1 (or up / down); left / right move;
 **A opens the app and the Mac then shows only that app**, so it fills the
@@ -126,7 +128,8 @@ return, L1 symbols, R1 tab, Options closes. *Phone keyboard* on the last
 row brings up iOS's keyboard for longer text.
 
 The quick menu (Home) is a control bar along the bottom: Launcher,
-Keyboard, Whole Mac, Controls, Show controls, Zoom, Full screen, Mac
+Keyboard, Whole Mac, Controls, Show controls, Zoom, Full screen, Close window,
+Minimise, Next window, Quit app, Mac
 speakers, Pointer speed, Data cap, Stats, Send clipboard, Disconnect.
 
 Quick menu extras: **Show controls** (a cheat-sheet of the current layout), **Zoom** (2× / 3× around the pointer — Mac text is

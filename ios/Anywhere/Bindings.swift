@@ -61,6 +61,10 @@ enum PadAction: Codable, Equatable, Hashable {
     case speedToggle
     /// Cycle the picture zoom 1× → 2× → 3× → 1×.
     case zoom
+    /// Back (⌘[ on the Mac): browsers, Finder, most apps with history.
+    case back
+    /// Magnify around the pointer while held; back to normal on release.
+    case magnify
 
     var label: String {
         switch self {
@@ -77,6 +81,8 @@ enum PadAction: Codable, Equatable, Hashable {
         case .quickMenu: return "Quick menu"
         case .speedToggle: return "Pointer speed"
         case .zoom: return "Zoom"
+        case .back: return "Back"
+        case .magnify: return "Magnify (hold)"
         }
     }
 
@@ -110,7 +116,7 @@ enum PadAction: Codable, Equatable, Hashable {
 
     /// Everything a button can be set to, in the order the editor cycles.
     static let buttonChoices: [PadAction] = {
-        var out: [PadAction] = [.none, .mouse(0), .mouse(1), .mouse(2), .keyboard, .launcher, .quickMenu, .speedToggle, .zoom]
+        var out: [PadAction] = [.none, .mouse(0), .mouse(1), .mouse(2), .back, .keyboard, .launcher, .quickMenu, .speedToggle, .zoom, .magnify]
         out += [HID.space, HID.enter, HID.escape, HID.tab, HID.backspace, HID.leftShift, HID.leftCtrl, HID.leftAlt, HID.leftGui].map(PadAction.key)
         out += [HID.up, HID.down, HID.left, HID.right].map(PadAction.key)
         out += (0x04...0x1D).map { PadAction.key(UInt16($0)) } // A–Z
@@ -131,11 +137,15 @@ struct ControlMap: Codable, Equatable {
     }
 
     /// Using the Mac: pointer and scroll on the sticks, clicks, modifiers.
+    /// 2026-10-20 (owner): B is Back and Y right-clicks, like a phone
+    /// browser; the launcher moved to R4 (also in the quick menu, since
+    /// R4 only reaches apps once the Razer Nexus app gives it a job) and
+    /// L2 magnifies while held, for small Mac buttons.
     static let desktop = ControlMap(bindings: [
         .leftStick: .pointer, .rightStick: .scroll,
-        .a: .mouse(0), .b: .mouse(1), .x: .keyboard, .y: .launcher,
-        .l1: .key(HID.leftGui), .r1: .key(HID.leftShift), .l2: .mouse(1), .r2: .mouse(0),
-        .l3: .speedToggle, .r3: .mouse(2), .l4: .launcher, .r4: .keyboard,
+        .a: .mouse(0), .b: .back, .x: .keyboard, .y: .mouse(1),
+        .l1: .key(HID.leftGui), .r1: .key(HID.leftShift), .l2: .magnify, .r2: .mouse(0),
+        .l3: .speedToggle, .r3: .mouse(2), .l4: .keyboard, .r4: .launcher,
         .up: .key(HID.up), .down: .key(HID.down), .left: .key(HID.left), .right: .key(HID.right),
         .menu: .quickMenu, .options: .key(HID.enter),
     ])

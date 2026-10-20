@@ -28,6 +28,10 @@ enum HID {
     static let leftAlt: UInt16 = 0xE2 // Option on a Mac
     static let leftGui: UInt16 = 0xE3 // Command on a Mac, Windows key on a PC
     static let rightShift: UInt16 = 0xE5
+    /// "[" : with Command it is Back in Chrome, Safari and Finder.
+    static let openBracket: UInt16 = 0x2F
+    /// "`" : with Command it moves to the app's next window.
+    static let grave: UInt16 = 0x35
 
     static let one: UInt16 = 0x1E
     static let two: UInt16 = 0x1F

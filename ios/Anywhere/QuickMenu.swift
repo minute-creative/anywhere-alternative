@@ -43,6 +43,24 @@ struct QuickMenu: View {
                 engine.tap(HID.letter("f")!, modifiers: [HID.leftCtrl, HID.leftGui])
                 overlay = .none
             },
+            // Mac window buttons are a few points wide on a phone; these do
+            // the same through shortcuts, no aiming needed (owner, 0.6.0).
+            Item(id: "close", symbol: "xmark.square.fill", title: "Close window", value: "⌘W on the Mac") {
+                engine.tap(HID.letter("w")!, modifiers: [HID.leftGui])
+                overlay = .none
+            },
+            Item(id: "minimise", symbol: "minus.square.fill", title: "Minimise", value: "⌘M on the Mac") {
+                engine.tap(HID.letter("m")!, modifiers: [HID.leftGui])
+                overlay = .none
+            },
+            Item(id: "nextwin", symbol: "rectangle.on.rectangle", title: "Next window", value: "⌘` on the Mac") {
+                engine.tap(HID.grave, modifiers: [HID.leftGui])
+                overlay = .none
+            },
+            Item(id: "quit", symbol: "power", title: "Quit app", value: "⌘Q on the Mac") {
+                engine.tap(HID.letter("q")!, modifiers: [HID.leftGui])
+                overlay = .none
+            },
             Item(id: "mute", symbol: p.muteMac ? "speaker.slash.fill" : "speaker.wave.2.fill", title: "Mac speakers", value: p.muteMac ? "Muted there" : "Playing there") {
                 engine.setMuteMac(!p.muteMac)
             },
