@@ -147,6 +147,10 @@ pub struct HostInfo {
     pub apps_version: u32,
     /// Pages of the list still on their way (`pages` total, received so far).
     pub apps_pages: (u16, Vec<u16>),
+    /// The host's focused text field (fractions of the picture: x, y,
+    /// width, height) and whether it is a password field; `None` when no
+    /// field has the focus. Only sent to viewers that asked (the phone).
+    pub text_field: Option<([f32; 4], bool)>,
 }
 
 /// Launcher icons by app id (PNG), kept outside `HostInfo` because they are

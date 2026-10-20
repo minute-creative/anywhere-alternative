@@ -40,6 +40,8 @@ pub fn viewer_backends() -> Result<ViewerBackends> {
         can_emulate_gamepad: false,
         fixed_fps: false,
         loss_recovery: true,
+        // Opens its keyboard when the Mac focuses a text field.
+        text_focus: true,
     };
     let decoder: crate::DecoderFactory = Box::new(move |codec| -> Result<Box<dyn crate::VideoDecoder>> {
         if hardware {

@@ -334,6 +334,20 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                         told = (status, dest, Instant::now());
                     }
                 }
+                // A text field got (or lost) the keyboard focus: tell the
+                // phone at once, and every second while one has it.
+                if let Some(d) = dest.filter(|_| stream.text_wanted.load(Ordering::Relaxed)) {
+                    let now = stream.text_field.lock().ok().and_then(|f| *f);
+                    let due = now.is_some() && stream.text_told.1.elapsed() > Duration::from_secs(1);
+                    if now != stream.text_told.0 || due {
+                        let msg = ControlMessage::TextFocus { field: now.map(|f| f.0), secure: now.is_some_and(|f| f.1) };
+                        let _ = send_control(&socket, d, &msg, &seq).await;
+                        if now.is_some() != stream.text_told.0.is_some() {
+                            tracing::debug!(field = ?now, "text field focus changed");
+                        }
+                        stream.text_told = (now, Instant::now());
+                    }
+                }
                 // The launcher list is ready: send its pages, then gather icons.
                 while let Ok(apps) = stream.apps_rx.try_recv() {
                     let Some(d) = dest else { continue };
@@ -744,6 +758,8 @@ async fn handle_packet(
                             ctl.target_kbps.store(bitrate.current_kbps(), Ordering::Relaxed);
                             ctl.codec.store(codec as u8, Ordering::Relaxed);
                             stream.start(ctl, &negotiated, host_caps, full_access);
+                            stream.text_wanted.store(capabilities.text_focus, Ordering::Relaxed);
+                            stream.text_told = (None, Instant::now());
                             ctl.force_keyframe.store(true, Ordering::Relaxed);
                             ctl.streaming.store(true, Ordering::Relaxed);
                         }
@@ -1181,7 +1197,19 @@ struct Stream {
     /// An app the phone opened and wants shown alone, once it is running.
     show_tx: std::sync::mpsc::Sender<ShareTarget>,
     show_rx: std::sync::mpsc::Receiver<ShareTarget>,
+    /// The viewer asked to hear about focused text fields (the phone);
+    /// a watcher thread asks the system only while this is set.
+    text_wanted: Arc<std::sync::atomic::AtomicBool>,
+    /// What the watcher last saw.
+    text_field: Arc<std::sync::Mutex<Option<TextField>>>,
+    /// What the viewer was last told, and when (repeated every second
+    /// while a field is focused: control messages can be lost).
+    text_told: (Option<TextField>, Instant),
 }
+
+/// A focused text field: where (fractions of the screen: x, y, width,
+/// height) and whether it is a password field.
+type TextField = ([f32; 4], bool);
 
 /// A display name for a launcher id, for the share target's label (the
 /// phone shows it in its corner); the bundle id's last part will do.
@@ -1196,6 +1224,21 @@ impl Stream {
         let (show_tx, show_rx) = std::sync::mpsc::channel();
         let watched = Arc::new(std::sync::Mutex::new(ShareTarget::Screen));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let text_wanted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let text_field = Arc::new(std::sync::Mutex::new(None));
+        {
+            // Which text field has the focus, ~7 times a second, only while a
+            // phone is watching. Asking can take up to 100 ms when an app is
+            // busy, so never on the network loop.
+            let (wanted, field) = (Arc::clone(&text_wanted), Arc::clone(&text_field));
+            let _ = std::thread::Builder::new().name("aa-text-focus".into()).spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(150));
+                let now = if wanted.load(Ordering::Relaxed) { aa_platform::focused_text_field() } else { None };
+                if let Ok(mut f) = field.lock() {
+                    *f = now;
+                }
+            });
+        }
         {
             let (watched, closed) = (Arc::clone(&watched), Arc::clone(&closed));
             let _ = std::thread::Builder::new().name("aa-share-watch".into()).spawn(move || loop {
@@ -1214,6 +1257,9 @@ impl Stream {
             apps_rx,
             show_tx,
             show_rx,
+            text_wanted,
+            text_field,
+            text_told: (None, Instant::now()),
             now: ShareTarget::Screen,
             local: ShareTarget::Screen,
             viewer_choice: None,
@@ -1268,6 +1314,8 @@ impl Stream {
             self.follow_choice(ctl, 0);
         }
         self.full_access = false;
+        self.text_wanted.store(false, Ordering::Relaxed);
+        self.text_told = (None, Instant::now());
     }
 
     /// Re-read the local choice; apply whatever should be shown now.

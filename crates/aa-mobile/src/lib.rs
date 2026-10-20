@@ -394,6 +394,12 @@ struct StatusJson {
     /// A game on the host has taken the mouse pointer: send movement, not
     /// positions, and draw no pointer.
     cursor_captured: bool,
+    /// A text field on the Mac has the keyboard focus: where it is (x, y,
+    /// width, height as fractions of the picture). The phone opens its
+    /// keyboard and zooms to it.
+    text_field: Option<[f32; 4]>,
+    /// That field is a password field.
+    text_secure: bool,
 }
 
 /// Does a host version string mean "0.6 or newer"? Unknown (empty) means no.
@@ -427,6 +433,8 @@ pub unsafe extern "C" fn aa_mobile_status() -> *mut c_char {
             host_version: String::new(),
             has_launcher: false,
             cursor_captured: false,
+            text_field: None,
+            text_secure: false,
         });
     };
     // Newest stats line, if the session produced one since last time.
@@ -464,6 +472,8 @@ pub unsafe extern "C" fn aa_mobile_status() -> *mut c_char {
         has_launcher: launcher_capable(&info.host_version),
         host_version: info.host_version,
         cursor_captured: link::HOST_CURSOR_CAPTURED.load(std::sync::atomic::Ordering::Relaxed),
+        text_field: info.text_field.map(|f| f.0),
+        text_secure: info.text_field.is_some_and(|f| f.1),
     })
 }
 

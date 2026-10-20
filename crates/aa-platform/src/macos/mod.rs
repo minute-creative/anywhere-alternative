@@ -34,6 +34,7 @@ pub mod input;
 pub mod camera;
 pub mod gamepad;
 pub mod speaker;
+pub mod textfocus;
 pub mod wininfo;
 
 /// Query what this Mac can do. Until the backends exist this reports what a
@@ -50,6 +51,7 @@ pub fn probe_capabilities() -> Capabilities {
         can_emulate_gamepad: false,
         fixed_fps: false,
         loss_recovery: false,
+        text_focus: false,
     }
 }
 
@@ -116,6 +118,7 @@ pub fn host_backends() -> Result<HostBackends> {
             can_emulate_gamepad: true,
             fixed_fps: false,
             loss_recovery,
+            text_focus: false,
         },
     })
 }

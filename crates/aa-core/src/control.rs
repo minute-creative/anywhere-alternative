@@ -113,6 +113,18 @@ pub enum ControlMessage {
         #[serde(default)]
         cursor_captured: bool,
     },
+    /// Host → viewer: a text field here has the keyboard focus, or none
+    /// does any more. `field` is where it is, as fractions of the shared
+    /// picture (x, y, width, height), so the viewer can zoom to it.
+    /// `secure` marks a password field (the phone hides what is typed).
+    /// Sent on change and every second while a field is focused, only to
+    /// viewers that asked ([`Capabilities::text_focus`]); older viewers
+    /// would ignore it anyway.
+    TextFocus {
+        field: Option<[f32; 4]>,
+        #[serde(default)]
+        secure: bool,
+    },
     /// Host → viewer: an app here is using "Anywhere Camera" / "Anywhere
     /// Microphone" (a call started), or stopped. The viewer turns its own
     /// camera and microphone on only while asked, and only if its settings
@@ -172,9 +184,8 @@ mod tests {
     use super::*;
     use crate::video::{Codec, ColorRange, Resolution};
 
-    #[test]
-    fn hello_round_trips() {
-        let caps = Capabilities {
+    fn caps() -> Capabilities {
+        Capabilities {
             codecs: vec![Codec::Hevc],
             max_resolution: Resolution::new(1920, 1080),
             max_fps: 60,
@@ -183,9 +194,35 @@ mod tests {
             can_emulate_gamepad: false,
             fixed_fps: false,
             loss_recovery: false,
-        };
-        let m = ControlMessage::hello(caps);
+            text_focus: false,
+        }
+    }
+
+    #[test]
+    fn hello_round_trips() {
+        let m = ControlMessage::hello(caps());
         assert_eq!(ControlMessage::decode(&m.encode()).unwrap(), m);
+    }
+
+    #[test]
+    fn text_focus_round_trips_and_old_hellos_still_read() {
+        for m in [
+            ControlMessage::TextFocus { field: Some([0.1, 0.2, 0.3, 0.04]), secure: true },
+            ControlMessage::TextFocus { field: None, secure: false },
+        ] {
+            assert_eq!(ControlMessage::decode(&m.encode()).unwrap(), m);
+        }
+        // A host older than 0.6.1 sends no `secure`: not a password field.
+        let m = ControlMessage::decode(br#"{"type":"text_focus","field":null}"#).unwrap();
+        assert_eq!(m, ControlMessage::TextFocus { field: None, secure: false });
+        // A viewer older than 0.6.1 sends no `text_focus`: it didn't ask.
+        let mut json = serde_json::to_value(ControlMessage::hello(caps())).unwrap();
+        json["capabilities"].as_object_mut().unwrap().remove("text_focus");
+        let ControlMessage::Hello { capabilities, .. } = ControlMessage::decode(json.to_string().as_bytes()).unwrap()
+        else {
+            panic!("not a hello")
+        };
+        assert!(!capabilities.text_focus);
     }
 
     #[test]

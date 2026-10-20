@@ -38,6 +38,12 @@ pub struct Capabilities {
     /// Both must say yes; otherwise a loss costs a whole new picture.
     #[serde(default)]
     pub loss_recovery: bool,
+    /// Viewer only: tell me when a text field on the host has the keyboard
+    /// focus ([`crate::control::ControlMessage::TextFocus`]), so I can open
+    /// a keyboard by myself. The phone says yes; desktop viewers have a
+    /// real keyboard and say no, so the host does no work for them.
+    #[serde(default)]
+    pub text_focus: bool,
 }
 
 /// The result of a successful negotiation. Both sides compute this
@@ -140,6 +146,7 @@ mod tests {
             can_emulate_gamepad: false,
             fixed_fps: false,
             loss_recovery: false,
+            text_focus: false,
         }
     }
 

@@ -166,6 +166,8 @@ pub async fn run(
                             crate::link::update_host_info(|i| {
                                 i.full_access = full_access;
                                 i.host_version.clone_from(&version);
+                                // A field focused before a reconnect may be long gone.
+                                i.text_field = None;
                                 if note.is_some() {
                                     i.update_note = note;
                                 }
@@ -406,6 +408,9 @@ pub async fn run(
                                     i.warning = warning;
                                 }
                             });
+                        }
+                        Ok(ControlMessage::TextFocus { field, secure }) => {
+                            crate::link::update_host_info(|i| i.text_field = field.map(|f| (f, secure)));
                         }
                         Ok(ControlMessage::Shareables { items, current }) => {
                             crate::link::update_host_info(|i| {

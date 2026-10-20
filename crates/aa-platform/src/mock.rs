@@ -372,6 +372,7 @@ fn mock_capabilities(res: Resolution, fps: u16) -> Capabilities {
         can_emulate_gamepad: true,
         fixed_fps: false,
         loss_recovery: false,
+        text_focus: false,
     }
 }
 

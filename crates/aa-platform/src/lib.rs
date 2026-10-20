@@ -306,6 +306,23 @@ pub fn cursor_captured() -> bool {
     }
 }
 
+/// The text field here that has the keyboard focus, if any: where it is
+/// (fractions of the main display: x, y, width, height) and whether it is
+/// a password field. The phone opens its keyboard and zooms to it (owner,
+/// 0.6.0: clicking into a field left nothing to type with). Mac only for
+/// now; may take up to ~100 ms when an app is busy, so call it off the
+/// network loop.
+pub fn focused_text_field() -> Option<([f32; 4], bool)> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::textfocus::focused_text_field()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Black out this computer's own monitor while the viewer still sees it
 /// (the viewer's "screen mask" switch). Returns false where it isn't
 /// available yet (a Mac host).

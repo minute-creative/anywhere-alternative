@@ -158,6 +158,7 @@ pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
             can_emulate_gamepad,
             fixed_fps: false,
             loss_recovery: false,
+            text_focus: false,
         },
     })
 }
@@ -339,6 +340,7 @@ pub fn viewer_backends() -> Result<ViewerBackends> {
             can_emulate_gamepad: false,
             fixed_fps: false,
             loss_recovery: false,
+            text_focus: false,
         },
     })
 }
