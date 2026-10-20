@@ -243,7 +243,9 @@ pub unsafe extern "C" fn aa_mobile_connect(
         ..ConnectPrefs::default()
     };
     let (cmd_tx, mut cmd_rx) = link::command_channel();
-    let frames = FrameSlot::new(|| {});
+    // Two waiting at most: smooth on a phone that draws once per refresh,
+    // at most one frame (~17 ms at 60 fps) of extra delay. See `queued`.
+    let frames = FrameSlot::queued(2, || {});
     let (stats_tx, stats_rx) = std::sync::mpsc::channel();
     let state = Arc::new(Mutex::new(State {
         phase: "connecting",

@@ -69,31 +69,53 @@ pub struct LiveStats {
 /// Session → window.
 #[derive(Clone)]
 pub struct FrameSlot {
-    latest: Arc<Mutex<Option<DecodedFrame>>>,
+    frames: Arc<Mutex<std::collections::VecDeque<DecodedFrame>>>,
+    /// Most frames kept waiting; 1 = only the newest (the desktop window).
+    depth: usize,
     /// Called after a frame is stored, to wake the window's event loop.
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl std::fmt::Debug for FrameSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FrameSlot").finish_non_exhaustive()
+        f.debug_struct("FrameSlot").field("depth", &self.depth).finish_non_exhaustive()
     }
 }
 
 impl FrameSlot {
+    /// Only the newest frame is kept: the window draws as soon as one
+    /// arrives, so waiting would only add delay.
     pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        Self { latest: Arc::new(Mutex::new(None)), wake: Arc::new(wake) }
+        Self::queued(1, wake)
     }
 
-    /// Store a frame, replacing any unshown one, and wake the window.
+    /// Frames wait in order, up to `depth`, and each `take` gives the
+    /// oldest: for a screen that draws on its own clock (the phone draws
+    /// once per screen refresh). With only the newest, frames that arrive
+    /// a little unevenly over Wi-Fi meant one refresh had nothing new (a
+    /// repeat) and the next had two (one thrown away): a repeat-then-skip
+    /// felt as stutter at a steady "60 fps" (owner, iPhone 14 Plus,
+    /// 2026-10-20). A short queue shows every frame, one per refresh; the
+    /// cost is up to `depth - 1` frames of delay while it catches up.
+    pub fn queued(depth: usize, wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self { frames: Arc::default(), depth: depth.max(1), wake: Arc::new(wake) }
+    }
+
+    /// Store a frame (dropping the oldest beyond the depth) and wake the window.
     pub fn publish(&self, frame: DecodedFrame) {
-        *self.latest.lock().expect("frame slot poisoned") = Some(frame);
+        {
+            let mut q = self.frames.lock().expect("frame slot poisoned");
+            q.push_back(frame);
+            while q.len() > self.depth {
+                q.pop_front();
+            }
+        }
         (self.wake)();
     }
 
-    /// Take the newest frame, if a new one arrived since the last take.
+    /// The next frame to show, if one is waiting.
     pub fn take(&self) -> Option<DecodedFrame> {
-        self.latest.lock().expect("frame slot poisoned").take()
+        self.frames.lock().expect("frame slot poisoned").pop_front()
     }
 }
 
@@ -258,5 +280,48 @@ pub fn summary() -> Summary {
 pub fn update_summary(f: impl FnOnce(&mut Summary)) {
     if let Ok(mut s) = SUMMARY.lock() {
         f(s.get_or_insert_with(Summary::default));
+    }
+}
+
+#[cfg(test)]
+mod frame_slot_tests {
+    use super::FrameSlot;
+    use aa_core::video::{PixelFormat, Resolution};
+    use aa_platform::{DecodedFrame, FrameBuffer};
+
+    fn frame(id: u32) -> DecodedFrame {
+        DecodedFrame {
+            buffer: FrameBuffer::Cpu(vec![0u8; 4].into()),
+            format: PixelFormat::Bgra8,
+            resolution: Resolution::new(1, 1),
+            frame_id: id,
+        }
+    }
+
+    #[test]
+    fn newest_only_keeps_the_last() {
+        let s = FrameSlot::new(|| {});
+        s.publish(frame(1));
+        s.publish(frame(2));
+        assert_eq!(s.take().map(|f| f.frame_id), Some(2));
+        assert!(s.take().is_none());
+    }
+
+    #[test]
+    fn queued_shows_late_frames_in_order_instead_of_skipping() {
+        let s = FrameSlot::queued(2, || {});
+        // Refresh 1: nothing arrived in time (the old picture stays).
+        assert!(s.take().is_none());
+        // Two arrive together; both are shown, one per refresh.
+        s.publish(frame(1));
+        s.publish(frame(2));
+        assert_eq!(s.take().map(|f| f.frame_id), Some(1));
+        assert_eq!(s.take().map(|f| f.frame_id), Some(2));
+        // A burst beyond the depth drops the oldest, so delay stays bounded.
+        for id in 3..=6 {
+            s.publish(frame(id));
+        }
+        assert_eq!(s.take().map(|f| f.frame_id), Some(5));
+        assert_eq!(s.take().map(|f| f.frame_id), Some(6));
     }
 }
