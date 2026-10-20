@@ -165,7 +165,7 @@ pub async fn run(
                             let note = crate::update_note::once(&version, host_os == "macos");
                             crate::link::update_host_info(|i| {
                                 i.full_access = full_access;
-                                i.host_version = version.clone();
+                                i.host_version.clone_from(&version);
                                 if note.is_some() {
                                     i.update_note = note;
                                 }
