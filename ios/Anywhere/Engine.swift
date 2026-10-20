@@ -92,6 +92,9 @@ struct Prefs: Codable {
     /// Which keyboard opens by itself when a text field on the Mac gets
     /// the focus (owner, 0.6.0: clicking a field left nothing to type with).
     var typingKeyboard: TypingKeyboard = .phone
+    /// Phone mode: the Mac adds a screen of this phone's shape with large
+    /// text while connected and shows that (owner's choice, 2026-10-20).
+    var phoneMode: Bool = true
 
     /// The control map the chosen profile means.
     var activeMap: ControlMap {
@@ -120,6 +123,7 @@ struct Prefs: Codable {
         customMap = (try? c.decodeIfPresent(ControlMap.self, forKey: .customMap)) ?? customMap
         launcherOnConnect = try c.decodeIfPresent(Bool.self, forKey: .launcherOnConnect) ?? launcherOnConnect
         typingKeyboard = (try? c.decodeIfPresent(TypingKeyboard.self, forKey: .typingKeyboard)) ?? typingKeyboard
+        phoneMode = try c.decodeIfPresent(Bool.self, forKey: .phoneMode) ?? phoneMode
     }
 
     static func load() -> Prefs {
@@ -259,8 +263,21 @@ final class Engine: ObservableObject {
         seenAppsVersion = 0
         UserDefaults.standard.set(host, forKey: "last-host")
         let hz = UInt16(UIScreen.main.maximumFramesPerSecond)
+        let size = Self.phoneDisplaySize()
+        if prefs.phoneMode { aa_mobile_set_phone_display(size.0, size.1) } else { aa_mobile_set_phone_display(0, 0) }
         _ = aa_mobile_connect(host, prefs.resolution, prefs.fps, hz, prefs.maxMbps, prefs.muteMac, mock)
         status.state = "connecting"
+    }
+
+    /// The Mac screen Phone mode asks for, in Mac points: 1080 wide
+    /// ("Large": Mac text about the size of iPhone text on a 6.1–6.7"
+    /// phone) and this phone's shape, held sideways.
+    static func phoneDisplaySize() -> (UInt16, UInt16) {
+        let b = UIScreen.main.bounds.size
+        let long = max(b.width, b.height), short = min(b.width, b.height)
+        guard long > 0, short > 0 else { return (1080, 500) }
+        let h = Int((1080 * short / long).rounded()) & ~1
+        return (1080, UInt16(max(400, h)))
     }
 
     func disconnect() {

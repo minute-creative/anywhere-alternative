@@ -62,6 +62,10 @@ int32_t aa_mobile_pair(const char *addr, const char *code, char **err);
 int32_t aa_mobile_connect(const char *host, const char *resolution, uint16_t fps, uint16_t screen_hz,
                           float max_mbps, bool mute_host, bool mock);
 
+/// Phone mode for the next connect: ask the Mac for a screen of this shape
+/// (logical points, width x height). 0, 0 = off (show the normal screen).
+void aa_mobile_set_phone_display(uint16_t width, uint16_t height);
+
 /// End the session (sends Bye) and free everything.
 void aa_mobile_disconnect(void);
 

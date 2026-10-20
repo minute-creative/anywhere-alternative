@@ -43,6 +43,9 @@ struct SettingsView: View {
                 guard Self.screenHz > 60 else { engine.prefs.fps = 60; return }
                 engine.prefs.fps = p.fps == 60 ? 75 : 60
             },
+            Row(title: "Phone mode",
+                help: "On: the Mac adds a screen shaped like this phone, with large text, while you're connected. Its menu bar, Dock and the app in front move there; your Mac's monitor keeps its other windows. Everything goes back when you disconnect. Takes effect on the next connect.",
+                value: p.phoneMode ? "On (Large)" : "Off") { _ in engine.prefs.phoneMode.toggle() },
             Row(title: "Data cap", help: "The most the Mac may send. Wi-Fi at home: 30–50. Away: 8–15.",
                 value: "\(Int(p.maxMbps)) Mbps") { d in
                 let steps: [Float] = [5, 8, 15, 30, 50, 80]

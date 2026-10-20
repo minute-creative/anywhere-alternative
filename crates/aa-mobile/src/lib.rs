@@ -607,6 +607,18 @@ pub unsafe extern "C" fn aa_mobile_gamepad(slot: u8, buttons: u32, lx: i16, ly: 
 // Settings while connected
 // ---------------------------------------------------------------------------
 
+/// Phone mode for the next connect (0, 0 = off). See `Capabilities::phone_display`.
+#[no_mangle]
+pub extern "C" fn aa_mobile_set_phone_display(width: u16, height: u16) {
+    let v = (width > 0 && height > 0).then_some([width, height]);
+    #[cfg(target_os = "ios")]
+    if let Ok(mut g) = aa_platform::ios::PHONE_DISPLAY.lock() {
+        *g = v;
+    }
+    #[cfg(not(target_os = "ios"))]
+    let _ = v;
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn aa_mobile_set_max_mbps(mbps: f32) {
     let kbps = (mbps.max(0.0) * 1000.0) as u32;
