@@ -38,6 +38,16 @@ jobs:
         run: |
           v="${{ github.event.inputs.version }}"
           [ -z "$v" ] && v="${GITHUB_REF_NAME#v}"
+          # The typed version must match the code's version in Cargo.toml.
+          # 2026-10-20: "0.5.6" was typed for the 0.6.0 code; the run
+          # succeeded, named the 0.6.0 build "0.5.6" and replaced the old
+          # 0.5.6 downloads, and no 0.6.0 release appeared. Stop instead.
+          code=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          v="${v#v}"; v="${v// /}"
+          if [ "$v" != "$code" ]; then
+            echo "::error::You typed version $v but the code is version $code. Run the Release again and type $code."
+            exit 1
+          fi
           echo "VERSION=$v" >> "$GITHUB_ENV"
 
       - name: Mac disk image
@@ -99,6 +109,7 @@ jobs:
         run: |
           v="${{ github.event.inputs.version }}"
           [ -z "$v" ] && v="${GITHUB_REF_NAME#v}"
+          v="${v#v}"; v="${v// /}"  # same clean-up as the build's version check
           tag="v$v"
           notes="Download **Anywhere-$v-mac.dmg** for a Mac (Apple Silicon) or **Anywhere-$v-windows-setup.exe** for Windows. See the README for first-run steps. **Anywhere-$v-browser-addon.zip** is the Anywhere Camera add-on for uploading to the Chrome Web Store and Edge Add-ons (the apps already include it)."
           if gh release view "$tag" -R "${{ github.repository }}" >/dev/null 2>&1; then
