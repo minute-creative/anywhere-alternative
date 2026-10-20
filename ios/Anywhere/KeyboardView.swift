@@ -24,17 +24,20 @@ struct KeyboardView: View {
         let press: () -> Void
     }
 
+    /// How much of the screen the keyboard takes; the picture shrinks
+    /// to the space above it.
+    static let height: CGFloat = 212
+
     private var letters: [[String]] {
         if symbols {
             return [
                 ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
                 ["!", "@", "#", "$", "%", "^", "&", "*", "(", ")"],
-                ["-", "_", "=", "+", "[", "]", "{", "}", "\\", "|"],
-                [";", ":", "'", "\"", ",", ".", "/", "?", "<", ">"],
+                ["-", "_", "=", "+", "[", "]", ";", ":", "'", "\""],
+                ["{", "}", "\\", "|", ",", ".", "/", "?", "<", ">"],
             ]
         }
         return [
-            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
             ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
             ["a", "s", "d", "f", "g", "h", "j", "k", "l", "`"],
             ["z", "x", "c", "v", "b", "n", "m", ",", ".", "~"],
@@ -45,64 +48,64 @@ struct KeyboardView: View {
         var out: [[Key]] = letters.map { line in
             line.map { ch in
                 let shown = shift ? ch.uppercased() : ch
-                return Key(id: ch, label: shown, width: 58) { typeChar(shown) }
+                return Key(id: ch, label: shown, width: 52) { typeChar(shown) }
             }
         }
         out.append([
-            Key(id: "sym", label: symbols ? "abc" : "#+=", width: 80) { symbols.toggle() },
-            Key(id: "shift", label: "⇧", width: 58) { shift.toggle() },
-            Key(id: "space", label: "space", width: 240) { engine.tap(HID.space) },
-            Key(id: "bs", label: "⌫", width: 70) { engine.tap(HID.backspace) },
-            Key(id: "ret", label: "return", width: 96) { engine.tap(HID.enter) },
-        ])
-        out.append([
-            Key(id: "esc", label: "esc", width: 70) { engine.tap(HID.escape) },
-            Key(id: "tab", label: "tab", width: 70) { engine.tap(HID.tab) },
-            Key(id: "cmd-tab", label: "⌘ tab", width: 90) { engine.tap(HID.tab, modifiers: [HID.leftGui]) },
-            Key(id: "cmd-space", label: "⌘ space", width: 110) { engine.tap(HID.space, modifiers: [HID.leftGui]) },
-            Key(id: "cmd-q", label: "⌘ Q", width: 70) { engine.tap(HID.letter("q")!, modifiers: [HID.leftGui]) },
-            Key(id: "left", label: "←", width: 50) { engine.tap(HID.left) },
-            Key(id: "right", label: "→", width: 50) { engine.tap(HID.right) },
-            Key(id: "phone", label: "Phone keyboard", width: 150) { phoneKeyboard = true },
+            Key(id: "sym", label: symbols ? "abc" : "123", width: 64) { symbols.toggle() },
+            Key(id: "shift", label: "⇧", width: 48) { shift.toggle() },
+            Key(id: "space", label: "space", width: 176) { engine.tap(HID.space) },
+            Key(id: "bs", label: "⌫", width: 56) { engine.tap(HID.backspace) },
+            Key(id: "ret", label: "return", width: 76) { engine.tap(HID.enter) },
+            Key(id: "esc", label: "esc", width: 52) { engine.tap(HID.escape) },
+            Key(id: "tab", label: "tab", width: 52) { engine.tap(HID.tab) },
+            Key(id: "cmd-tab", label: "⌘⇥", width: 52) { engine.tap(HID.tab, modifiers: [HID.leftGui]) },
+            Key(id: "left", label: "←", width: 40) { engine.tap(HID.left) },
+            Key(id: "right", label: "→", width: 40) { engine.tap(HID.right) },
+            Key(id: "phone", label: "iOS ⌨", width: 60) { phoneKeyboard = true },
         ])
         return out
     }
 
     var body: some View {
-        ZStack {
-            Color.clear.contentShape(Rectangle()).onTapGesture { overlay = .none }
-            VStack {
-                Spacer()
-                VStack(spacing: 8) {
-                    ForEach(Array(rows.enumerated()), id: \.offset) { ri, line in
-                        HStack(spacing: 8) {
-                            ForEach(Array(line.enumerated()), id: \.element.id) { ci, k in
-                                FocusTile(focused: ri == row && ci == col, width: k.width, height: 44) {
-                                    Text(k.label).font(.system(size: 18, weight: .medium, design: .rounded))
-                                        .foregroundStyle((k.id == "shift" && shift) || (k.id == "sym" && symbols) ? Theme.accent : Theme.text)
-                                }
-                                .onTapGesture { row = ri; col = ci; k.press() }
+        VStack(spacing: 0) {
+            Spacer()
+            VStack(spacing: 6) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { ri, line in
+                    HStack(spacing: 6) {
+                        ForEach(Array(line.enumerated()), id: \.element.id) { ci, k in
+                            FocusTile(focused: ri == row && ci == col, width: k.width, height: 34) {
+                                Text(k.label).font(.system(size: 16, weight: .medium, design: .rounded))
+                                    .foregroundStyle((k.id == "shift" && shift) || (k.id == "sym" && symbols) ? Theme.accent : Theme.text)
                             }
+                            .onTapGesture { row = ri; col = ci; k.press() }
                         }
                     }
-                    HStack {
-                        HintBar(hints: [("A", "Type"), ("B", "Delete"), ("X", "Space"), ("Y", "Shift"), ("≡", "Return"), ("⧉", "Close")])
-                        Spacer()
-                        // Hidden field for the phone's own keyboard.
-                        TextField("", text: $typed)
-                            .focused($phoneKeyboard)
-                            .frame(width: 1, height: 1).opacity(0.02)
-                            .onChange(of: typed) { old, new in forward(old, new) }
-                            .onSubmit { engine.tap(HID.enter); phoneKeyboard = true }
-                    }
-                    .padding(.top, 4)
                 }
-                .padding(16)
-                .background(Color(red: 0.08, green: 0.09, blue: 0.13).opacity(0.94))
-                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                .padding(.bottom, 10)
+                HStack(spacing: 16) {
+                    ButtonHint(glyph: "A", text: "Type")
+                    ButtonHint(glyph: "B", text: "Delete")
+                    ButtonHint(glyph: "X", text: "Space")
+                    ButtonHint(glyph: "Y", text: "Shift")
+                    ButtonHint(glyph: "⧉", text: "Return")
+                    ButtonHint(glyph: "≡", text: "Menu")
+                    ButtonHint(glyph: "L1", text: "123")
+                    Spacer()
+                    // Hidden field for the phone's own keyboard.
+                    TextField("", text: $typed)
+                        .focused($phoneKeyboard)
+                        .frame(width: 1, height: 1).opacity(0.02)
+                        .onChange(of: typed) { old, new in forward(old, new) }
+                        .onSubmit { engine.tap(HID.enter); phoneKeyboard = true }
+                }
+                .padding(.top, 2)
             }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .frame(height: Self.height)
+            .background(Color(red: 0.08, green: 0.09, blue: 0.13))
         }
+        .ignoresSafeArea()
         .onAppear { token = pad.push(handle) }
         .onDisappear { pad.pop(token) }
     }
@@ -136,10 +139,10 @@ struct KeyboardView: View {
         case .back: engine.tap(HID.backspace)
         case .x: engine.tap(HID.space)
         case .y: shift.toggle()
-        case .menu: engine.tap(HID.enter)
+        case .options: engine.tap(HID.enter)
         case .l1: symbols.toggle()
         case .r1: engine.tap(HID.tab)
-        case .options, .home: overlay = .none
+        case .menu, .home: overlay = .quickMenu
         default: break
         }
     }

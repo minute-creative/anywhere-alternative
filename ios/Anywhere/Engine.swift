@@ -49,6 +49,7 @@ struct Status: Codable {
     var apps_pending: Bool = false
     var host_version: String = ""
     var has_launcher: Bool = false
+    var cursor_captured: Bool = false
 
     var connected: Bool { state == "connected" }
     var live: Bool { state == "connecting" || state == "connected" || state == "reconnecting" }

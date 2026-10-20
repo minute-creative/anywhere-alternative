@@ -36,7 +36,7 @@ struct ControlsSheet: View {
             .background(Color(red: 0.08, green: 0.09, blue: 0.13).opacity(0.96))
             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         }
-        .onAppear { token = pad.push { _ in overlay = .none } }
+        .onAppear { token = pad.push { ev in overlay = ev == .menu ? .quickMenu : .none } }
         .onDisappear { pad.pop(token) }
     }
 

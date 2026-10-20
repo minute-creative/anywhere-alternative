@@ -13,6 +13,8 @@ final class InputMapper {
     var pointerSpeed: Double = 1.0
     /// Where the pointer is, across the Mac's picture (0…1).
     private(set) var pointer = CGPoint(x: 0.5, y: 0.5)
+    /// When the pointer last moved (the drawn pointer fades when idle).
+    private(set) var pointerMovedAt: TimeInterval = 0
     private var fast = true
     private var scrollAcc = CGPoint.zero
     private var heldKeys = Set<UInt16>()
@@ -43,6 +45,7 @@ final class InputMapper {
     /// The pointer was moved by touch: keep the stick in step.
     func setPointer(_ p: CGPoint) {
         pointer = CGPoint(x: min(1, max(0, p.x)), y: min(1, max(0, p.y)))
+        pointerMovedAt = Date().timeIntervalSinceReferenceDate
     }
 
     func tick(_ s: PadState, _ p: PadState, dt: Double, events: ((NavEvent) -> Void)?) {
@@ -51,8 +54,11 @@ final class InputMapper {
             controllerTick(s, p, e)
             return
         }
-        stick(map[.leftStick], s.lx, s.ly, dt, e)
-        stick(map[.rightStick], s.rx, s.ry, dt, e)
+        // A game on the Mac took the mouse: a pointer stick becomes mouse
+        // look, like the desktop viewer's game mouse.
+        let captured = e.status.cursor_captured
+        stick(captured && map[.leftStick] == .pointer ? .look : map[.leftStick], s.lx, s.ly, dt, e)
+        stick(captured && map[.rightStick] == .pointer ? .look : map[.rightStick], s.rx, s.ry, dt, e)
         let buttons: [(PadControl, Bool, Bool)] = [
             (.a, s.a, p.a), (.b, s.b, p.b), (.x, s.x, p.x), (.y, s.y, p.y),
             (.l1, s.l1, p.l1), (.r1, s.r1, p.r1), (.l2, s.l2, p.l2), (.r2, s.r2, p.r2),
@@ -83,6 +89,7 @@ final class InputMapper {
                 let speed = (fast ? 0.62 : 0.25) * pointerSpeed * dt
                 pointer.x = min(1, max(0, pointer.x + CGFloat(dx) * speed))
                 pointer.y = min(1, max(0, pointer.y - CGFloat(dy) * speed))
+                pointerMovedAt = Date().timeIntervalSinceReferenceDate
                 e.mouseAbs(x: pointer.x, y: pointer.y)
             }
         case .look:

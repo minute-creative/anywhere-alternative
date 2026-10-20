@@ -367,6 +367,7 @@ pub unsafe extern "C" fn aa_mobile_disconnect() {
 }
 
 #[derive(Serialize)]
+#[allow(clippy::struct_excessive_bools)] // it is a status report; these are flags
 struct StatusJson {
     state: &'static str,
     reason: String,
@@ -390,6 +391,9 @@ struct StatusJson {
     host_version: String,
     /// The host can answer the launcher (0.6 or newer).
     has_launcher: bool,
+    /// A game on the host has taken the mouse pointer: send movement, not
+    /// positions, and draw no pointer.
+    cursor_captured: bool,
 }
 
 /// Does a host version string mean "0.6 or newer"? Unknown (empty) means no.
@@ -422,6 +426,7 @@ pub unsafe extern "C" fn aa_mobile_status() -> *mut c_char {
             apps_pending: false,
             host_version: String::new(),
             has_launcher: false,
+            cursor_captured: false,
         });
     };
     // Newest stats line, if the session produced one since last time.
@@ -458,6 +463,7 @@ pub unsafe extern "C" fn aa_mobile_status() -> *mut c_char {
         apps_pending: info.apps_pages.0 == 0 || info.apps_pages.1.len() < usize::from(info.apps_pages.0),
         has_launcher: launcher_capable(&info.host_version),
         host_version: info.host_version,
+        cursor_captured: link::HOST_CURSOR_CAPTURED.load(std::sync::atomic::Ordering::Relaxed),
     })
 }
 

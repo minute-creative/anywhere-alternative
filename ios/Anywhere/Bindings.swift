@@ -137,7 +137,7 @@ struct ControlMap: Codable, Equatable {
         .l1: .key(HID.leftGui), .r1: .key(HID.leftShift), .l2: .mouse(1), .r2: .mouse(0),
         .l3: .speedToggle, .r3: .mouse(2), .l4: .launcher, .r4: .keyboard,
         .up: .key(HID.up), .down: .key(HID.down), .left: .key(HID.left), .right: .key(HID.right),
-        .menu: .key(HID.enter), .options: .key(HID.escape),
+        .menu: .quickMenu, .options: .key(HID.enter),
     ])
 
     /// Keyboard-and-mouse games: W A S D, mouse look, FPS buttons.
@@ -147,6 +147,6 @@ struct ControlMap: Codable, Equatable {
         .l1: .key(HID.leftShift), .r1: .key(HID.letter("q")!), .l2: .mouse(1), .r2: .mouse(0),
         .l3: .key(HID.leftShift), .r3: .key(HID.letter("f")!), .l4: .quickMenu, .r4: .keyboard,
         .up: .key(HID.one), .down: .key(HID.three), .left: .key(HID.four), .right: .key(HID.two),
-        .menu: .key(HID.escape), .options: .key(HID.tab),
+        .menu: .quickMenu, .options: .key(HID.escape),
     ])
 }

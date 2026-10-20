@@ -128,7 +128,7 @@ struct QuickMenu: View {
         case .left: focus = max(0, focus - 1)
         case .right: focus = min(items.count - 1, focus + 1)
         case .confirm: items[focus].action()
-        case .back, .home: overlay = .none
+        case .back, .home, .menu: overlay = .none
         default: break
         }
     }

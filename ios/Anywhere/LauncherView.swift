@@ -256,7 +256,7 @@ struct LauncherView: View {
         case .x:
             if let f = focused, f.running, !isDesktop { engine.quit(f); refreshSoon() }
         case .back: overlay = .none
-        case .home: overlay = .quickMenu
+        case .home, .menu: overlay = .quickMenu
         default: break
         }
     }

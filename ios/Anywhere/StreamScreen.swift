@@ -22,6 +22,8 @@ struct StreamScreen: View {
     @State private var overlay: Overlay = .none
     @State private var videoRect = CGRect.zero
     @State private var pointer = CGPoint(x: 0.5, y: 0.5)
+    /// The pointer fades a few seconds after it last moved.
+    @State private var pointerVisible = false
     @State private var audio = AudioOutput()
     @State private var pointerTimer: Timer?
     @State private var endedToken = 0
@@ -31,11 +33,15 @@ struct StreamScreen: View {
         ZStack {
             Color.black.ignoresSafeArea()
             StreamView(fps: Int(engine.prefs.fps)) { r in videoRect = r }
+                .padding(.bottom, overlay == .keyboard ? KeyboardView.height : 0)
                 .ignoresSafeArea()
+                .animation(.easeInOut(duration: 0.2), value: overlay)
 
             if showsPointer, overlay == .none, engine.status.connected, videoRect.width > 0 {
                 PointerView()
                     .position(pointerOnScreen)
+                    .opacity(pointerVisible ? 1 : 0)
+                    .animation(.easeOut(duration: 0.4), value: pointerVisible)
                     .allowsHitTesting(false)
                     .ignoresSafeArea()
             }
@@ -119,7 +125,8 @@ struct StreamScreen: View {
     /// The pointer is drawn when a stick moves it (not in mouse-look games).
     private var showsPointer: Bool {
         let m = engine.prefs.activeMap
-        return engine.prefs.profile != .controller && (m[.leftStick] == .pointer || m[.rightStick] == .pointer)
+        return engine.prefs.profile != .controller && !engine.status.cursor_captured
+            && (m[.leftStick] == .pointer || m[.rightStick] == .pointer)
     }
 
     @ViewBuilder private var notice: some View {
@@ -172,6 +179,9 @@ struct StreamScreen: View {
             Task { @MainActor in
                 let p = pad.mapper.pointer
                 if p != pointer { pointer = p }
+                let idle = Date().timeIntervalSinceReferenceDate - pad.mapper.pointerMovedAt
+                let visible = idle < 2.5
+                if visible != pointerVisible { pointerVisible = visible }
             }
         }
     }
@@ -210,11 +220,9 @@ struct StreamScreen: View {
 /// The pointer, drawn by the phone (the Mac's own is hidden in the stream).
 struct PointerView: View {
     var body: some View {
-        ZStack {
-            Image(systemName: "cursorarrow").font(.system(size: 26, weight: .bold))
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.9), radius: 1.5)
-        }
-        .offset(x: 9, y: 11)
+        Image(systemName: "cursorarrow").font(.system(size: 20, weight: .bold))
+            .foregroundStyle(.white)
+            .shadow(color: .black.opacity(0.9), radius: 1.5)
+            .offset(x: 7, y: 9)
     }
 }
