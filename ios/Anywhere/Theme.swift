@@ -46,10 +46,14 @@ struct ButtonHint: View {
 
     var body: some View {
         HStack(spacing: 6) {
+            // A circle for one-character buttons, a pill for longer ones:
+            // a fixed 24 pt circle turned "L1 R1", "◀ ▶" and "Home" into "…".
             Text(glyph)
                 .font(.system(size: 13, weight: .bold, design: .rounded))
-                .frame(width: 24, height: 24)
-                .background(Circle().fill(Color.white.opacity(0.18)))
+                .lineLimit(1).fixedSize()
+                .padding(.horizontal, glyph.count > 1 ? 7 : 0)
+                .frame(minWidth: 24, minHeight: 24)
+                .background(Capsule().fill(Color.white.opacity(0.18)))
             Text(text).font(.system(size: 14, weight: .medium)).foregroundStyle(Theme.muted)
         }
     }

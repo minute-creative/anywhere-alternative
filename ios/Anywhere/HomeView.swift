@@ -20,6 +20,11 @@ struct HomeView: View {
     /// Cards: every paired computer, then "Add", then "Settings".
     private var count: Int { hosts.count + 2 }
 
+    /// Card height for the space there is: 200 pt where it fits, smaller
+    /// on a shorter phone (titles, hints and gaps take ~190 pt).
+    @State private var cardH: CGFloat = 200
+    private var k: CGFloat { cardH / 200 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
@@ -41,7 +46,7 @@ struct HomeView: View {
                             hostCard(h, focused: focus == i).id(i)
                                 .onTapGesture { focus = i; connect(h) }
                         }
-                        FocusTile(focused: focus == hosts.count, width: 220, height: 200) {
+                        FocusTile(focused: focus == hosts.count, width: 220 * k, height: cardH) {
                             VStack(spacing: 12) {
                                 Image(systemName: "plus.circle.fill").font(.system(size: 44)).foregroundStyle(Theme.accent)
                                 Text("Add a computer").font(.system(size: 18, weight: .semibold, design: .rounded))
@@ -50,7 +55,7 @@ struct HomeView: View {
                         }
                         .id(hosts.count)
                         .onTapGesture { router.screen = .pair }
-                        FocusTile(focused: focus == hosts.count + 1, width: 220, height: 200) {
+                        FocusTile(focused: focus == hosts.count + 1, width: 220 * k, height: cardH) {
                             VStack(spacing: 12) {
                                 Image(systemName: "gearshape.fill").font(.system(size: 44)).foregroundStyle(Theme.muted)
                                 Text("Settings").font(.system(size: 18, weight: .semibold, design: .rounded))
@@ -61,7 +66,7 @@ struct HomeView: View {
                         .onTapGesture { router.screen = .settings }
                     }
                     .padding(.horizontal, 36)
-                    .padding(.vertical, 28)
+                    .padding(.vertical, 20)
                 }
                 .onChange(of: focus) { _, f in withAnimation { proxy.scrollTo(f, anchor: .center) } }
             }
@@ -74,6 +79,11 @@ struct HomeView: View {
             }
             .padding(.horizontal, 36).padding(.bottom, 18)
         }
+        .background(GeometryReader { g in
+            Color.clear
+                .onAppear { cardH = max(120, min(200, g.size.height - 190)) }
+                .onChange(of: g.size.height) { _, h in cardH = max(120, min(200, h - 190)) }
+        })
         .onAppear {
             pad.mode = .ui
             hosts = engine.paired()
@@ -102,7 +112,7 @@ struct HomeView: View {
 
     private func hostCard(_ h: PairedHost, focused: Bool) -> some View {
         let found = online[h.key]
-        return FocusTile(focused: focused, width: 300, height: 200) {
+        return FocusTile(focused: focused, width: 300 * k, height: cardH) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Image(systemName: "desktopcomputer").font(.system(size: 36)).foregroundStyle(Theme.accent)

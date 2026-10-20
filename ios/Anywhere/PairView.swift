@@ -36,6 +36,7 @@ struct PairView: View {
                 Text("Add a computer").font(.system(size: 30, weight: .bold, design: .rounded))
                 Text("On the Mac, open Anywhere → Share. It shows a six-digit code.")
                     .font(.system(size: 14)).foregroundStyle(Theme.muted)
+                ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 10) {
                         ForEach(Array(found.enumerated()), id: \.element.id) { i, f in
@@ -50,6 +51,7 @@ struct PairView: View {
                                 }
                                 .padding(.horizontal, 16)
                             }
+                            .id(i)
                             .onTapGesture { focus = i; choose(f) }
                         }
                         FocusTile(focused: chosen == nil && focus == found.count, height: 64) {
@@ -67,42 +69,48 @@ struct PairView: View {
                             }
                             .padding(.horizontal, 16)
                         }
+                        .id(found.count)
                         .onTapGesture { focus = found.count; typing = true }
                         if found.isEmpty {
                             Text(searchedTimes < 3 ? "Looking on this Wi-Fi…" : "Nothing found yet. Is the Mac sharing (Anywhere → Share on)? Same Wi-Fi? If iOS asked about the local network and you said no: Settings → Anywhere → Local Network. From elsewhere, type the Mac's Tailscale address.")
                                 .font(.system(size: 13)).foregroundStyle(Theme.muted).padding(.top, 6)
                         }
                     }
+                    .padding(.horizontal, 6).padding(.vertical, 8)
                 }
-                Spacer()
+                // The d-pad's focus stays in view when many computers are listed.
+                .onChange(of: focus) { _, f in withAnimation { proxy.scrollTo(f, anchor: .center) } }
+                }
+                Spacer(minLength: 4)
                 HintBar(hints: padActive ? [("A", "Type"), ("B", "Delete / back")] : [("A", "Choose"), ("B", "Back")])
             }
-            .padding(32)
+            .padding(.horizontal, 28).padding(.vertical, 18)
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            // Right: the code.
-            VStack(spacing: 18) {
+            // Right: the code. Sized to fit ~400 pt (a phone held sideways);
+            // 0.6.0 needed ~420 and the bottom row (0, ✓) fell off screen.
+            VStack(spacing: 12) {
                 Text(addressMode ? "Address" : (chosen.map { "Code for \($0.name)" } ?? "Choose a computer first"))
                     .font(.system(size: 18, weight: .semibold)).foregroundStyle(padActive ? Theme.text : Theme.muted)
                 if addressMode {
                     Text(manual.isEmpty ? "100.x.y.z" : manual)
                         .font(.system(size: 24, weight: .bold, design: .monospaced))
                         .foregroundStyle(manual.isEmpty ? Theme.muted : Theme.text)
-                        .frame(height: 58)
+                        .frame(height: 48)
                 } else {
                 HStack(spacing: 10) {
                     ForEach(0..<6, id: \.self) { i in
                         let ch = i < code.count ? String(code[code.index(code.startIndex, offsetBy: i)]) : ""
-                        Text(ch).font(.system(size: 30, weight: .bold, design: .monospaced))
-                            .frame(width: 44, height: 58)
+                        Text(ch).font(.system(size: 28, weight: .bold, design: .monospaced))
+                            .frame(width: 42, height: 48)
                             .background(RoundedRectangle(cornerRadius: 12).fill(Theme.glass))
                             .overlay(RoundedRectangle(cornerRadius: 12).stroke(i == code.count ? Theme.accent : .clear, lineWidth: 2))
                     }
                 }
                 }
-                LazyVGrid(columns: Array(repeating: GridItem(.fixed(72), spacing: 10), count: 3), spacing: 10) {
+                LazyVGrid(columns: Array(repeating: GridItem(.fixed(72), spacing: 10), count: 3), spacing: 8) {
                     ForEach(Array(keys.enumerated()), id: \.offset) { i, k in
-                        FocusTile(focused: padActive && padFocus == i, width: 72, height: 54) {
+                        FocusTile(focused: padActive && padFocus == i, width: 72, height: 44) {
                             Text(k).font(.system(size: 22, weight: .semibold, design: .rounded))
                                 .foregroundStyle(k == "✓" ? Theme.good : Theme.text)
                         }
@@ -115,8 +123,8 @@ struct PairView: View {
                     Text(error).font(.system(size: 13)).foregroundStyle(Theme.warn).multilineTextAlignment(.center)
                 }
             }
-            .padding(32)
-            .frame(width: 360)
+            .padding(.horizontal, 24).padding(.vertical, 16)
+            .frame(width: 340)
             .background(Color.black.opacity(0.25))
         }
         .onAppear {

@@ -11,6 +11,9 @@ struct SettingsView: View {
     @State private var focus = 0
     @State private var token = 0
     @State private var showLog = false
+    /// The log line at the bottom of the view (L1 / R1 page it).
+    @State private var logAt = 0
+    private var logLines: [String] { Array(engine.log.suffix(120)) }
 
     /// How often this phone's screen refreshes (60, or 120 with ProMotion).
     static var screenHz: Int { UIScreen.main.maximumFramesPerSecond }
@@ -106,24 +109,29 @@ struct SettingsView: View {
                         withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(f, anchor: .center) }
                     }
                 }
-                HintBar(hints: [("A", "Change"), ("◀ ▶", "Adjust"), ("B", "Back")])
+                HintBar(hints: showLog ? [("A", "Close log"), ("L1 R1", "Scroll log"), ("B", "Close")]
+                                       : [("A", "Change"), ("◀ ▶", "Adjust"), ("B", "Back")])
             }
             .padding(.horizontal, 18).padding(.top, 20).padding(.bottom, 12)
 
             VStack(alignment: .leading, spacing: 10) {
                 if showLog {
                     Text("Log").font(.system(size: 18, weight: .semibold))
-                    // Opens on the newest lines (the ones that matter).
+                    // Opens on the newest lines (the ones that matter). L1 / R1
+                    // page through it, so it reads without touch too.
                     ScrollViewReader { proxy in
                         ScrollView {
-                            Text(engine.log.suffix(120).joined(separator: "\n"))
-                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(Theme.muted)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                            Color.clear.frame(height: 1).id("end")
+                            LazyVStack(alignment: .leading, spacing: 1) {
+                                ForEach(Array(logLines.enumerated()), id: \.offset) { i, line in
+                                    Text(line).font(.system(size: 10, design: .monospaced)).foregroundStyle(Theme.muted)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .id(i)
+                                }
+                            }
+                            .textSelection(.enabled)
                         }
-                        .onAppear { proxy.scrollTo("end", anchor: .bottom) }
-                        .onChange(of: engine.log.count) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
+                        .onAppear { logAt = max(0, logLines.count - 1); proxy.scrollTo(logAt, anchor: .bottom) }
+                        .onChange(of: logAt) { _, at in withAnimation { proxy.scrollTo(at, anchor: .bottom) } }
                     }
                     Text("The full file is viewer.log in the app's Documents folder (Files app → Anywhere).")
                         .font(.system(size: 12)).foregroundStyle(Theme.muted)
@@ -154,6 +162,9 @@ struct SettingsView: View {
         case .confirm: rows[focus].change(0)
         case .right: rows[focus].change(1)
         case .left: rows[focus].change(-1)
+        case .l1 where showLog: logAt = max(min(20, logLines.count - 1), logAt - 20)
+        case .r1 where showLog: logAt = min(logLines.count - 1, logAt + 20)
+        case .back where showLog: showLog = false
         case .back, .home: router.screen = .home
         default: break
         }
