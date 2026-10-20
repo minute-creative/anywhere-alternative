@@ -334,6 +334,22 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                         told = (status, dest, Instant::now());
                     }
                 }
+                // The launcher list is ready: send its pages, then gather icons.
+                while let Ok(apps) = stream.apps_rx.try_recv() {
+                    let Some(d) = dest else { continue };
+                    let pages = aa_core::apps::pages(&apps);
+                    let total = u16::try_from(pages.len()).unwrap_or(u16::MAX);
+                    for (i, items) in pages.into_iter().enumerate() {
+                        let page = u16::try_from(i).unwrap_or(u16::MAX);
+                        let _ = send_control(&socket, d, &ControlMessage::Apps { page, pages: total, items }, &seq).await;
+                    }
+                    tracing::info!(apps = apps.len(), "sent the launcher list");
+                    let ids: Vec<String> = apps.into_iter().map(|a| a.id).collect();
+                    let tx = stream.icons_tx.clone();
+                    let _ = std::thread::Builder::new().name("aa-icons".into()).spawn(move || {
+                        let _ = tx.send(aa_platform::apps::icons(&ids));
+                    });
+                }
                 // Launcher icons ready: one named blob through the reliable transfer.
                 while let Ok(pack) = stream.icons_rx.try_recv() {
                     if dest.is_some() {
@@ -817,18 +833,12 @@ async fn handle_packet(
                 // their icons once the list is out. Listing reads folders
                 // and runs small tools, so never on the network loop.
                 ControlMessage::AppList if is_current_viewer => {
-                    let apps = tokio::task::spawn_blocking(aa_platform::apps::list).await.unwrap_or_default();
-                    let pages = aa_core::apps::pages(&apps);
-                    let total = u16::try_from(pages.len()).unwrap_or(u16::MAX);
-                    for (i, items) in pages.into_iter().enumerate() {
-                        let page = u16::try_from(i).unwrap_or(u16::MAX);
-                        send_control(socket, from, &ControlMessage::Apps { page, pages: total, items }, seq).await?;
-                    }
-                    tracing::info!(apps = apps.len(), "sent the launcher list");
-                    let ids: Vec<String> = apps.into_iter().map(|a| a.id).collect();
-                    let tx = stream.icons_tx.clone();
-                    let _ = std::thread::Builder::new().name("aa-icons".into()).spawn(move || {
-                        let _ = tx.send(aa_platform::apps::icons(&ids));
+                    // Listing reads a hundred Info.plists (a second or two):
+                    // on its own thread; the pages go out from the 100 ms
+                    // tick once the list is in (never stalling the video).
+                    let tx = stream.apps_tx.clone();
+                    let _ = std::thread::Builder::new().name("aa-apps".into()).spawn(move || {
+                        let _ = tx.send(aa_platform::apps::list());
                     });
                 }
                 ControlMessage::AppAction { id, action } if is_current_viewer => {
@@ -1144,11 +1154,15 @@ struct Stream {
     /// hands them to the clipboard transfer (`icons_rx`).
     icons_tx: std::sync::mpsc::Sender<aa_core::apps::IconPack>,
     icons_rx: std::sync::mpsc::Receiver<aa_core::apps::IconPack>,
+    /// The launcher list, gathered on another thread the same way.
+    apps_tx: std::sync::mpsc::Sender<Vec<aa_core::apps::AppEntry>>,
+    apps_rx: std::sync::mpsc::Receiver<Vec<aa_core::apps::AppEntry>>,
 }
 
 impl Stream {
     fn new(fps: u16) -> Self {
         let (icons_tx, icons_rx) = std::sync::mpsc::channel();
+        let (apps_tx, apps_rx) = std::sync::mpsc::channel();
         let watched = Arc::new(std::sync::Mutex::new(ShareTarget::Screen));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
@@ -1165,6 +1179,8 @@ impl Stream {
             closed,
             icons_tx,
             icons_rx,
+            apps_tx,
+            apps_rx,
             now: ShareTarget::Screen,
             local: ShareTarget::Screen,
             viewer_choice: None,

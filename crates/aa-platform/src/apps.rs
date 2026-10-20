@@ -228,6 +228,7 @@ mod mac {
         ]
     }
 
+    #[derive(Clone)]
     struct Bundle {
         path: PathBuf,
         id: String,
@@ -256,7 +257,29 @@ mod mac {
         Some(Bundle { path: path.to_path_buf(), id, name, icon_file })
     }
 
+    /// Reading every app's Info.plist takes a second or two; the result is
+    /// kept for a minute (apps are not installed that often), so the icon
+    /// lookup and "open" don't scan the folders again for every app.
     fn bundles() -> Vec<(Bundle, AppKind)> {
+        use std::sync::{Mutex, OnceLock};
+        use std::time::{Duration, Instant};
+        static CACHE: OnceLock<Mutex<Option<(Instant, Vec<(Bundle, AppKind)>)>>> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| Mutex::new(None));
+        if let Ok(c) = cache.lock() {
+            if let Some((at, list)) = c.as_ref() {
+                if at.elapsed() < Duration::from_secs(60) {
+                    return list.clone();
+                }
+            }
+        }
+        let fresh = scan_bundles();
+        if let Ok(mut c) = cache.lock() {
+            *c = Some((Instant::now(), fresh.clone()));
+        }
+        fresh
+    }
+
+    fn scan_bundles() -> Vec<(Bundle, AppKind)> {
         let mut out = Vec::new();
         for (folder, kind) in app_folders() {
             let Ok(entries) = std::fs::read_dir(&folder) else { continue };

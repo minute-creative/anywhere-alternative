@@ -45,7 +45,7 @@ struct KeyboardView: View {
         var out: [[Key]] = letters.map { line in
             line.map { ch in
                 let shown = shift ? ch.uppercased() : ch
-                return Key(id: ch, label: shown, width: 58) { type(shown) }
+                return Key(id: ch, label: shown, width: 58) { typeChar(shown) }
             }
         }
         out.append([
@@ -107,7 +107,7 @@ struct KeyboardView: View {
         .onDisappear { pad.pop(token) }
     }
 
-    private func type(_ s: String) {
+    private func typeChar(_ s: String) {
         guard let ch = s.first, let u = HID.usage(for: ch) else { return }
         engine.tap(u.0, modifiers: u.1 ? [HID.leftShift] : [])
         if shift && !symbols { shift = false }
@@ -118,9 +118,9 @@ struct KeyboardView: View {
         if new.count < old.count {
             for _ in 0..<(old.count - new.count) { engine.tap(HID.backspace) }
         } else if new.hasPrefix(old) {
-            for ch in new.dropFirst(old.count) { type(String(ch)) }
+            for ch in new.dropFirst(old.count) { typeChar(String(ch)) }
         } else {
-            for ch in new { type(String(ch)) }
+            for ch in new { typeChar(String(ch)) }
         }
         if typed.count > 200 { typed = "" }
     }
