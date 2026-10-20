@@ -47,6 +47,20 @@ pub fn act(id: &str, action: AppAction) {
     }
 }
 
+/// Wait (up to `timeout`) until the app with `id` is running, so the host
+/// can switch to sharing it once it has windows. Steam games and other
+/// systems answer at once ("probably").
+pub fn wait_running(id: &str, timeout: std::time::Duration) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        match running_here(id) {
+            Some(true) | None => return true,
+            Some(false) if started.elapsed() >= timeout => return false,
+            Some(false) => std::thread::sleep(std::time::Duration::from_millis(250)),
+        }
+    }
+}
+
 /// Icons (PNG, 128 px) for these apps, for the one-off transfer to the
 /// viewer. Slow (a tool run per icon the first time); call off the network
 /// thread. Converted icons are cached in the data folder.
@@ -381,6 +395,14 @@ mod mac {
         }
     }
 
+    /// Is the app with this bundle id running? `None` when we can't tell
+    /// (a Steam game: no bundle we know).
+    pub fn running_here(id: &str) -> Option<bool> {
+        let b = bundle_path(id)?;
+        let prefix = format!("{}/Contents/MacOS/", b.path.display());
+        Some(running_paths().iter().any(|p| p.starts_with(&prefix)))
+    }
+
     /// The app's icon as a 128 px PNG, converted once and cached.
     pub fn icon_here(id: &str) -> Option<Vec<u8>> {
         let cache_dir = crate::trust::user_dir().join("icon-cache");
@@ -429,7 +451,7 @@ mod mac {
 }
 
 #[cfg(target_os = "macos")]
-use mac::{act_here, icon_here, list_here};
+use mac::{act_here, icon_here, list_here, running_here};
 
 // ---------------------------------------------------------------------------
 // Windows: the Start menu's shortcuts and Steam. Opening goes through
@@ -527,10 +549,14 @@ mod win {
     pub fn icon_here(_id: &str) -> Option<Vec<u8>> {
         None
     }
+
+    pub fn running_here(_id: &str) -> Option<bool> {
+        None
+    }
 }
 
 #[cfg(target_os = "windows")]
-use win::{act_here, icon_here, list_here};
+use win::{act_here, icon_here, list_here, running_here};
 
 // ---------------------------------------------------------------------------
 // Anywhere else (Linux CI, the mock host): a pretend list, so the viewer
@@ -561,6 +587,11 @@ fn act_here(id: &str, action: AppAction) -> anyhow::Result<()> {
     anyhow::ensure!(list_here().iter().any(|a| a.id == id), "no app with id {id}");
     tracing::info!(id, ?action, "mock launcher action");
     Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn running_here(_id: &str) -> Option<bool> {
+    None
 }
 
 /// A 1x1 PNG, so icon transfer can be tested without real icons.

@@ -642,7 +642,7 @@ pub unsafe extern "C" fn aa_mobile_icon(id: *const c_char, buf: *mut u8, cap: us
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn aa_mobile_app_action(id: *const c_char, action: *const c_char) {
+pub unsafe extern "C" fn aa_mobile_app_action(id: *const c_char, action: *const c_char, show: bool) {
     use aa_core::apps::AppAction;
     // SAFETY: C strings from the caller, or null.
     let (id, action) = unsafe { (cstr(id), cstr(action)) };
@@ -655,7 +655,19 @@ pub unsafe extern "C" fn aa_mobile_app_action(id: *const c_char, action: *const 
             return;
         }
     };
-    command(ViewerCommand::AppAction(id, action));
+    command(ViewerCommand::AppAction(id, action, show));
+}
+
+/// App mode: show only this app (its bundle id and name) or, with an empty
+/// id, the whole screen again. The host obeys only a viewer with Full
+/// access (set on its Share page).
+#[no_mangle]
+pub unsafe extern "C" fn aa_mobile_share(id: *const c_char, name: *const c_char) {
+    use aa_core::share::ShareTarget;
+    // SAFETY: C strings from the caller, or null.
+    let (id, name) = unsafe { (cstr(id), cstr(name)) };
+    let target = if id.is_empty() { ShareTarget::Screen } else { ShareTarget::App { id, name } };
+    command(ViewerCommand::SetShare(target));
 }
 
 // ---------------------------------------------------------------------------
@@ -679,6 +691,12 @@ pub unsafe extern "C" fn aa_mobile_take_clip_text() -> *mut c_char {
         Some(aa_core::clipboard::ClipItem::Text(t)) => to_c(&t),
         _ => to_c(""),
     }
+}
+
+/// Back to sharing the whole screen (after an app was shown alone).
+#[no_mangle]
+pub unsafe extern "C" fn aa_mobile_show_desktop() {
+    command(ViewerCommand::SetShare(aa_core::share::ShareTarget::Screen));
 }
 
 #[no_mangle]

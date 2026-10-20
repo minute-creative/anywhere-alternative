@@ -244,9 +244,13 @@ final class Engine: ObservableObject {
         aa_mobile_request_apps()
     }
 
-    func open(_ app: AppEntry) { aa_mobile_app_action(app.id, "open") }
-    func quit(_ app: AppEntry) { aa_mobile_app_action(app.id, "quit") }
-    func hide(_ app: AppEntry) { aa_mobile_app_action(app.id, "hide") }
+    /// Open (or switch to) an app; with `show`, the Mac then shares only
+    /// that app, so it fills the phone like a console game.
+    func open(_ app: AppEntry, show: Bool = true) { aa_mobile_app_action(app.id, "open", show) }
+    func quit(_ app: AppEntry) { aa_mobile_app_action(app.id, "quit", false) }
+    func hide(_ app: AppEntry) { aa_mobile_app_action(app.id, "hide", false) }
+    /// Back to the whole Mac screen.
+    func showDesktop() { aa_mobile_show_desktop() }
 
     // MARK: Input (thin wrappers so views never see C)
 

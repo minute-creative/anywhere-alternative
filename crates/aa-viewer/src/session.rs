@@ -820,8 +820,8 @@ async fn handle_command(
             crate::link::update_host_info(|i| i.apps_pages = (0, Vec::new()));
             send_control(socket, &ControlMessage::AppList, seq).await?;
         }
-        Some(ViewerCommand::AppAction(id, action)) => {
-            send_control(socket, &ControlMessage::AppAction { id, action }, seq).await?;
+        Some(ViewerCommand::AppAction(id, action, show)) => {
+            send_control(socket, &ControlMessage::AppAction { id, action, show }, seq).await?;
         }
         Some(ViewerCommand::CopyItem(item)) => {
             if !m.clip.copied(&item) {

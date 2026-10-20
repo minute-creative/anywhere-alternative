@@ -33,8 +33,9 @@ pub enum ViewerCommand {
     SetShare(aa_core::share::ShareTarget),
     /// The launcher: ask the host for its apps and games.
     AppList,
-    /// The launcher: open, hide or quit one of them.
-    AppAction(String, aa_core::apps::AppAction),
+    /// The launcher: open, hide or quit one of them; `true` = then show
+    /// only that app (needs full access on the host).
+    AppAction(String, aa_core::apps::AppAction, bool),
     /// Something copied on this device (the phone), for the host's clipboard.
     CopyItem(aa_core::clipboard::ClipItem),
     /// The window closed; send `Bye` and exit.

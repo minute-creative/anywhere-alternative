@@ -350,6 +350,14 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                         let _ = tx.send(aa_platform::apps::icons(&ids));
                     });
                 }
+                // An app the phone opened is up: show only that app.
+                while let Ok(target) = stream.show_rx.try_recv() {
+                    if stream.full_access {
+                        tracing::info!(sharing = target.label(), "showing the app the phone opened");
+                        stream.viewer_choice = Some(target);
+                        stream.follow_choice(&ctl, 0);
+                    }
+                }
                 // Launcher icons ready: one named blob through the reliable transfer.
                 while let Ok(pack) = stream.icons_rx.try_recv() {
                     if dest.is_some() {
@@ -841,9 +849,22 @@ async fn handle_packet(
                         let _ = tx.send(aa_platform::apps::list());
                     });
                 }
-                ControlMessage::AppAction { id, action } if is_current_viewer => {
-                    tracing::info!(id, ?action, "launcher");
-                    let _ = tokio::task::spawn_blocking(move || aa_platform::apps::act(&id, action)).await;
+                ControlMessage::AppAction { id, action, show } if is_current_viewer => {
+                    tracing::info!(id, ?action, show, "launcher");
+                    // "Show": the phone wants only that app on its screen.
+                    // Wait for it to be running (its windows exist) on a
+                    // thread; the 100 ms tick then switches what is shared.
+                    let show = show && stream.full_access && matches!(action, aa_core::apps::AppAction::Open);
+                    let name = stream_app_name(&id);
+                    let tx = stream.show_tx.clone();
+                    let _ = std::thread::Builder::new().name("aa-launch".into()).spawn(move || {
+                        aa_platform::apps::act(&id, action);
+                        if show && aa_platform::apps::wait_running(&id, Duration::from_secs(20)) {
+                            // A moment for the first window to appear.
+                            std::thread::sleep(Duration::from_millis(1200));
+                            let _ = tx.send(ShareTarget::App { id, name });
+                        }
+                    });
                 }
                 other => tracing::debug!(?other, "ignored control message"),
             }
@@ -1157,12 +1178,22 @@ struct Stream {
     /// The launcher list, gathered on another thread the same way.
     apps_tx: std::sync::mpsc::Sender<Vec<aa_core::apps::AppEntry>>,
     apps_rx: std::sync::mpsc::Receiver<Vec<aa_core::apps::AppEntry>>,
+    /// An app the phone opened and wants shown alone, once it is running.
+    show_tx: std::sync::mpsc::Sender<ShareTarget>,
+    show_rx: std::sync::mpsc::Receiver<ShareTarget>,
+}
+
+/// A display name for a launcher id, for the share target's label (the
+/// phone shows it in its corner); the bundle id's last part will do.
+fn stream_app_name(id: &str) -> String {
+    id.rsplit('.').next().unwrap_or(id).to_owned()
 }
 
 impl Stream {
     fn new(fps: u16) -> Self {
         let (icons_tx, icons_rx) = std::sync::mpsc::channel();
         let (apps_tx, apps_rx) = std::sync::mpsc::channel();
+        let (show_tx, show_rx) = std::sync::mpsc::channel();
         let watched = Arc::new(std::sync::Mutex::new(ShareTarget::Screen));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
@@ -1181,6 +1212,8 @@ impl Stream {
             icons_rx,
             apps_tx,
             apps_rx,
+            show_tx,
+            show_rx,
             now: ShareTarget::Screen,
             local: ShareTarget::Screen,
             viewer_choice: None,

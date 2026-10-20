@@ -102,14 +102,22 @@ char *aa_mobile_apps(void);
 /// The PNG icon of one app: copies up to `cap` bytes into `buf` and returns
 /// the icon's full size (0 = none yet).
 size_t aa_mobile_icon(const char *id, uint8_t *buf, size_t cap);
-/// `action`: "open", "quit" or "hide".
-void aa_mobile_app_action(const char *id, const char *action);
+/// `action`: "open", "quit" or "hide". `show`: after opening, the host
+/// shares only that app (one app at a time; needs full access there).
+void aa_mobile_app_action(const char *id, const char *action, bool show);
+
+/// App mode: show only the app with this id (and name, for the Mac's
+/// status line), or the whole screen when `id` is "". Needs Full access.
+void aa_mobile_share(const char *id, const char *name);
 
 // Clipboard.
 /// Text copied on the phone, for pasting on the other computer.
 void aa_mobile_copy_text(const char *text);
 /// Text the other computer copied since the last call ("" if none).
 char *aa_mobile_take_clip_text(void);
+
+/// Back to the whole screen after an app was shown alone.
+void aa_mobile_show_desktop(void);
 
 /// The version of the Rust side ("0.6.0").
 const char *aa_mobile_version(void);

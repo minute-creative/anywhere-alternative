@@ -144,6 +144,17 @@ look later. See `docs/IPHONE.md` for the result and the controls table.
   Rust build and XcodeGen passed, Swift had one error (`window` clashed
   with UIView.window). Read the latest commit comment for the current
   state before changing anything.
+- First run on the owner's iPhone (same evening): built, paired and
+  streamed. Fixed: the Mac wasn't found (iOS forbids broadcasts without
+  the multicast entitlement → `lan::subnet_hosts` sweep on iOS), the
+  address box opened iOS's keyboard (now typed on the pad), the launcher
+  said "Asking the Mac" against 0.5.13 (host version now reaches the
+  phone). Owner: "looks boring, not designed to use Mac apps on a
+  phone" → redesign: **app-first** (`AppAction { show }`: after an app
+  runs, the host shares only that app via the existing one-app share;
+  needs Full access for the phone), PS5-style launcher (tabs, hero, one
+  strip, blurred icon background, Desktop tile), quick menu as a bottom
+  control bar. All CI-only at the time of writing.
 - Known limits, told to the owner: no virtual controller on a Mac host
   (entitlement), so games on the Mac get keys + mouse from the pad; the
   phone sends no mic/camera; icons only on a Mac host; CPU frame upload

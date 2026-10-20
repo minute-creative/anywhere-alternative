@@ -138,7 +138,14 @@ pub enum ControlMessage {
     /// Host → viewer: one page of the launcher list (`page` of `pages`).
     Apps { page: u16, pages: u16, items: Vec<crate::apps::AppEntry> },
     /// Viewer → host: open, switch to, hide or quit one app from the list.
-    AppAction { id: String, action: crate::apps::AppAction },
+    /// `show`: once the app runs, share only that app (the phone shows one
+    /// app at a time, like a console). Needs full access; ignored without.
+    AppAction {
+        id: String,
+        action: crate::apps::AppAction,
+        #[serde(default)]
+        show: bool,
+    },
 }
 
 // Helpers to build, write and read a message.

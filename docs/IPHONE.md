@@ -94,13 +94,24 @@ the host can show a virtual controller: a PC with ViGEmBus. **A Mac
 cannot**, without Apple's virtual-HID entitlement (paid program +
 approval; see JOURNAL Day 6) — use Desktop or Game controls on the Mac.
 
-Launcher (Y): rows *Open now*, *Recent*, *Games* (Steam, CrossOver) and
-*Apps*. A opens or switches to; X quits a running app; Y hides it; L1 / R1
-jump rows. Icons arrive a moment after the list.
+Launcher (Y): one strip of tiles along the bottom with the focused app
+large in the middle; tabs *Open now*, *Recent*, *Games* (Steam,
+CrossOver), *Apps*, *System* on L1 / R1 (or up / down); left / right move;
+**A opens the app and the Mac then shows only that app**, so it fills the
+phone like a game (windows, sound and input limited to it); X quits a
+running app. The first tile of every tab is **Desktop**: the whole Mac
+screen again. One-app-at-a-time needs **Full access** for the phone: on
+the Mac, Anywhere → Share → the iPhone in the paired list → *Full
+access* (once). Without it, opening still works, on the whole desktop.
+Icons arrive a moment after the list.
 
 Keyboard (X): d-pad moves, A types, B deletes, X space, Y shift, Menu
 return, L1 symbols, R1 tab, Options closes. *Phone keyboard* on the last
 row brings up iOS's keyboard for longer text.
+
+The quick menu (Home) is a control bar along the bottom: Launcher,
+Keyboard, Whole Mac, Controls, Show controls, Zoom, Full screen, Mac
+speakers, Pointer speed, Data cap, Stats, Send clipboard, Disconnect.
 
 Quick menu extras: **Show controls** (a cheat-sheet of the current layout), **Zoom** (2× / 3× around the pointer — Mac text is
 small on a phone; a touch still lands where it looks), **Full-screen app**
