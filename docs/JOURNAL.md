@@ -595,3 +595,34 @@ Found by reading before the compiler could: the action enum was called
 `Binding` (shadows SwiftUI's `@Binding`), a main-actor static decoder
 called from a detached task, listing apps inside the host's packet
 handler, and a quadratic icon lookup.
+
+## Day 18, afternoon — first local builds, a stale-library bug (v0.6.0)
+
+A fresh session with network egress allowed. crates.io was reachable, but
+only through the session's proxy: the container has no DNS of its own and
+`index.crates.io` sits on the environment's bypass list, so plain
+`cargo fetch` says "Could not resolve host". Pointing cargo at the proxy
+(`~/.cargo/config.toml`, recipe in HANDOFF) fixed it. First time the
+portable crates compiled here: clippy clean, 197 tests green, mock smoke
+test `fps=60 loss=0.00%` — once the viewer was given `127.0.0.1:7700`
+(the container's own address is in a documentation range, which the host
+rightly refuses to pair with as "the internet").
+
+CI: the morning's three red commits were one `struct_excessive_bools`
+lint, already fixed in `5ae8f68`, whose run had been cancelled rather than
+failed. A docs push re-ran it: all five jobs green.
+
+Owner's phone build then failed to link `aa_mobile_show_desktop`, which
+exists in the Rust code. Cause: the XcodeGen script step listed the
+library as its output and nothing as input, so Xcode ran it once (last
+evening) and considered it up to date ever since; every build linked the
+day-old engine. CI never saw it because its runner starts without the
+library. Fix: `basedOnDependencyAnalysis: false` (cargo is incremental,
+so an unchanged engine costs seconds). Owner: "build succeeded". Lesson
+in ARCHITECTURE §9.
+
+Not yet tested: the phone against a 0.6 host. The Mac is on 0.5.13 and
+the 0.6.0 Release run was cancelled; the owner starts it by hand.
+
+Housekeeping: CLAUDE.md and HANDOFF still said the repo was private; it
+has been public since the 18th. Fixed both.

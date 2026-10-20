@@ -14,7 +14,8 @@ for setup. Everything below is true as of the last commit on `main`.
   by running `cargo` from the wrong directory):
   - PC (Windows 11, PowerShell): `cd $HOME\anywhere-alternative`
   - Mac (Apple Silicon M4 Pro, Terminal): `cd ~/anywhere-alternative`
-- The repo is **private** and must stay private. Push directly to `main`.
+- The repo is **public** (owner's decision 2026-10-18; see "Product
+  direction"). Never commit personal details. Push directly to `main`.
 - When something fails on their machine, ask for the exact log lines rather
   than guessing.
 
@@ -142,8 +143,27 @@ look later. See `docs/IPHONE.md` for the result and the controls table.
   was quadratic in plutil runs).
 - CI rounds so far: 1 lints in apps.rs; 2 lints in aa-mobile; 3 the iOS
   Rust build and XcodeGen passed, Swift had one error (`window` clashed
-  with UIView.window). Read the latest commit comment for the current
+  with UIView.window); 4 (afternoon) `struct_excessive_bools` in
+  aa-mobile. **CI is green on `main` as of `fe00bce` (2026-10-20 14:xx
+  UTC)**, all five jobs. Read the latest commit comment for the current
   state before changing anything.
+- **Status at the end of 2026-10-20's afternoon session:**
+  - The phone build on the owner's Mac failed with `Undefined symbol:
+    _aa_mobile_show_desktop`: Xcode had skipped the Rust step since the
+    first build (output listed, no inputs → "up to date" forever) and
+    linked the day-old library. Fixed in `ios/project.yml`
+    (`basedOnDependencyAnalysis: false`); owner then reported **"build
+    succeeded"**. If an older generated project is still open, `git pull`
+    + `xcodegen generate` picks the fix up.
+  - **The Mac is still on 0.5.13**, the newest published release. The
+    launcher needs a 0.6 host ("Asking the Mac" otherwise). The 0.6.0
+    Release run started on `5ae8f68` at 13:18 UTC was cancelled, so no
+    0.6.0 dmg exists yet; the owner was asked to start Actions → Release →
+    Run workflow → `0.6.0`, then "Update now" on the Mac. Confirm the Share
+    page shows 0.6.0 before reading any iPhone test result.
+  - The phone has not been run against a 0.6 host yet. Nothing in the
+    0.6.0 list above is confirmed on hardware beyond "built, paired and
+    streamed" from the first evening (pre-redesign).
 - First run on the owner's iPhone (same evening): built, paired and
   streamed. Fixed: the Mac wasn't found (iOS forbids broadcasts without
   the multicast entitlement → `lan::subnet_hosts` sweep on iOS), the
@@ -640,14 +660,22 @@ updates; 0.4.5 itself needs them granted once more (remove + re-add).
 
 ## How development works here
 
-- You are usually on a **Linux container that cannot compile the Windows
-  or macOS code**. `cargo clippy --all-targets && cargo test` locally
-  checks the portable crates; the platform code is checked by **GitHub
-  Actions** on push (ubuntu / macos / windows). On failure, CI posts the
-  compiler errors as a **commit comment**; read it with
+- You are usually on a **Linux container that cannot compile the Windows,
+  macOS or iOS code**. `cargo clippy --all-targets && cargo test` locally
+  checks the portable crates (setup below); the platform code is checked
+  by **GitHub Actions** on push (ubuntu / macos / windows / iPhone app /
+  works with older versions). On failure, CI posts the compiler errors as
+  a **commit comment**; read it with
   `gh api repos/minute-creative/anywhere-alternative/commits/<sha>/comments --jq '.[].body'`.
   A full run takes ~15 min (Windows is slowest). Expect one or two rounds
-  of API-drift fixes per new platform file.
+  of API-drift fixes per new platform file. The `gh` CLI here can use the
+  REST API only (`gh api ...`); `gh release list`, `gh pr` and other
+  GraphQL-backed commands return 403.
+- Container facts (2026-10-20): 2 CPUs, 7 GB. A cold `cargo clippy
+  --all-targets` takes ~15–20 min and `cargo test` another ~10 (wgpu is
+  the heavy crate); incremental checks after that take seconds. Builds
+  started in the background only progress while the session is active,
+  so don't wrap them in a short `timeout`.
 - **crates.io from the Linux container** (2026-10-20): it works only when
   the owner's claude.ai "Allow network egress" setting is on *and* cargo is
   pointed at the session's agent proxy — the container has no DNS of its

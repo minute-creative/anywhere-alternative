@@ -45,6 +45,22 @@ In Xcode, once:
 The Xcode project is generated (it is in `.gitignore`); run `xcodegen
 generate` again after pulling changes that add Swift files.
 
+**The Mac must run Anywhere 0.6.0 or newer** for the launcher; an older Mac
+shows "Asking the Mac" forever. Check the Mac's Share page.
+
+### If the build fails
+
+Click the red ⚠ in Xcode's top-left strip; the first red line is the real
+error.
+- *Signing for "Anywhere" requires a development team* → step 1 above.
+- *Undefined symbol: _aa_mobile_…* → the Rust engine on disk is older than
+  the Swift code. Since 2026-10-20 the project rebuilds the engine on every
+  build; if your generated project predates that, run
+  `cd ~/anywhere-alternative && git pull && cd ios && xcodegen generate`
+  and build again. As a last resort delete `ios/rust-lib` and build.
+- Anything in a step called *Build the Rust engine* → the Rust side; paste
+  the last 20 lines of that step to Claude.
+
 ## First time: pair
 
 1. On the Mac: Anywhere → **Share** on, note the six-digit code.
