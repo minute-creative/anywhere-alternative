@@ -24,6 +24,7 @@ enum NavEvent {
     case up, down, left, right
     case confirm, back
     case x, y, l1, r1, l2, r2, l3, r3
+    case l4, r4
     case menu, options
     case home
 }
@@ -40,6 +41,8 @@ struct PadState: Equatable {
     var lt: Float = 0, rt: Float = 0
     var a = false, b = false, x = false, y = false
     var l1 = false, r1 = false, l2 = false, r2 = false, l3 = false, r3 = false
+    /// Extra buttons some pads have (the Kishi V2's L4 / R4, paddles).
+    var l4 = false, r4 = false
     var menu = false, options = false, home = false
     var up = false, down = false, left = false, right = false
 }
@@ -48,6 +51,9 @@ struct PadState: Equatable {
 final class Pad: ObservableObject {
     @Published var connected = false
     @Published var name = ""
+    /// Names of non-standard buttons the pad exposes (for the Problems
+    /// screen: what the Kishi's L4 / R4 are called, if iOS shows them).
+    @Published var extraButtons: [String] = []
     @Published var mode: PadMode = .ui
     /// Where menu navigation goes: the screen on top. Screens push a
     /// handler when they appear and pop it when they go, so an overlay
@@ -131,7 +137,40 @@ final class Pad: ObservableObject {
             s.down = gp.dpad.down.isPressed
             s.left = gp.dpad.left.isPressed
             s.right = gp.dpad.right.isPressed
+            s.l4 = self.extraState.0
+            s.r4 = self.extraState.1
             Task { @MainActor in self.state = s }
+        }
+        watchExtraButtons(c)
+    }
+
+    /// Pressed state of the first two non-standard buttons (L4, R4).
+    private var extraState: (Bool, Bool) = (false, false)
+
+    /// Buttons beyond the standard layout (the Kishi V2's L4 / R4 when the
+    /// Razer app has given them a job, Xbox paddles…): the first two become
+    /// L4 and R4. Their names are kept for the Problems screen.
+    private func watchExtraButtons(_ c: GCController) {
+        let standard: Set<String> = [
+            GCInputButtonA, GCInputButtonB, GCInputButtonX, GCInputButtonY, GCInputLeftShoulder, GCInputRightShoulder,
+            GCInputLeftTrigger, GCInputRightTrigger, GCInputLeftThumbstickButton, GCInputRightThumbstickButton,
+            GCInputButtonHome, GCInputButtonMenu, GCInputButtonOptions, GCInputButtonShare,
+        ]
+        let profile = c.physicalInputProfile
+        let extras = profile.buttons.keys
+            .filter { !standard.contains($0) && !$0.contains("Direction Pad") && !$0.contains("Thumbstick") }
+            .sorted()
+        extraButtons = extras
+        for (i, name) in extras.prefix(2).enumerated() {
+            profile.buttons[name]?.pressedChangedHandler = { [weak self] _, _, pressed in
+                guard let self else { return }
+                Task { @MainActor in
+                    if i == 0 { self.extraState.0 = pressed } else { self.extraState.1 = pressed }
+                    var s = self.state
+                    if i == 0 { s.l4 = pressed } else { s.r4 = pressed }
+                    self.state = s
+                }
+            }
         }
     }
 
@@ -140,6 +179,8 @@ final class Pad: ObservableObject {
         controller = nil
         connected = false
         state = PadState()
+        extraState = (false, false)
+        extraButtons = []
         name = ""
     }
 
@@ -185,7 +226,8 @@ final class Pad: ObservableObject {
         let presses: [(Bool, Bool, NavEvent)] = [
             (s.a, p.a, .confirm), (s.b, p.b, .back), (s.x, p.x, .x), (s.y, p.y, .y),
             (s.l1, p.l1, .l1), (s.r1, p.r1, .r1), (s.l2, p.l2, .l2), (s.r2, p.r2, .r2),
-            (s.l3, p.l3, .l3), (s.r3, p.r3, .r3), (s.menu, p.menu, .menu), (s.options, p.options, .options),
+            (s.l3, p.l3, .l3), (s.r3, p.r3, .r3), (s.l4, p.l4, .l4), (s.r4, p.r4, .r4),
+            (s.menu, p.menu, .menu), (s.options, p.options, .options),
         ]
         for (now, before, ev) in presses where now && !before {
             onNav?(ev)
@@ -197,13 +239,16 @@ final class Pad: ObservableObject {
         if s.down { return .down }
         if s.left { return .left }
         if s.right { return .right }
+        // Either stick moves the focus in menus.
         let t: Float = 0.55
-        if abs(s.ly) > abs(s.lx) {
-            if s.ly > t { return .up }
-            if s.ly < -t { return .down }
-        } else {
-            if s.lx > t { return .right }
-            if s.lx < -t { return .left }
+        for (x, y) in [(s.lx, s.ly), (s.rx, s.ry)] {
+            if abs(y) > abs(x) {
+                if y > t { return .up }
+                if y < -t { return .down }
+            } else {
+                if x > t { return .right }
+                if x < -t { return .left }
+            }
         }
         return nil
     }

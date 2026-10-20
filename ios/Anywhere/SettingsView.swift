@@ -93,6 +93,10 @@ struct SettingsView: View {
                     Spacer()
                     Text("Anywhere \(engine.version) · \(pad.connected ? pad.name : "no controller")")
                         .font(.system(size: 12)).foregroundStyle(Theme.muted.opacity(0.6))
+                    if pad.connected {
+                        Text(pad.extraButtons.isEmpty ? "No extra buttons reported (L4 / R4 need a job in the Razer Nexus app)" : "Extra buttons: \(pad.extraButtons.joined(separator: ", "))")
+                            .font(.system(size: 12)).foregroundStyle(Theme.muted.opacity(0.6))
+                    }
                 }
             }
             .padding(32)

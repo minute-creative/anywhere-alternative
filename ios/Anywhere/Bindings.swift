@@ -9,6 +9,7 @@ enum PadControl: String, Codable, CaseIterable {
     case leftStick, rightStick
     case a, b, x, y
     case l1, r1, l2, r2, l3, r3
+    case l4, r4
     case up, down, left, right
     case menu, options
 
@@ -26,6 +27,8 @@ enum PadControl: String, Codable, CaseIterable {
         case .r2: return "R2"
         case .l3: return "L3 (press left stick)"
         case .r3: return "R3 (press right stick)"
+        case .l4: return "L4 (extra button)"
+        case .r4: return "R4 (extra button)"
         case .up: return "D-pad up"
         case .down: return "D-pad down"
         case .left: return "D-pad left"
@@ -132,7 +135,7 @@ struct ControlMap: Codable, Equatable {
         .leftStick: .pointer, .rightStick: .scroll,
         .a: .mouse(0), .b: .mouse(1), .x: .keyboard, .y: .launcher,
         .l1: .key(HID.leftGui), .r1: .key(HID.leftShift), .l2: .mouse(1), .r2: .mouse(0),
-        .l3: .speedToggle, .r3: .mouse(2),
+        .l3: .speedToggle, .r3: .mouse(2), .l4: .launcher, .r4: .keyboard,
         .up: .key(HID.up), .down: .key(HID.down), .left: .key(HID.left), .right: .key(HID.right),
         .menu: .key(HID.enter), .options: .key(HID.escape),
     ])
@@ -142,7 +145,7 @@ struct ControlMap: Codable, Equatable {
         .leftStick: .wasd, .rightStick: .look,
         .a: .key(HID.space), .b: .key(HID.leftCtrl), .x: .key(HID.letter("r")!), .y: .key(HID.letter("e")!),
         .l1: .key(HID.leftShift), .r1: .key(HID.letter("q")!), .l2: .mouse(1), .r2: .mouse(0),
-        .l3: .key(HID.leftShift), .r3: .key(HID.letter("f")!),
+        .l3: .key(HID.leftShift), .r3: .key(HID.letter("f")!), .l4: .quickMenu, .r4: .keyboard,
         .up: .key(HID.one), .down: .key(HID.three), .left: .key(HID.four), .right: .key(HID.two),
         .menu: .key(HID.escape), .options: .key(HID.tab),
     ])

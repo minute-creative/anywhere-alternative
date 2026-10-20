@@ -56,7 +56,7 @@ final class InputMapper {
         let buttons: [(PadControl, Bool, Bool)] = [
             (.a, s.a, p.a), (.b, s.b, p.b), (.x, s.x, p.x), (.y, s.y, p.y),
             (.l1, s.l1, p.l1), (.r1, s.r1, p.r1), (.l2, s.l2, p.l2), (.r2, s.r2, p.r2),
-            (.l3, s.l3, p.l3), (.r3, s.r3, p.r3),
+            (.l3, s.l3, p.l3), (.r3, s.r3, p.r3), (.l4, s.l4, p.l4), (.r4, s.r4, p.r4),
             (.up, s.up, p.up), (.down, s.down, p.down), (.left, s.left, p.left), (.right, s.right, p.right),
             (.menu, s.menu, p.menu), (.options, s.options, p.options),
         ]
