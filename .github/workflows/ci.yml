@@ -24,7 +24,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -76,7 +76,7 @@ jobs:
     name: iPhone app
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios-sim
@@ -121,7 +121,7 @@ jobs:
     name: works with older versions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0 # the release tags
       - uses: dtolnay/rust-toolchain@stable
@@ -132,7 +132,7 @@ jobs:
           list=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -3 | tr '\n' ' ')
           echo "list=$list" >> "$GITHUB_OUTPUT"
           echo "key=$(echo $list | tr ' ' '-')" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: old-builds
           key: compat-old-builds-v1-${{ steps.tags.outputs.key }}

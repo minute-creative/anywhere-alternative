@@ -30,7 +30,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -65,7 +65,7 @@ jobs:
           # MSYS_NO_PATHCONV: stop Git Bash turning "/DAppVersion" into a file path.
           MSYS_NO_PATHCONV=1 "$ISCC" "/DAppVersion=$VERSION" packaging/windows/installer.iss 2>&1 | tee -a build.log
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: anywhere-${{ runner.os }}
           path: dist/Anywhere-*
@@ -89,7 +89,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
