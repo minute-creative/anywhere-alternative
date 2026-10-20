@@ -706,6 +706,13 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
 - **Anti-cheat drops injected clicks without an error** (0.5.9): with Riot
   Vanguard running, SendInput returns success and the click vanishes. Detect
   the `vgc` service instead and tell the viewer.
+- **An Xcode script step with outputs but no inputs runs once** (0.6.0):
+  the Rust-engine step listed `libaa_mobile.a` as its output, so after the
+  first build Xcode considered it up to date forever and linked a stale
+  library ("Undefined symbol: _aa_mobile_show_desktop" on the owner's Mac;
+  CI never saw it because its runner starts empty). The step now sets
+  `basedOnDependencyAnalysis: false`; cargo's own incremental build keeps
+  it cheap.
 
 ## 10. Measured so far
 

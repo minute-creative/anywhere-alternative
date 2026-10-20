@@ -67,8 +67,11 @@ targets:
       - name: Build the Rust engine
         script: |
           "$SRCROOT/build-rust.sh"
-        outputFiles:
-          - "$(SRCROOT)/rust-lib/$(PLATFORM_NAME)/libaa_mobile.a"
+        # Always run: with only an output file listed, Xcode skips the step
+        # once the library exists, so Rust changes never reach the phone
+        # (seen 2026-10-20 as "Undefined symbol: _aa_mobile_show_desktop").
+        # cargo is incremental, so an unchanged engine costs seconds.
+        basedOnDependencyAnalysis: false
     dependencies:
       - sdk: VideoToolbox.framework
       - sdk: CoreMedia.framework
