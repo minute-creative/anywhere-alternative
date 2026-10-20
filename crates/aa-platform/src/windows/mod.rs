@@ -50,6 +50,9 @@ pub fn host_backends() -> Result<HostBackends> {
     host_backends_with(EncoderChoice::Auto)
 }
 
+// One step per backend, in order; the capability list (one line per
+// field, the 2026-10-20 phone_display took it to 101) is the long part.
+#[allow(clippy::too_many_lines)]
 pub fn host_backends_with(choice: EncoderChoice) -> Result<HostBackends> {
     // Real pixels everywhere, before DXGI or any UI call sees a scaled value.
     // SAFETY: plain Win32 call with a constant argument.
