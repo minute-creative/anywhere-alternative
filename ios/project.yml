@@ -29,7 +29,7 @@ targets:
       path: Anywhere/Info.plist
       properties:
         CFBundleDisplayName: Anywhere
-        CFBundleShortVersionString: "0.6.0"
+        CFBundleShortVersionString: "0.6.1"
         CFBundleVersion: "1"
         LSRequiresIPhoneOS: true
         UILaunchScreen: {}
