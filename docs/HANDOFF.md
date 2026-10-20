@@ -667,7 +667,11 @@ updates; 0.4.5 itself needs them granted once more (remove + re-add).
   computers" line; `aa-viewer --headless --mock --pair <code>` (no
   address → discovery) in another; expect `fps=60 loss=0.00%`. The
   pairing is remembered in `AA_DATA_DIR`/the data folder, so later runs
-  need no `--pair`.
+  need no `--pair`. In the claude.ai container the machine's own address
+  is `192.0.2.2` (a documentation range the host does not count as a home
+  network), so pairing by discovery is refused as "from the internet":
+  give the viewer `127.0.0.1:7700` explicitly for the first run. The code
+  is printed as `415 051` (with a space); type it without the space.
 - Clippy runs with `pedantic` and `-D warnings` on CI. FFI modules carry
   `#![allow(unsafe_code, clippy::pedantic)]` and SAFETY comments.
 - Code style: `rustfmt.toml` (max width 120). Commit messages explain the
