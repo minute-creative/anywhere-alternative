@@ -12,6 +12,9 @@ struct SettingsView: View {
     @State private var token = 0
     @State private var showLog = false
 
+    /// How often this phone's screen refreshes (60, or 120 with ProMotion).
+    static var screenHz: Int { UIScreen.main.maximumFramesPerSecond }
+
     private struct Row {
         let title: String
         let help: String
@@ -26,8 +29,17 @@ struct SettingsView: View {
                 value: p.resolution == "720" ? "720p" : "1080p") { _ in
                 engine.prefs.resolution = p.resolution == "720" ? "1080" : "720"
             },
-            Row(title: "Frame rate", help: "75 is the most the phone shows smoothly; 60 saves battery.",
-                value: "\(p.fps) fps") { _ in engine.prefs.fps = p.fps == 60 ? 75 : 60 },
+            // 0.6.0 offered 75 on every phone, but an iPhone without
+            // ProMotion (the owner's 14 Plus) refreshes 60 times a second:
+            // the extra frames were thrown away and felt less smooth.
+            Row(title: "Frame rate",
+                help: Self.screenHz > 60
+                    ? "75 is smoother on this screen; 60 saves battery and data. The Mac sends no more than its own screen shows."
+                    : "This iPhone's screen shows at most 60 frames a second, so 60 is the smoothest it can be.",
+                value: "\(min(Int(p.fps), Self.screenHz)) fps") { _ in
+                guard Self.screenHz > 60 else { engine.prefs.fps = 60; return }
+                engine.prefs.fps = p.fps == 60 ? 75 : 60
+            },
             Row(title: "Data cap", help: "The most the Mac may send. Wi-Fi at home: 30–50. Away: 8–15.",
                 value: "\(Int(p.maxMbps)) Mbps") { d in
                 let steps: [Float] = [5, 8, 15, 30, 50, 80]

@@ -48,16 +48,19 @@ struct StreamView: UIViewRepresentable {
     /// Called with the picture's frame inside the view (for the pointer).
     let onLayout: (CGRect) -> Void
 
+    /// Draw at the stream's rate, never above what the screen can show.
+    static func drawRate(_ fps: Int) -> Int { min(max(fps, 30), UIScreen.main.maximumFramesPerSecond) }
+
     func makeUIView(context: Context) -> StreamMetalView {
         let v = StreamMetalView()
         v.engine = engine
         v.onLayout = onLayout
-        v.preferredFramesPerSecond = fps
+        v.preferredFramesPerSecond = Self.drawRate(fps)
         return v
     }
 
     func updateUIView(_ v: StreamMetalView, context: Context) {
-        v.preferredFramesPerSecond = fps
+        v.preferredFramesPerSecond = Self.drawRate(fps)
         v.onLayout = onLayout
     }
 }
