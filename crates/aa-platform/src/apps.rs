@@ -263,7 +263,8 @@ mod mac {
     fn bundles() -> Vec<(Bundle, AppKind)> {
         use std::sync::{Mutex, OnceLock};
         use std::time::{Duration, Instant};
-        static CACHE: OnceLock<Mutex<Option<(Instant, Vec<(Bundle, AppKind)>)>>> = OnceLock::new();
+        type Scan = (Instant, Vec<(Bundle, AppKind)>);
+        static CACHE: OnceLock<Mutex<Option<Scan>>> = OnceLock::new();
         let cache = CACHE.get_or_init(|| Mutex::new(None));
         if let Ok(c) = cache.lock() {
             if let Some((at, list)) = c.as_ref() {
