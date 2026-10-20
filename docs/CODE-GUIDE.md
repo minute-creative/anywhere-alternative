@@ -222,3 +222,15 @@ hitches, `audio=` sound frames / filled-in gaps / buffer / underruns.
 - `SAFETY:` comments sit above every `unsafe` block and say why it is safe.
   Those blocks are where Rust's own checks are switched off to talk to
   Windows or macOS, so they deserve the most care.
+
+## The iPhone app (0.6.0)
+
+- `crates/aa-mobile/src/lib.rs` — the C interface Swift calls; one function
+  per thing the app does (find, pair, connect, frame, audio, input, the
+  launcher). `include/aa_mobile.h` must list the same functions.
+- `crates/aa-viewer/src/reconnect.rs` — connect and reconnect, shared by
+  the desktop viewer and the phone. `lib.rs` says which modules need the
+  window.
+- `crates/aa-platform/src/apps.rs` — the launcher list on the host;
+  `crates/aa-core/src/apps.rs` — its messages and the icon pack.
+- `ios/Anywhere/*.swift` — see `docs/IPHONE.md`, section "How it is built".

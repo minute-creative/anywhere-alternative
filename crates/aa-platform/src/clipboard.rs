@@ -142,6 +142,8 @@ mod os {
                         .ok_or_else(|| PlatformError::Backend(anyhow::anyhow!("clipboard image is not a valid PNG")))?;
                     self.cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: rgba.into() })
                 }
+                // Blobs are never pasted (the session routes them elsewhere).
+                ClipItem::Blob { .. } => return Ok(()),
             };
             r.map_err(|e| PlatformError::Backend(anyhow::anyhow!("clipboard write: {e}")))
         }

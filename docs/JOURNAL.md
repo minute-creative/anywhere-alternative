@@ -551,3 +551,33 @@ the sharp rate. Also found the Mac capture queue kept the oldest frames.
 - No audio/video sync logic yet: `ts_ms` is on every audio packet, unused.
 - No Mac host, no controllers, no clipboard, no internet path: in order in
   `HANDOFF.md`.
+
+## Day 18, 2026-10-20 — the iPhone app and the launcher (v0.6.0)
+
+Owner's brief: the Mac on the iPhone with a Razer Kishi V2 clipped on,
+console-style ("PlayStation Remote Play" feel), every screen operable
+with the pad, touch allowed; Mac mini host; 1080p/720p, 75 fps cap;
+Tailscale/cellular from day one; free tooling only; no Android for now.
+
+Decisions and why:
+- Native Swift app, Rust engine underneath. The viewer's session code was
+  already free of window code; making `aa-viewer` a library (feature
+  `window` for the desktop parts) let the phone reuse connect/reconnect,
+  security, reassembly, decoding and stats unchanged. Only drawing, sound
+  output, the controller and touch are Swift.
+- VideoToolbox decoding is the Mac viewer's file compiled for iOS via
+  `#[path]`; CPU BGRA out, uploaded to a Metal texture each frame (about
+  8 MB/frame at 1080p, fine at 75 fps; zero-copy is a later step).
+- Launcher icons travel on the clipboard transfer as a new item kind
+  (`Blob`), because they are far bigger than a datagram and must arrive
+  whole; old versions ignore the unknown format byte.
+- Mac app listing uses command-line tools (`plutil`, `sips`, `ps`, `open`,
+  `osascript`) rather than AppKit bindings: no new framework features to
+  guess, and it works for the root/login-window host.
+- Free Apple ID signing: 7-day reinstall, owner's phone only; documented.
+  The virtual-controller entitlement stays out of reach, so the Mac gets
+  keys + mouse from the pad ("Desktop" and "Game" profiles); pass-through
+  stays for PC hosts.
+- Nothing could be compiled in this session (crates.io blocked from the
+  container; no iOS toolchain on Linux). The first push is CI's first look
+  at `ios/`, `aa-mobile` and the iOS target: expect rounds.

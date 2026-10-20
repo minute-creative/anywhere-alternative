@@ -183,3 +183,10 @@ crates/aa-host      host binary
 crates/aa-viewer    viewer binary
 docs/               architecture and decisions
 ```
+
+## iPhone
+
+Anywhere also runs on an iPhone with a clipped-on controller (Razer
+Kishi V2): a console-style home, a launcher for the Mac's apps and games,
+the picture and sound, and the pad as pointer, keys or controller. Build
+it yourself with Xcode (free): see `docs/IPHONE.md`.

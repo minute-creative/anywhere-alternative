@@ -97,6 +97,44 @@ through Anywhere**; **code once, then remembered**.
 
 ## Shipped but NOT yet confirmed by the owner (ask for results first)
 
+**0.6.0 (2026-10-20), the newest — the iPhone app and the launcher, CI only:**
+Owner asked (2026-10-20): the Mac on the iPhone, "custom macOS designed for
+iPhone", console-style, everything operable with a Razer Kishi V2 (touch
+also works); Mac mini is the host; landscape only; 1080p or 720p; 75 fps
+cap on the phone; Tailscale/cellular from day one; free tooling only (no
+Apple Developer Program); Android not now; the desktop app may adopt the
+look later. See `docs/IPHONE.md` for the result and the controls table.
+- `crates/aa-viewer` is now a library + the desktop program (`window`
+  feature). `reconnect.rs` holds connect/reconnect (was in main.rs);
+  `link.rs` holds `Wake`, `LiveStats`, the launcher state, the icon store
+  and an audio ring for systems where the UI plays sound (iOS).
+- `crates/aa-mobile`: C interface (`include/aa_mobile.h`) over the viewer
+  library; static library linked into the Swift app. Tested here: unit
+  tests only (no compiler for iOS on Linux).
+- `crates/aa-platform/src/ios`: VideoToolbox decoder shared with macOS
+  (`#[path]` to `macos/decoder.rs`); Apple framework crates now listed for
+  both systems in Cargo.toml.
+- Launcher: `aa_core::apps` (AppEntry, pages, IconPack), control messages
+  `AppList` / `Apps` / `AppAction`; `ClipItem::Blob` (format byte 3) rides
+  the clipboard transfer for the icon pack. Host: `aa_platform::apps`
+  (Mac: app folders + Steam library via `plutil`/`sips`/`ps`/`open`/
+  `osascript`; Windows: empty list for now; Linux/mock: a pretend list).
+  Quitting an app uses AppleScript: the first time macOS may ask the host
+  for Automation permission; it falls back to a TERM signal.
+- `ios/`: SwiftUI app, XcodeGen spec (`project.yml`), `build-rust.sh`
+  (run by Xcode before compiling). Free signing = 7-day reinstall.
+- CI job "iPhone app": Rust for `aarch64-apple-ios-sim`, then xcodegen +
+  xcodebuild (simulator, unsigned). Expect API-drift rounds: nothing in
+  `ios/` or the iOS Rust target has been compiled before the first push.
+- Known limits, told to the owner: no virtual controller on a Mac host
+  (entitlement), so games on the Mac get keys + mouse from the pad; the
+  phone sends no mic/camera/clipboard yet; Windows host has no launcher
+  list yet.
+Ask for: whether the app installs and pairs; `viewer.log` from the phone
+(Settings → Problems, or the Files app); fps/Mbps in the corner at 1080p75
+on Wi-Fi and over Tailscale; whether the launcher lists Steam games and
+icons appear; the feel of the pointer speed.
+
 **0.5.1 (2026-10-17), the newest — camera and microphone for calls, CI only:**
 Owner asked: change camera and mic in Google Meet and other apps on the
 computer being watched, "flexible both ways"; no $99 Apple account, so

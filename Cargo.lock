@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "aa-app"
-version = "0.5.13"
+version = "0.6.0"
 dependencies = [
  "aa-core",
  "aa-platform",
@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "aa-core"
-version = "0.5.13"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "aa-host"
-version = "0.5.13"
+version = "0.6.0"
 dependencies = [
  "aa-core",
  "aa-platform",
@@ -55,8 +55,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "aa-mobile"
+version = "0.6.0"
+dependencies = [
+ "aa-core",
+ "aa-platform",
+ "aa-viewer",
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "aa-platform"
-version = "0.5.13"
+version = "0.6.0"
 dependencies = [
  "aa-core",
  "anyhow",
@@ -93,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "aa-vcam"
-version = "0.5.13"
+version = "0.6.0"
 dependencies = [
  "aa-core",
  "windows",
@@ -102,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "aa-viewer"
-version = "0.5.13"
+version = "0.6.0"
 dependencies = [
  "aa-core",
  "aa-platform",

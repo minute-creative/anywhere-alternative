@@ -31,8 +31,36 @@ pub enum ViewerCommand {
     ShareList,
     /// Full access: show this on the host instead.
     SetShare(aa_core::share::ShareTarget),
+    /// The launcher: ask the host for its apps and games.
+    AppList,
+    /// The launcher: open, hide or quit one of them.
+    AppAction(String, aa_core::apps::AppAction),
     /// The window closed; send `Bye` and exit.
     Quit,
+}
+
+/// Events the session thread sends to the window (or the phone app).
+#[derive(Debug, Clone)]
+pub enum Wake {
+    /// A new frame is in the slot; redraw.
+    Frame,
+    /// The session ended (host gone, error); close the window.
+    SessionEnded(String),
+    /// The host went quiet; we are trying to get it back.
+    Reconnecting,
+    /// The host accepted us (first time or after a reconnect).
+    Connected,
+    /// Why the host's picture is paused, or `None` when it is back.
+    HostStatus(Option<String>),
+}
+
+/// Live numbers for the stats line; the session updates these.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LiveStats {
+    pub fps: u32,
+    pub mbps: f32,
+    pub rtt_ms: f32,
+    pub loss_pct: f32,
 }
 
 /// Session → window.
@@ -106,6 +134,61 @@ pub struct HostInfo {
     pub warning: Option<String>,
     /// The one-time "update the other computer" note, if due.
     pub update_note: Option<crate::update_note::UpdateNote>,
+    /// The host's launcher list (`AppList` asked; pages arrive one at a
+    /// time and are shown once all are in).
+    pub apps: Vec<aa_core::apps::AppEntry>,
+    /// Goes up every time `apps` or the icons change, so a screen can
+    /// notice without comparing lists.
+    pub apps_version: u32,
+    /// Pages of the list still on their way (`pages` total, received so far).
+    pub apps_pages: (u16, Vec<u16>),
+}
+
+/// Launcher icons by app id (PNG), kept outside `HostInfo` because they are
+/// big and change once per list.
+static ICONS: Mutex<Option<std::collections::HashMap<String, bytes::Bytes>>> = Mutex::new(None);
+
+pub fn set_icons(pack: aa_core::apps::IconPack) {
+    if let Ok(mut i) = ICONS.lock() {
+        *i = Some(pack.icons.into_iter().collect());
+    }
+    update_host_info(|i| i.apps_version = i.apps_version.wrapping_add(1));
+}
+
+pub fn icon(id: &str) -> Option<bytes::Bytes> {
+    ICONS.lock().ok().and_then(|i| i.as_ref().and_then(|m| m.get(id).cloned()))
+}
+
+/// Decoded sound waiting to be played, for systems where the Swift/UI side
+/// owns the speaker (iOS). 48 kHz, stereo, interleaved 16-bit; at most
+/// ~200 ms is kept so a stall never turns into a lasting delay.
+static AUDIO_OUT: Mutex<std::collections::VecDeque<i16>> = Mutex::new(std::collections::VecDeque::new());
+
+/// Samples the session decoded (stereo interleaved, 48 kHz).
+pub fn audio_push(pcm: &[i16]) {
+    const KEEP: usize = 48_000 * 2 / 5; // 200 ms
+    if let Ok(mut q) = AUDIO_OUT.lock() {
+        q.extend(pcm.iter().copied());
+        let extra = q.len().saturating_sub(KEEP);
+        if extra > 0 {
+            q.drain(..extra);
+        }
+    }
+}
+
+/// Fill `out` with the next samples (silence when there are none);
+/// returns how many were real.
+pub fn audio_pull(out: &mut [i16]) -> usize {
+    let Ok(mut q) = AUDIO_OUT.lock() else {
+        out.fill(0);
+        return 0;
+    };
+    let n = q.len().min(out.len());
+    for (dst, src) in out.iter_mut().zip(q.drain(..n)) {
+        *dst = src;
+    }
+    out[n..].fill(0);
+    n
 }
 
 static INFO: Mutex<Option<HostInfo>> = Mutex::new(None);

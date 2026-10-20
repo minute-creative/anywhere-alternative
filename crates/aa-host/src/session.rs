@@ -334,6 +334,17 @@ pub async fn run(listen: SocketAddr, backends: HostBackends) -> anyhow::Result<(
                         told = (status, dest, Instant::now());
                     }
                 }
+                // Launcher icons ready: one named blob through the reliable transfer.
+                while let Ok(pack) = stream.icons_rx.try_recv() {
+                    if dest.is_some() {
+                        let item = aa_core::clipboard::ClipItem::Blob { name: aa_core::apps::IconPack::BLOB_NAME.into(), data: pack.encode() };
+                        if clip.copied(&item) {
+                            tracing::info!(icons = pack.icons.len(), "sending launcher icons");
+                        } else {
+                            tracing::warn!("launcher icons too large to send");
+                        }
+                    }
+                }
                 if let Err(e) = clip_pump(&socket, clip_link.as_ref(), &mut clip, viewer.as_ref().map(|v| v.addr), &seq).await {
                     tracing::debug!("clipboard send error (continuing): {e:#}");
                 }
@@ -802,6 +813,28 @@ async fn handle_packet(
                 ControlMessage::ShareList | ControlMessage::SetShare { .. } if is_current_viewer => {
                     tracing::info!("the viewer asked to choose what is shared, but has no full access here");
                 }
+                // The launcher (iPhone app): list apps and games, then send
+                // their icons once the list is out. Listing reads folders
+                // and runs small tools, so never on the network loop.
+                ControlMessage::AppList if is_current_viewer => {
+                    let apps = tokio::task::spawn_blocking(aa_platform::apps::list).await.unwrap_or_default();
+                    let pages = aa_core::apps::pages(&apps);
+                    let total = u16::try_from(pages.len()).unwrap_or(u16::MAX);
+                    for (i, items) in pages.into_iter().enumerate() {
+                        let page = u16::try_from(i).unwrap_or(u16::MAX);
+                        send_control(socket, from, &ControlMessage::Apps { page, pages: total, items }, seq).await?;
+                    }
+                    tracing::info!(apps = apps.len(), "sent the launcher list");
+                    let ids: Vec<String> = apps.into_iter().map(|a| a.id).collect();
+                    let tx = stream.icons_tx.clone();
+                    let _ = std::thread::Builder::new().name("aa-icons".into()).spawn(move || {
+                        let _ = tx.send(aa_platform::apps::icons(&ids));
+                    });
+                }
+                ControlMessage::AppAction { id, action } if is_current_viewer => {
+                    tracing::info!(id, ?action, "launcher");
+                    let _ = tokio::task::spawn_blocking(move || aa_platform::apps::act(&id, action)).await;
+                }
                 other => tracing::debug!(?other, "ignored control message"),
             }
         }
@@ -1106,10 +1139,16 @@ struct Stream {
     /// so never on the network loop).
     watched: Arc<std::sync::Mutex<ShareTarget>>,
     closed: Arc<std::sync::atomic::AtomicBool>,
+    /// Launcher icons being gathered on another thread (slow: one image
+    /// conversion per app the first time) land here; the network loop
+    /// hands them to the clipboard transfer (`icons_rx`).
+    icons_tx: std::sync::mpsc::Sender<aa_core::apps::IconPack>,
+    icons_rx: std::sync::mpsc::Receiver<aa_core::apps::IconPack>,
 }
 
 impl Stream {
     fn new(fps: u16) -> Self {
+        let (icons_tx, icons_rx) = std::sync::mpsc::channel();
         let watched = Arc::new(std::sync::Mutex::new(ShareTarget::Screen));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
@@ -1124,6 +1163,8 @@ impl Stream {
         Self {
             watched,
             closed,
+            icons_tx,
+            icons_rx,
             now: ShareTarget::Screen,
             local: ShareTarget::Screen,
             viewer_choice: None,

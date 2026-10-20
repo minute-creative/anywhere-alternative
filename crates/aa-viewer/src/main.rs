@@ -19,25 +19,12 @@
 //! trying to reconnect (`run_reconnecting`), looking it up again by its key
 //! in case its address changed.
 
-mod audio;
-mod camera;
-mod ds5;
-mod keymap;
-mod link;
-mod net;
-mod overlay;
-mod pacing;
-mod pads;
-mod session;
-mod udp;
-mod update_note;
-mod window;
-
 use std::net::SocketAddr;
 
-use session::MicStart;
+use aa_viewer::reconnect::{self, ConnectPrefs};
+use aa_viewer::session::MicStart;
+use aa_viewer::{ds5, link, pads, session, window};
 
-use anyhow::Context;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -154,47 +141,19 @@ fn call_prefs(args: &Args) -> session::CallPrefs {
     session::CallPrefs { camera: on(&args.camera), test_camera: args.test_camera, mic: on(&args.call_mic) }
 }
 
-/// The most frames a second we ever ask for (the owner's choice).
-const FPS_LIMIT: u16 = 240;
-
-/// Apply the Resolution and Frame rate settings to what we tell the host.
-fn apply_choices(caps: &mut aa_core::capability::Capabilities, args: &Args) {
-    let screen = aa_platform::display_refresh_hz();
-    let screen_cap = screen.unwrap_or(FPS_LIMIT).clamp(30, FPS_LIMIT);
-    match args.fps.trim().parse::<u16>() {
-        Ok(n) if n > 0 => {
-            if n > screen_cap {
-                tracing::info!(
-                    asked = n,
-                    screen = screen_cap,
-                    "this screen shows at most {screen_cap} frames a second; asking for that"
-                );
-            }
-            caps.max_fps = n.min(screen_cap).min(FPS_LIMIT);
-            caps.fixed_fps = true;
-        }
-        _ => {
-            caps.max_fps = screen_cap;
-            caps.fixed_fps = false;
-        }
+/// Everything the session needs from the command line.
+fn connect_prefs(args: &Args) -> ConnectPrefs {
+    ConnectPrefs {
+        host: args.host.clone(),
+        bind: args.bind,
+        mock: args.mock,
+        mock_raw: args.mock_raw,
+        test_input: args.test_input,
+        resolution: args.resolution.clone(),
+        fps: args.fps.clone(),
+        screen_hz: None,
+        calls: call_prefs(args),
     }
-    if let Ok(h) = args.resolution.trim().trim_end_matches('p').parse::<u32>() {
-        // Height decides; width is generous so wide screens keep their shape.
-        caps.max_resolution = aa_core::video::Resolution::new((h * 32 / 9).min(caps.max_resolution.width), h);
-    }
-    // We can resume from a repair frame and report our last good frame —
-    // on a Mac. Windows' decoders mis-handle a repair frame that refers back
-    // past skipped frames: parts of the picture stayed garbled until they
-    // changed (PC watching the Mac, 0.5.6). There a loss asks for a fresh
-    // keyframe instead: a bigger frame, but always a clean picture.
-    caps.loss_recovery = cfg!(target_os = "macos");
-    tracing::info!(
-        max_fps = caps.max_fps,
-        fixed = caps.fixed_fps,
-        screen_hz = screen,
-        max_res = ?caps.max_resolution,
-        "asking the host for"
-    );
 }
 
 fn main() -> anyhow::Result<()> {
@@ -254,7 +213,10 @@ fn main() -> anyhow::Result<()> {
             });
         }
         // Keep the sender alive: a closed command channel means "window closed".
-        let result = runtime.block_on(run_reconnecting(&args, host, None, cmd_rx, None, mic, None, pad_out));
+        let mut cmd_rx = cmd_rx;
+        let prefs = connect_prefs(&args);
+        let result =
+            runtime.block_on(reconnect::run_reconnecting(&prefs, host, None, &mut cmd_rx, None, mic, None, pad_out));
         drop(cmd_tx);
         return result;
     }
@@ -272,23 +234,24 @@ fn main() -> anyhow::Result<()> {
     let session_frames = frames.clone();
     let session_proxy = event_loop.create_proxy();
     let status_proxy = std::sync::Mutex::new(event_loop.create_proxy());
-    let session_args = args.clone();
+    let prefs = connect_prefs(&args);
     std::thread::Builder::new().name("aa-session".into()).spawn(move || {
         let status = move |s: window::Wake| {
             let _ = status_proxy.lock().expect("proxy").send_event(s);
         };
         let started = std::time::Instant::now();
-        let result = runtime.block_on(run_reconnecting(
-            &session_args,
+        let mut cmd_rx = cmd_rx;
+        let result = runtime.block_on(reconnect::run_reconnecting(
+            &prefs,
             host,
             Some(session_frames),
-            cmd_rx,
+            &mut cmd_rx,
             Some(stats_tx),
             mic,
             Some(std::sync::Arc::new(status)),
             pad_out,
         ));
-        send_usage(host, started.elapsed());
+        reconnect::send_usage(host, started.elapsed(), "desktop");
         let reason = match result {
             Ok(()) => {
                 tracing::info!("session ended");
@@ -308,191 +271,6 @@ fn main() -> anyhow::Result<()> {
     app.set_stats_receiver(stats_rx);
     event_loop.run_app(&mut app)?;
     Ok(())
-}
-
-/// Without a window (tests), how long we keep trying to get back to a host
-/// that went quiet. With a window we keep trying until it is closed: the
-/// other computer may be restarting after a power cut, or the Wi-Fi coming
-/// back, and the person expects the picture to return by itself.
-const RECONNECT_HEADLESS: std::time::Duration = std::time::Duration::from_secs(120);
-
-fn backends(args: &Args) -> anyhow::Result<aa_platform::ViewerBackends> {
-    let mut b = if args.mock {
-        aa_platform::mock::viewer_backends(args.mock_raw)?
-    } else {
-        aa_platform::viewer_backends().context("real viewer backends unavailable; try --mock")?
-    };
-    apply_choices(&mut b.capabilities, args);
-    Ok(b)
-}
-
-/// Errors that mean "the host went away" rather than "the host said no":
-/// silence, or the OS telling us nothing listens there any more (the host
-/// program quit, the PC rebooted) or the network itself vanished.
-fn is_host_lost(e: &anyhow::Error) -> bool {
-    use std::io::ErrorKind as K;
-    e.downcast_ref::<session::HostLost>().is_some()
-        || e.downcast_ref::<std::io::Error>().is_some_and(|io| {
-            matches!(
-                io.kind(),
-                K::ConnectionRefused | K::ConnectionReset | K::NetworkUnreachable | K::HostUnreachable | K::NetworkDown
-            )
-        })
-}
-
-type StatusFn = std::sync::Arc<dyn Fn(window::Wake) + Send + Sync>;
-
-/// Run sessions until the user quits. If the host goes quiet (asleep,
-/// crashed, Wi-Fi blip) we look for it again (it may have a new address)
-/// and reconnect instead of freezing on the last picture: until the window
-/// is closed, or for two minutes without a window.
-#[allow(clippy::too_many_arguments)]
-async fn run_reconnecting(
-    args: &Args,
-    first_host: SocketAddr,
-    frames: Option<link::FrameSlot>,
-    mut commands: tokio::sync::mpsc::Receiver<link::ViewerCommand>,
-    stats_tx: Option<std::sync::mpsc::Sender<overlay::LiveStats>>,
-    mic: MicStart,
-    status: Option<StatusFn>,
-    pad_out: Option<std::sync::mpsc::Sender<aa_core::ds5::PadMsg>>,
-) -> anyhow::Result<()> {
-    let mut host = first_host;
-    let mut lost_since: Option<std::time::Instant> = None;
-    let host_key: std::sync::Arc<std::sync::Mutex<Option<aa_core::secure::PublicKeyBytes>>> = std::sync::Arc::default();
-    let mut attempt = 0usize;
-    loop {
-        let on_connected: Option<Box<dyn Fn() + Send>> =
-            status.clone().map(|s| Box::new(move || s(window::Wake::Connected)) as Box<dyn Fn() + Send>);
-        let opts = session::Options {
-            host,
-            bind: args.bind,
-            frames: frames.clone(),
-            test_input: args.test_input,
-            stats_tx: stats_tx.clone(),
-            mic,
-            pad_out: pad_out.clone(),
-            on_connected,
-            on_status: status.clone().map(|s| {
-                Box::new(move |m: Option<String>| s(window::Wake::HostStatus(m))) as Box<dyn Fn(Option<String>) + Send>
-            }),
-            host_key_out: Some(std::sync::Arc::clone(&host_key)),
-            calls: call_prefs(args),
-        };
-        let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = std::sync::Arc::clone(&connected);
-        let user_cb = opts.on_connected;
-        let opts = session::Options {
-            on_connected: Some(Box::new(move || {
-                flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                if let Some(cb) = &user_cb {
-                    cb();
-                }
-            })),
-            ..opts
-        };
-        let result = session::run(opts, backends(args)?, &mut commands).await;
-        if connected.load(std::sync::atomic::Ordering::Relaxed) {
-            // We were back in business; a later loss starts afresh: a new
-            // two minutes (headless) and the short 1 s first wait again.
-            // (Before 0.5.8 `attempt` kept counting, so every loss after the
-            // first waited the full 5 s before trying.)
-            lost_since = None;
-            attempt = 0;
-        }
-        let Err(e) = result else { return Ok(()) };
-        let lost = is_host_lost(&e);
-        let retrying = lost_since.is_some();
-        // Before the first connection, errors are reported, not retried
-        // (wrong address, host refused us).
-        if !lost && !retrying {
-            return Err(e);
-        }
-        if e.downcast_ref::<net::NotPaired>().is_some() {
-            return Err(e);
-        }
-        if lost_since.is_none() {
-            lost_since = Some(std::time::Instant::now());
-            tracing::warn!("lost the host; reconnecting");
-        }
-        if frames.is_none() && lost_since.is_some_and(|t| t.elapsed() > RECONNECT_HEADLESS) {
-            return Err(e.context("gave up reconnecting"));
-        }
-        if let Some(s) = &status {
-            s(window::Wake::Reconnecting);
-        }
-        link::update_summary(|s| s.reconnects += 1);
-        // Back off gently (1 s, then 2 s, at most 5 s) so a long outage
-        // doesn't flood the network, but a blip is over in a second.
-        attempt += 1;
-        tokio::time::sleep(std::time::Duration::from_secs(attempt.min(5) as u64)).await;
-        let key = *host_key.lock().expect("key");
-        host = next_address(args, host, key, attempt).await;
-    }
-}
-
-/// Where to try next: the same computer wherever it answers now (found by
-/// its key: new home address, or through Tailscale), else each address it
-/// was ever seen at in turn, else the one we had.
-async fn next_address(
-    args: &Args,
-    current: SocketAddr,
-    key: Option<aa_core::secure::PublicKeyBytes>,
-    attempt: usize,
-) -> SocketAddr {
-    let Some(key) = key else {
-        // Never connected yet: the old behaviour (name or discovery).
-        return aa_platform::discover::resolve(args.host.as_deref()).await.unwrap_or(current);
-    };
-    if let Some(found) = aa_platform::discover::locate(&key).await {
-        if found != current {
-            tracing::info!(addr = %found, "found it again at a new address");
-        }
-        return found;
-    }
-    let known: Vec<SocketAddr> = aa_platform::trust::paired_host(&key)
-        .map(|h| h.addrs.iter().filter_map(|a| a.parse().ok()).collect())
-        .unwrap_or_default();
-    if known.is_empty() {
-        current
-    } else {
-        known[attempt % known.len()]
-    }
-}
-
-/// The anonymous "a viewing ended" note (only with the person's permission;
-/// see `aa_platform::telemetry`). Counts and kinds only: how long, how
-/// smooth, how it was connected, which features were used.
-fn send_usage(host: SocketAddr, wall: std::time::Duration) {
-    use serde_json::json;
-    let s = link::summary();
-    if s.seconds == 0 {
-        return; // never got going: nothing worth counting
-    }
-    let info = link::host_info();
-    let connection = if aa_platform::tailscale::is_tailscale_ip(host.ip()) {
-        "tailscale"
-    } else if aa_platform::lan::is_local_network(host.ip()) {
-        "home network"
-    } else {
-        "internet"
-    };
-    aa_platform::telemetry::send(
-        "stream_session",
-        &[
-            ("minutes", json!(wall.as_secs() / 60)),
-            ("avg_fps", json!(s.fps_sum / s.seconds.max(1))),
-            ("frozen_seconds", json!(s.frozen_seconds)),
-            ("reconnects", json!(s.reconnects)),
-            ("max_mbps", json!((s.max_mbps * 10.0).round() / 10.0)),
-            ("codec", json!(info.codec.map(|c| format!("{c:?}")))),
-            ("host_os", json!(if link::host_is_mac() { "macos" } else { "windows" })),
-            ("connection", json!(connection)),
-            ("game_mouse", json!(s.game_mouse)),
-            ("mic", json!(s.mic)),
-            ("camera", json!(s.camera)),
-        ],
-    );
 }
 
 /// `--test-clipboard`: pretend the user copies a new line of text every

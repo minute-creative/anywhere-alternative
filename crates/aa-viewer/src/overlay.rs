@@ -45,14 +45,7 @@ impl Settings {
     }
 }
 
-/// Live numbers for the stats line; the session updates these.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct LiveStats {
-    pub fps: u32,
-    pub mbps: f32,
-    pub rtt_ms: f32,
-    pub loss_pct: f32,
-}
+pub use crate::link::LiveStats;
 
 pub struct Overlay {
     ctx: egui::Context,

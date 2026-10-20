@@ -31,18 +31,22 @@ socket2 = { workspace = true, features = ["all"] }
 # Real backends are added per stage. Each one is its own module behind
 # `#[cfg(target_os)]` and, where it needs a vendor SDK, its own feature flag.
 #
-[target.'cfg(target_os = "macos")'.dependencies]
 # Apple framework bindings (generated from the SDK headers). Default
 # features = every API of each framework: compiles a little longer, but a
 # missing feature flag otherwise shows up only as a CI round trip.
+# The video decoder is shared by the Mac viewer and the iPhone app, so its
+# frameworks are listed for both systems.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2 = "0.6"
-block2 = "0.6"
-dispatch2 = "0.3"
-objc2-foundation = "0.3"
 objc2-video-toolbox = "0.3"
 objc2-core-media = "0.3"
 objc2-core-video = "0.3"
 objc2-core-foundation = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2-foundation = "0.3"
 objc2-core-graphics = "0.3"
 # Screen and system-sound capture (macOS 12.3+ / 13+ for sound).
 objc2-screen-capture-kit = "0.3"

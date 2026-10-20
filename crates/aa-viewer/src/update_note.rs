@@ -13,6 +13,13 @@
 /// What changed, newest first, in words for the person using it. Add the
 /// new version's lines here with each release.
 const CHANGES: &[(&str, &[&str])] = &[
+    (
+        "0.6.0",
+        &[
+            "iPhone app: watch and use the Mac from the phone with a clipped-on controller",
+            "Launcher: the Mac's apps and games as a console-style menu (needs 0.6 on the Mac)",
+        ],
+    ),
     ("0.5.13", &["Sharper picture on slow Wi-Fi: a smaller, crisp picture instead of a big blurry one"]),
     (
         "0.5.12",

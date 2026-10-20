@@ -25,6 +25,7 @@ use aa_core::share::ShareTarget;
 use aa_core::video::{Codec, EncodedFrameMeta, PixelFormat, Resolution};
 use bytes::Bytes;
 
+pub mod apps;
 pub mod audio;
 pub mod camera;
 pub mod clipboard;
@@ -48,6 +49,8 @@ pub mod trust;
 pub mod update;
 pub mod usbip;
 
+#[cfg(target_os = "ios")]
+pub mod ios;
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "windows")]
@@ -426,11 +429,15 @@ pub fn viewer_backends() -> Result<ViewerBackends> {
     {
         macos::viewer_backends()
     }
+    #[cfg(target_os = "ios")]
+    {
+        ios::viewer_backends()
+    }
     #[cfg(target_os = "windows")]
     {
         windows::viewer_backends()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
     {
         Err(PlatformError::Unavailable("no real viewer backend for this OS; use --mock".into()))
     }

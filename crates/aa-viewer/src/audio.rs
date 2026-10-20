@@ -57,6 +57,13 @@ impl AudioSink {
             self.depack.handle(payload, |pcm| p.push(pcm));
             return;
         }
+        // On the phone the app plays the sound (AVAudioEngine); hand it over.
+        #[cfg(target_os = "ios")]
+        {
+            self.depack.handle(payload, crate::link::audio_push);
+            return;
+        }
+        #[cfg(not(target_os = "ios"))]
         self.depack.handle(payload, |_| {});
     }
 

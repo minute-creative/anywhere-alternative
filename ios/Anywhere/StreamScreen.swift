@@ -1,0 +1,181 @@
+// Watching the Mac. The picture fills the screen; over it, depending on
+// what is open: the pointer (desktop profile), a small stats corner, the
+// quick menu (Home button), the launcher (Y), the keyboard (X), or a
+// notice while connecting / reconnecting / paused.
+
+import SwiftUI
+
+enum Overlay: Equatable {
+    case none
+    case quickMenu
+    case launcher
+    case keyboard
+}
+
+struct StreamScreen: View {
+    @EnvironmentObject var engine: Engine
+    @EnvironmentObject var pad: Pad
+    @EnvironmentObject var router: Router
+
+    @State private var overlay: Overlay = .none
+    @State private var videoRect = CGRect.zero
+    @State private var pointer = CGPoint(x: 0.5, y: 0.5)
+    @State private var audio = AudioOutput()
+    @State private var pointerTimer: Timer?
+    @State private var endedToken = 0
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            StreamView(fps: Int(engine.prefs.fps)) { r in videoRect = r }
+                .ignoresSafeArea()
+
+            if engine.prefs.profile == .desktop, overlay == .none, engine.status.connected, videoRect.width > 0 {
+                PointerView()
+                    .position(x: videoRect.minX + pointer.x * videoRect.width, y: videoRect.minY + pointer.y * videoRect.height)
+                    .allowsHitTesting(false)
+                    .ignoresSafeArea()
+            }
+
+            if engine.prefs.showStats, engine.status.connected, overlay == .none {
+                VStack { Spacer(); HStack { Spacer(); statsCorner } }.padding(10).ignoresSafeArea()
+            }
+
+            // Touch fallback for the quick menu (no controller).
+            if overlay == .none {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button { open(.quickMenu) } label: {
+                            Image(systemName: "line.3.horizontal.circle.fill").font(.system(size: 26))
+                                .foregroundStyle(.white.opacity(0.35))
+                        }
+                        .padding(8)
+                    }
+                    Spacer()
+                }
+            }
+
+            notice
+
+            switch overlay {
+            case .none: EmptyView()
+            case .quickMenu: QuickMenu(overlay: $overlay)
+            case .launcher: LauncherView(overlay: $overlay)
+            case .keyboard: KeyboardView(overlay: $overlay)
+            }
+        }
+        .onAppear { start() }
+        .onDisappear { stop() }
+        .onChange(of: overlay) { _, o in
+            if o == .none {
+                pad.mode = .stream
+            } else {
+                pad.mapper.releaseAll()
+                pad.mode = .ui
+            }
+        }
+        .onChange(of: engine.prefs.profile) { _, p in
+            pad.mapper.profile = p
+            pad.mapper.reset()
+        }
+        .onChange(of: engine.status.state) { _, s in
+            if s == "ended" && overlay != .none { overlay = .none }
+        }
+    }
+
+    @ViewBuilder private var notice: some View {
+        let st = engine.status
+        if st.state == "connecting" {
+            Notice(symbol: "antenna.radiowaves.left.and.right", title: "Connecting…", detail: "Finding the Mac and setting up the secure link.")
+                .background(Color.black.opacity(0.6)).clipShape(RoundedRectangle(cornerRadius: 24))
+        } else if st.state == "reconnecting" {
+            Notice(symbol: "arrow.triangle.2.circlepath", title: "Reconnecting…", detail: "The Mac stopped answering; trying again until it is back.")
+                .background(Color.black.opacity(0.6)).clipShape(RoundedRectangle(cornerRadius: 24))
+        } else if st.state == "ended" {
+            VStack(spacing: 14) {
+                Notice(symbol: "xmark.circle", title: "Disconnected", detail: st.reason)
+                HintBar(hints: [("A", "Try again"), ("B", "Home")])
+            }
+            .background(Color.black.opacity(0.75)).clipShape(RoundedRectangle(cornerRadius: 24))
+            .onAppear { endedHandler() }
+        } else if let p = st.paused, overlay == .none {
+            VStack { Spacer(); Text(p).font(.system(size: 15, weight: .medium)).padding(12)
+                .background(Capsule().fill(Color.black.opacity(0.6))).padding(.bottom, 24) }
+        }
+    }
+
+    private var statsCorner: some View {
+        let s = engine.status
+        return Text("\(s.fps) fps · \(String(format: "%.1f", s.mbps)) Mbps · \(Int(s.rtt_ms)) ms · \(String(format: "%.0f", s.loss_pct))% loss · \(s.codec)")
+            .font(.system(size: 11, weight: .medium, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.7))
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Capsule().fill(Color.black.opacity(0.45)))
+    }
+
+    private func start() {
+        pad.mapper.profile = engine.prefs.profile
+        pad.mapper.pointerSpeed = engine.prefs.pointerSpeed
+        pad.mapper.reset()
+        pad.mode = .stream
+        pad.onStreamEvent = { ev in
+            switch ev {
+            case .home: open(.quickMenu)
+            case .x: open(.keyboard)
+            case .y: open(.launcher)
+            default: break
+            }
+        }
+        audio.start()
+        // The pointer drawn on the phone follows the mapper's position.
+        pointerTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { _ in
+            Task { @MainActor in
+                let p = pad.mapper.pointer
+                if p != pointer { pointer = p }
+            }
+        }
+    }
+
+    private func stop() {
+        pad.pop(endedToken)
+        pointerTimer?.invalidate()
+        pad.onStreamEvent = nil
+        pad.mapper.releaseAll()
+        pad.mode = .ui
+        audio.stop()
+        engine.disconnect()
+    }
+
+    private func open(_ o: Overlay) {
+        guard engine.status.state != "ended" else { return }
+        if o == .launcher, engine.apps.isEmpty { engine.requestApps() }
+        overlay = o
+    }
+
+    private func endedHandler() {
+        pad.mode = .ui
+        pad.pop(endedToken)
+        endedToken = pad.push { ev in
+            switch ev {
+            case .confirm:
+                let last = UserDefaults.standard.string(forKey: "last-host") ?? ""
+                if !last.isEmpty { engine.connect(host: last) } else { router.screen = .home }
+            case .back, .home: router.screen = .home
+            default: break
+            }
+        }
+    }
+}
+
+/// The pointer, drawn by the phone (the Mac's own is hidden in the stream).
+struct PointerView: View {
+    var body: some View {
+        ZStack {
+            Image(systemName: "cursorarrow").font(.system(size: 26, weight: .bold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.9), radius: 1.5)
+        }
+        .offset(x: 9, y: 11)
+    }
+}

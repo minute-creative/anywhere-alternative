@@ -1,0 +1,27 @@
+[package]
+name = "aa-mobile"
+description = "Anywhere Alternative for phones: the viewer library behind a plain C interface, for the iPhone app's Swift code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+# staticlib: linked into the iPhone app by Xcode. rlib: so Linux CI can
+# compile and unit-test the same code.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+aa-core.workspace = true
+aa-platform.workspace = true
+# The viewer without its desktop window.
+aa-viewer = { path = "../aa-viewer", default-features = false }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

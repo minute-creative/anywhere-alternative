@@ -30,7 +30,7 @@ it here first, then in code.
 
 - Multi-user sessions, accounts, billing, enterprise anything.
 - Linux (the core compiles there for CI only).
-- Mobile viewers.
+- Android (an iPhone viewer exists since 0.6.0; see §6 "The iPhone app").
 
 ## 2. The physics we cannot beat
 
@@ -90,7 +90,8 @@ is worth nothing; we would rather skip it than show it late.
 | `aa-core`     | Protocol, wire format, negotiation, stats, config     | **none** (`#![forbid(unsafe_code)]`) |
 | `aa-platform` | Traits + one backend module per OS/vendor; mock       | yes      |
 | `aa-host`     | The host binary: session loop + pipeline threads      | no       |
-| `aa-viewer`   | The viewer binary: session loop + decode + window     | no       |
+| `aa-viewer`   | The viewer library (session, decode, reconnect) + the desktop program behind the `window` feature | no |
+| `aa-mobile`   | The viewer library behind a C interface for the iPhone app (`ios/`) | no |
 | `aa-signal`   | (stage 3) tiny server: pairing, STUN, relay           | no       |
 
 Rule: `aa-core` is unit-tested and runs in CI on Linux. If a change there
@@ -421,6 +422,42 @@ binary `[kind 1=video|2=audio][flags bit0=key][u64 ts µs BE][payload]`,
 JSON text `want` / `keyframe` / `status`. Origin allowlist in
 `aa_core::calls::origin_allowed`. Windows: `aa-vcam` DLL ↔ host via shared
 memory (layout in `aa_core::calls::vcam`, seqlock on OFF_SEQ).
+
+### The iPhone app and the launcher (0.6.0)
+
+The owner's brief: the Mac mini on an iPhone with a clipped-on controller
+(Razer Kishi V2), console-style, every screen operable with the pad,
+touch optional, free tooling only. Design:
+
+- **Split**: Rust does everything that is the same as on a desktop viewer
+  (`aa-viewer` as a library: find, pair, encrypt, receive, reassemble,
+  decode, reconnect, stats); Swift does the screen (Metal), sound
+  (AVAudioEngine pulling a ring in `link.rs`), the controller
+  (GameController) and touch. `aa-mobile` is the C interface between
+  them; one connection at a time.
+- **Decoding**: the Mac's VideoToolbox decoder compiled for iOS, CPU BGRA
+  out, one texture upload per frame. The phone asks for 1080p or 720p and
+  60 or 75 fps (`aa_platform::ios::MAX_FPS`), `loss_recovery` on (Apple
+  decoder).
+- **Controls** live in Swift (`InputMapper`): Desktop (pointer/scroll on
+  the sticks, clicks, modifiers on the bumpers, arrows on the d-pad), Game
+  (WASD + mouse look + FPS buttons) and Controller pass-through (needs a
+  host with a virtual pad: PC yes, Mac no — Apple's entitlement). Menus
+  use one navigation stack with key-repeat (`Pad`), so an overlay takes
+  the pad and gives it back by itself. Home always opens the quick menu.
+- **Launcher**: viewer asks `AppList`; host answers `Apps` pages (8 per
+  datagram) and then the icons as `ClipItem::Blob("app-icons")` on the
+  reliable clipboard transfer. `AppAction {open, quit, hide}` opens via
+  `open -a` / `steam://rungameid`, quits via AppleScript (TERM fallback).
+  Only the Mac host lists anything today.
+- **Reaching the Mac from anywhere**: the phone's discovery asks every
+  remembered address of paired hosts, which includes the Mac's Tailscale
+  address, so with the Tailscale app on the phone a paired Mac is found
+  from cellular. Pairing itself works on the home Wi-Fi or over Tailscale
+  (hosts refuse pairing from internet addresses).
+- **Signing**: free Apple ID = 7-day reinstall, owner's phone only;
+  documented in `docs/IPHONE.md`. The $99 program would also unlock the
+  Mac virtual controller request; the owner chose free for now.
 
 ### Codec choice
 

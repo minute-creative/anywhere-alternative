@@ -16,6 +16,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod apps;
 pub mod audio;
 pub mod av1;
 pub mod calls;

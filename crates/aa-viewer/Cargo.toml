@@ -6,9 +6,21 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# The crate is a library (session, network, decode, controllers) plus the
+# desktop program on top. The iPhone app (`aa-mobile`) uses the library
+# without the window parts, so those sit behind the `window` feature.
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "aa-viewer"
 path = "src/main.rs"
+required-features = ["window"]
+
+[features]
+default = ["window"]
+# The desktop window: winit + wgpu picture, egui settings panel.
+window = ["dep:winit", "dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:egui", "dep:egui-wgpu", "dep:egui-winit"]
 
 [dependencies]
 aa-core.workspace = true
@@ -21,13 +33,13 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde_json.workspace = true
-winit.workspace = true
-wgpu.workspace = true
-pollster.workspace = true
-bytemuck.workspace = true
-egui.workspace = true
-egui-wgpu.workspace = true
-egui-winit.workspace = true
+winit = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }
+egui = { workspace = true, optional = true }
+egui-wgpu = { workspace = true, optional = true }
+egui-winit = { workspace = true, optional = true }
 
 # Game controllers (DualSense, DualShock, Xbox, Switch Pro, most others;
 # USB or Bluetooth). Mac/Windows only: on Linux it needs libudev, and we

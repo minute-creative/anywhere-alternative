@@ -131,6 +131,14 @@ pub enum ControlMessage {
         #[serde(default)]
         problem: Option<String>,
     },
+    /// Viewer → host: which apps and games are there? (The launcher on the
+    /// iPhone app.) Answered with `Apps` pages, then the icons as a blob
+    /// through the clipboard transfer. Hosts before 0.6 ignore it.
+    AppList,
+    /// Host → viewer: one page of the launcher list (`page` of `pages`).
+    Apps { page: u16, pages: u16, items: Vec<crate::apps::AppEntry> },
+    /// Viewer → host: open, switch to, hide or quit one app from the list.
+    AppAction { id: String, action: crate::apps::AppAction },
 }
 
 // Helpers to build, write and read a message.

@@ -1,0 +1,87 @@
+# The iPhone app's Xcode project, described here and generated with
+# XcodeGen (`brew install xcodegen; xcodegen generate` in this folder).
+# Why not a checked-in .xcodeproj: that file format is huge and merges
+# badly; this one is short and readable.
+name: Anywhere
+options:
+  bundleIdPrefix: com.minutecreative
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    # Free Apple ID signing: pick your personal team once in Xcode
+    # (Signing & Capabilities); Xcode writes it into the project it generated.
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+targets:
+  Anywhere:
+    type: application
+    platform: iOS
+    sources:
+      - path: Anywhere
+        excludes:
+          - "Info.plist"
+    info:
+      path: Anywhere/Info.plist
+      properties:
+        CFBundleDisplayName: Anywhere
+        CFBundleShortVersionString: "0.6.0"
+        CFBundleVersion: "1"
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UIViewControllerBasedStatusBarAppearance: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Finding the Mac on this Wi-Fi sends a broadcast; iOS asks once.
+        NSLocalNetworkUsageDescription: "Anywhere looks for your computers on this Wi-Fi."
+        # The clipped-on controller drives the whole app.
+        GCSupportsControllerUserInteraction: true
+        GCSupportedGameControllers:
+          - ProfileName: ExtendedGamepad
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.minutecreative.anywhere.ios
+        PRODUCT_NAME: Anywhere
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_OBJC_BRIDGING_HEADER: Anywhere/Bridging.h
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/../crates/aa-mobile/include"
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/rust-lib/$(PLATFORM_NAME)"
+        # The Rust engine, and the C++ runtime it needs (OpenH264 is C++).
+        OTHER_LDFLAGS:
+          - "-laa_mobile"
+          - "-lc++"
+        ENABLE_BITCODE: false
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+    preBuildScripts:
+      - name: Build the Rust engine
+        script: |
+          "$SRCROOT/build-rust.sh"
+        outputFiles:
+          - "$(SRCROOT)/rust-lib/$(PLATFORM_NAME)/libaa_mobile.a"
+    dependencies:
+      - sdk: VideoToolbox.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
+      - sdk: CoreFoundation.framework
+      - sdk: Security.framework
+      - sdk: GameController.framework
+      - sdk: AVFoundation.framework
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+schemes:
+  Anywhere:
+    build:
+      targets:
+        Anywhere: all
+    run:
+      config: Debug

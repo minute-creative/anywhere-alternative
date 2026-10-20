@@ -39,20 +39,7 @@ use crate::keymap::hid_usage;
 use crate::link::{FrameSlot, ViewerCommand};
 use crate::overlay::{LiveStats, Overlay, Settings};
 
-/// Events the session thread sends to the window.
-#[derive(Debug, Clone)]
-pub enum Wake {
-    /// A new frame is in the slot; redraw.
-    Frame,
-    /// The session ended (host gone, error); close the window.
-    SessionEnded(String),
-    /// The host went quiet; we are trying to get it back.
-    Reconnecting,
-    /// The host accepted us (first time or after a reconnect).
-    Connected,
-    /// Why the host's picture is paused, or `None` when it is back.
-    HostStatus(Option<String>),
-}
+pub use crate::link::Wake;
 
 pub fn build_event_loop() -> anyhow::Result<EventLoop<Wake>> {
     Ok(EventLoop::<Wake>::with_user_event().build()?)

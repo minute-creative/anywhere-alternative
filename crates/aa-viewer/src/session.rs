@@ -85,7 +85,7 @@ pub struct Options {
     /// Where decoded pictures go (`None` in headless mode: decode, print stats).
     pub frames: Option<FrameSlot>,
     pub test_input: bool,
-    pub stats_tx: Option<std::sync::mpsc::Sender<crate::overlay::LiveStats>>,
+    pub stats_tx: Option<std::sync::mpsc::Sender<crate::link::LiveStats>>,
     pub mic: MicStart,
     /// Where the host's `DualSense` output reports go (rumble, triggers…).
     pub pad_out: Option<std::sync::mpsc::Sender<aa_core::ds5::PadMsg>>,
@@ -346,8 +346,23 @@ pub async fn run(
                     }
                     Kind::Clipboard | Kind::ClipboardAck => {
                         let (item, ack) = clip.received(&packet, &seq);
-                        if let (Some(item), Some(link)) = (item, clip_link.as_ref()) {
-                            let _ = link.paste_here.send(item);
+                        match item {
+                            // Launcher icons ride the clipboard transfer; never pasted.
+                            Some(aa_core::clipboard::ClipItem::Blob { name, data }) => {
+                                if name == aa_core::apps::IconPack::BLOB_NAME {
+                                    let pack = aa_core::apps::IconPack::decode(data);
+                                    tracing::info!(icons = pack.icons.len(), "launcher icons received");
+                                    crate::link::set_icons(pack);
+                                } else {
+                                    tracing::debug!(%name, "unknown blob ignored");
+                                }
+                            }
+                            Some(item) => {
+                                if let Some(link) = clip_link.as_ref() {
+                                    let _ = link.paste_here.send(item);
+                                }
+                            }
+                            None => {}
                         }
                         if let Some(ack) = ack {
                             socket.send(&ack).await?;
@@ -392,6 +407,27 @@ pub async fn run(
                             crate::link::update_host_info(|i| {
                                 i.shareables = items;
                                 i.sharing = current.label();
+                            });
+                        }
+                        // One page of the launcher list. Pages are
+                        // datagrams and may arrive in any order; the list is
+                        // published once every page is in (a page is simply
+                        // asked for again by re-sending `AppList`).
+                        Ok(ControlMessage::Apps { page, pages, items }) => {
+                            crate::link::update_host_info(|i| {
+                                // A new list (different page count, or a page we
+                                // already have = the host answered again) starts over.
+                                if i.apps_pages.0 != pages || i.apps_pages.1.contains(&page) {
+                                    i.apps_pages = (pages, Vec::new());
+                                    i.apps.clear();
+                                }
+                                i.apps_pages.1.push(page);
+                                i.apps.extend(items);
+                                if i.apps_pages.1.len() == usize::from(pages) {
+                                    i.apps.sort_by(|a, b| b.running.cmp(&a.running).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+                                    i.apps_version = i.apps_version.wrapping_add(1);
+                                    tracing::info!(apps = i.apps.len(), "launcher list received");
+                                }
                             });
                         }
                         Ok(ControlMessage::CallDevices { camera: want_camera, mic: want_mic }) => {
@@ -606,7 +642,7 @@ pub async fn run(
                 };
                 send_report(&socket, &rep, &seq).await?;
                 if let Some(tx) = &stats_tx {
-                    let _ = tx.send(crate::overlay::LiveStats {
+                    let _ = tx.send(crate::link::LiveStats {
                         fps: frames_this_second,
                         mbps: (bytes_this_second as f64 * 8.0 / 1e6) as f32,
                         rtt_ms: stats.rtt_ms.get().unwrap_or(0.0) as f32,
@@ -766,6 +802,13 @@ async fn handle_command(
         Some(ViewerCommand::ShareList) => send_control(socket, &ControlMessage::ShareList, seq).await?,
         Some(ViewerCommand::SetShare(target)) => {
             send_control(socket, &ControlMessage::SetShare { target }, seq).await?;
+        }
+        Some(ViewerCommand::AppList) => {
+            crate::link::update_host_info(|i| i.apps_pages = (0, Vec::new()));
+            send_control(socket, &ControlMessage::AppList, seq).await?;
+        }
+        Some(ViewerCommand::AppAction(id, action)) => {
+            send_control(socket, &ControlMessage::AppAction { id, action }, seq).await?;
         }
         Some(ViewerCommand::Pad(msg)) => send_pad(socket, &msg, seq).await?,
         Some(ViewerCommand::Quit) | None => {

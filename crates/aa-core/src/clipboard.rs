@@ -16,6 +16,9 @@
 //! Item encoding: one format byte, then the data.
 //! * `1` text, UTF-8
 //! * `2` image, PNG
+//! * `3` a named blob (not for pasting): `u8` name length, the name, the
+//!   data. Used for things that must arrive whole but are too big for a
+//!   control message, such as the launcher's app icons (`aa_core::apps`).
 
 // In plain words: when you copy something, it is cut into numbered pieces
 // and sent a few hundred at a time. The other side says "got it all" or
@@ -37,6 +40,13 @@ pub enum ClipItem {
     Text(String),
     /// PNG-encoded image.
     Png(Bytes),
+    /// Not clipboard content at all: a named bundle of bytes riding the
+    /// same reliable transfer (see the module note). Old versions ignore
+    /// the unknown format byte.
+    Blob {
+        name: String,
+        data: Bytes,
+    },
 }
 
 impl ClipItem {
@@ -45,6 +55,15 @@ impl ClipItem {
         let (tag, data): (u8, &[u8]) = match self {
             Self::Text(t) => (1, t.as_bytes()),
             Self::Png(p) => (2, p),
+            Self::Blob { name, data } => {
+                let name = &name.as_bytes()[..name.len().min(255)];
+                let mut out = BytesMut::with_capacity(2 + name.len() + data.len());
+                out.put_u8(3);
+                out.put_u8(name.len() as u8);
+                out.extend_from_slice(name);
+                out.extend_from_slice(data);
+                return out.freeze();
+            }
         };
         let mut out = BytesMut::with_capacity(1 + data.len());
         out.put_u8(tag);
@@ -58,6 +77,12 @@ impl ClipItem {
         match tag {
             1 => String::from_utf8(rest.to_vec()).ok().map(Self::Text),
             2 => Some(Self::Png(bytes.slice(1..))),
+            3 => {
+                let (&len, _) = rest.split_first()?;
+                let len = usize::from(len);
+                let name = rest.get(1..1 + len)?;
+                Some(Self::Blob { name: String::from_utf8_lossy(name).into_owned(), data: bytes.slice(2 + len..) })
+            }
             _ => None,
         }
     }
@@ -67,6 +92,7 @@ impl ClipItem {
         match self {
             Self::Text(t) => format!("text, {} chars", t.chars().count()),
             Self::Png(p) => format!("image, {} KB", p.len() / 1024),
+            Self::Blob { name, data } => format!("{name}, {} KB", data.len() / 1024),
         }
     }
 }
