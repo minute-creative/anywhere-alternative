@@ -102,7 +102,7 @@ Keyboard (X): d-pad moves, A types, B deletes, X space, Y shift, Menu
 return, L1 symbols, R1 tab, Options closes. *Phone keyboard* on the last
 row brings up iOS's keyboard for longer text.
 
-Quick menu extras: **Zoom** (2× / 3× around the pointer — Mac text is
+Quick menu extras: **Show controls** (a cheat-sheet of the current layout), **Zoom** (2× / 3× around the pointer — Mac text is
 small on a phone; a touch still lands where it looks), **Full-screen app**
 (⌃⌘F) and **Hide other apps** (⌥⌘H) for the app on the Mac, and **Send
 clipboard**. "Zoom" can also go on any button in the Custom layout. With

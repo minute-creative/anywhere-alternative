@@ -173,7 +173,7 @@ fn main() -> anyhow::Result<()> {
         let p = runtime.block_on(aa_platform::pairing::pair(host, code))?;
         tracing::info!(name = p.name, "paired; from now on this computer connects without a code");
     }
-    let (cmd_tx, cmd_rx) = link::command_channel();
+    let (cmd_tx, mut cmd_rx) = link::command_channel();
     if args.test_gamepad {
         pads::spawn_test(cmd_tx.clone());
     } else {
@@ -213,7 +213,6 @@ fn main() -> anyhow::Result<()> {
             });
         }
         // Keep the sender alive: a closed command channel means "window closed".
-        let mut cmd_rx = cmd_rx;
         let prefs = connect_prefs(&args);
         let result =
             runtime.block_on(reconnect::run_reconnecting(&prefs, host, None, &mut cmd_rx, None, mic, None, pad_out));
@@ -240,7 +239,6 @@ fn main() -> anyhow::Result<()> {
             let _ = status_proxy.lock().expect("proxy").send_event(s);
         };
         let started = std::time::Instant::now();
-        let mut cmd_rx = cmd_rx;
         let result = runtime.block_on(reconnect::run_reconnecting(
             &prefs,
             host,

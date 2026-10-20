@@ -10,6 +10,8 @@ enum Overlay: Equatable {
     case quickMenu
     case launcher
     case keyboard
+    /// The current layout, as a cheat-sheet.
+    case help
 }
 
 struct StreamScreen: View {
@@ -64,6 +66,7 @@ struct StreamScreen: View {
             case .quickMenu: QuickMenu(overlay: $overlay)
             case .launcher: LauncherView(overlay: $overlay)
             case .keyboard: KeyboardView(overlay: $overlay)
+            case .help: ControlsSheet(overlay: $overlay)
             }
         }
         .onAppear { start() }

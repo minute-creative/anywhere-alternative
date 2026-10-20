@@ -52,7 +52,7 @@ final class StreamMetalView: MTKView, MTKViewDelegate {
     private var reported = CGRect.zero
     private var hasPicture = false
     /// The window of the picture on screen (all of it, or the zoomed part).
-    private var window = CGRect(x: 0, y: 0, width: 1, height: 1)
+    private var shown = CGRect(x: 0, y: 0, width: 1, height: 1)
 
     // Touch state.
     private var lastPan: CGPoint?
@@ -130,9 +130,9 @@ final class StreamMetalView: MTKView, MTKViewDelegate {
             // Zoom follows the pointer.
             if let engine {
                 let p = engine.pad?.mapper.pointer ?? CGPoint(x: 0.5, y: 0.5)
-                window = ZoomWindow.around(p, zoom: engine.zoom)
+                shown = ZoomWindow.around(p, zoom: engine.zoom)
             }
-            var win = SIMD4<Float>(Float(window.minX), Float(window.minY), Float(window.width), Float(window.height))
+            var win = SIMD4<Float>(Float(shown.minX), Float(shown.minY), Float(shown.width), Float(shown.height))
             enc.setRenderPipelineState(pipeline)
             enc.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
             enc.setVertexBytes(&win, length: MemoryLayout<SIMD4<Float>>.size, index: 1)
@@ -152,7 +152,7 @@ final class StreamMetalView: MTKView, MTKViewDelegate {
         let y = (p.y - videoRect.minY) / videoRect.height
         guard x >= 0, x <= 1, y >= 0, y <= 1 else { return nil }
         // Through the zoom window: a touch lands where it looks.
-        return CGPoint(x: window.minX + x * window.width, y: window.minY + y * window.height)
+        return CGPoint(x: shown.minX + x * shown.width, y: shown.minY + y * shown.height)
     }
 
     private func move(to p: CGPoint) {
