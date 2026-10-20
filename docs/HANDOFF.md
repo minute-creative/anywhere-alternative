@@ -648,6 +648,20 @@ updates; 0.4.5 itself needs them granted once more (remove + re-add).
   `gh api repos/minute-creative/anywhere-alternative/commits/<sha>/comments --jq '.[].body'`.
   A full run takes ~15 min (Windows is slowest). Expect one or two rounds
   of API-drift fixes per new platform file.
+- **crates.io from the Linux container** (2026-10-20): it works only when
+  the owner's claude.ai "Allow network egress" setting is on *and* cargo is
+  pointed at the session's agent proxy — the container has no DNS of its
+  own and `index.crates.io` sits on the environment's `no_proxy` list, so
+  plain `cargo fetch` fails with "Could not resolve host". Fix once per
+  session, then build normally:
+  ```
+  printf '[http]\nproxy = "http://127.0.0.1:%s"\ncainfo = "/root/.ccr/ca-bundle.crt"\n[net]\ngit-fetch-with-cli = true\n' \
+    "${HTTPS_PROXY##*:}" >> ~/.cargo/config.toml
+  env -u no_proxy -u NO_PROXY cargo fetch
+  ```
+  (The port is whatever `$HTTPS_PROXY` says; `env -u` keeps cargo from
+  honouring the bypass list.) With this, `cargo clippy`/`cargo test` run
+  here and CI is only needed for the Windows, macOS and iOS code.
 - Smoke test that always works locally:
   `aa-host --mock` in one process; read its "pairing code for new
   computers" line; `aa-viewer --headless --mock --pair <code>` (no
