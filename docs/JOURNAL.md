@@ -581,3 +581,17 @@ Decisions and why:
 - Nothing could be compiled in this session (crates.io blocked from the
   container; no iOS toolchain on Linux). The first push is CI's first look
   at `ios/`, `aa-mobile` and the iOS target: expect rounds.
+
+Later the same day — CI rounds for the iPhone app:
+1. Lints in `aa_platform::apps` (MSRV 1.80 forbids `is_none_or`; wildcard
+   import; case-sensitive extension compare).
+2. `aa-mobile` lints (unused field, `State.state`, function length);
+   `picture` unused on Windows; the mock action "never fails".
+3. The Rust engine compiled for `aarch64-apple-ios-sim` end to end
+   (OpenH264 and Opus cross-compiled fine), XcodeGen generated the
+   project, and the Swift app had one error: a property named `window`
+   on a UIView subclass. Also `main()` one line over the limit.
+Found by reading before the compiler could: the action enum was called
+`Binding` (shadows SwiftUI's `@Binding`), a main-actor static decoder
+called from a detached task, listing apps inside the host's packet
+handler, and a quadratic icon lookup.

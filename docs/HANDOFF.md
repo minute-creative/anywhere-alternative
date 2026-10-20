@@ -133,6 +133,17 @@ look later. See `docs/IPHONE.md` for the result and the controls table.
   released on background/lock/pad-disconnect; audio restarts after a
   call; a half-received launcher list is re-asked (`apps_pending`);
   Windows host lists Start-menu shortcuts + Steam (open only, no icons).
+- Third pass (same day): picture zoom 2x/3x around the pointer (Metal
+  samples a window; touches map through it), launcher opens on the first
+  connect (setting), quick-menu Full-screen app / Hide other apps / Show
+  controls (cheat-sheet), haptic ticks on focus moves, app icon from
+  assets/icon.png, listing moved off the host's network loop (it would
+  have frozen the picture for a second), bundle scan cached (icon lookup
+  was quadratic in plutil runs).
+- CI rounds so far: 1 lints in apps.rs; 2 lints in aa-mobile; 3 the iOS
+  Rust build and XcodeGen passed, Swift had one error (`window` clashed
+  with UIView.window). Read the latest commit comment for the current
+  state before changing anything.
 - Known limits, told to the owner: no virtual controller on a Mac host
   (entitlement), so games on the Mac get keys + mouse from the pad; the
   phone sends no mic/camera; icons only on a Mac host; CPU frame upload
