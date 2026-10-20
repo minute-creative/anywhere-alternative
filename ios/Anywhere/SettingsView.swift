@@ -40,6 +40,12 @@ struct SettingsView: View {
                 let i = all.firstIndex(of: p.profile) ?? 0
                 engine.prefs.profile = all[(i + (d == 0 ? 1 : d) + all.count) % all.count]
             },
+            Row(title: "Typing", help: "Opens by itself when you click a text field on the Mac. iPhone keyboard has autocorrect and dictation (the mic key).",
+                value: p.typingKeyboard.label) { d in
+                let all = TypingKeyboard.allCases
+                let i = all.firstIndex(of: p.typingKeyboard) ?? 0
+                engine.prefs.typingKeyboard = all[(i + (d == 0 ? 1 : d) + all.count) % all.count]
+            },
             Row(title: "Edit controls", help: "Set what every button and stick does in the Custom layout.",
                 value: "Custom layout") { _ in router.screen = .controls },
             Row(title: "Pointer speed", help: "How fast the stick moves the pointer (L3 toggles slow/fast too).",

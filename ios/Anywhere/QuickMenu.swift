@@ -25,7 +25,10 @@ struct QuickMenu: View {
         let s = engine.status
         return [
             Item(id: "launcher", symbol: "square.grid.2x2.fill", title: "Launcher", value: "Apps and games") { overlay = .launcher },
-            Item(id: "keyboard", symbol: "keyboard.fill", title: "Keyboard", value: "Type on the Mac") { overlay = .keyboard },
+            // The keyboard chosen in Settings (X always opens the controller one).
+            Item(id: "keyboard", symbol: "keyboard.fill", title: "Keyboard", value: "Type on the Mac") {
+                overlay = p.typingKeyboard == .controller ? .keyboard : .typing
+            },
             Item(id: "desktop", symbol: "macwindow", title: "Whole Mac", value: s.sharing.isEmpty ? "Showing everything" : s.sharing) {
                 engine.showDesktop()
                 overlay = .none

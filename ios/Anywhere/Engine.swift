@@ -50,6 +50,17 @@ struct Status: Codable {
     var host_version: String = ""
     var has_launcher: Bool = false
     var cursor_captured: Bool = false
+    /// A text field on the Mac has the keyboard focus: x, y, width, height
+    /// as fractions of the picture. nil when none has.
+    var text_field: [Float]?
+    /// That field is a password field.
+    var text_secure: Bool = false
+
+    /// The focused field as a rectangle of the picture (0…1).
+    var textField: CGRect? {
+        guard let f = text_field, f.count == 4 else { return nil }
+        return CGRect(x: CGFloat(f[0]), y: CGFloat(f[1]), width: CGFloat(f[2]), height: CGFloat(f[3]))
+    }
 
     var connected: Bool { state == "connected" }
     var live: Bool { state == "connecting" || state == "connected" || state == "reconnecting" }
@@ -78,6 +89,9 @@ struct Prefs: Codable {
     var customMap: ControlMap = .game
     /// Open the launcher as soon as the Mac appears, like a console home.
     var launcherOnConnect: Bool = true
+    /// Which keyboard opens by itself when a text field on the Mac gets
+    /// the focus (owner, 0.6.0: clicking a field left nothing to type with).
+    var typingKeyboard: TypingKeyboard = .phone
 
     /// The control map the chosen profile means.
     var activeMap: ControlMap {
@@ -104,6 +118,7 @@ struct Prefs: Codable {
         usageStats = try c.decodeIfPresent(Bool.self, forKey: .usageStats) ?? usageStats
         customMap = (try? c.decodeIfPresent(ControlMap.self, forKey: .customMap)) ?? customMap
         launcherOnConnect = try c.decodeIfPresent(Bool.self, forKey: .launcherOnConnect) ?? launcherOnConnect
+        typingKeyboard = (try? c.decodeIfPresent(TypingKeyboard.self, forKey: .typingKeyboard)) ?? typingKeyboard
     }
 
     static func load() -> Prefs {
@@ -117,6 +132,24 @@ struct Prefs: Codable {
     func save() {
         if let data = try? JSONEncoder().encode(self) {
             UserDefaults.standard.set(data, forKey: "prefs")
+        }
+    }
+}
+
+/// The keyboard that opens when the Mac focuses a text field.
+enum TypingKeyboard: String, Codable, CaseIterable {
+    /// The iPhone's own keyboard: autocorrect, dictation, other languages.
+    case phone
+    /// Anywhere's keyboard, driven with the controller's d-pad.
+    case controller
+    /// Open nothing by itself (X still opens the controller keyboard).
+    case off
+
+    var label: String {
+        switch self {
+        case .phone: return "iPhone keyboard"
+        case .controller: return "Controller keyboard"
+        case .off: return "Off"
         }
     }
 }
@@ -161,6 +194,11 @@ final class Engine: ObservableObject {
     /// Picture zoom (1, 2 or 3×) around the pointer: Mac text is small on
     /// a phone. The Metal view and the pointer overlay both read it.
     @Published var zoom: CGFloat = 1
+    /// A keyboard is open: the picture fills the space above it as a wide
+    /// band around the focused field (or the pointer), instead of the
+    /// whole Mac screen shrunk into that space (owner, 0.6.0: "the window
+    /// becomes too small to see what I type"). The Metal view reads it.
+    @Published var typingBand = false
 
     private var seenAppsVersion: UInt32 = 0
     private var appsPendingTicks = 0

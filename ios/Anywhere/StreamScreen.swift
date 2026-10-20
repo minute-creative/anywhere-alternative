@@ -10,6 +10,8 @@ enum Overlay: Equatable {
     case quickMenu
     case launcher
     case keyboard
+    /// The iPhone's own keyboard, typing into the Mac's focused field.
+    case typing
     /// The current layout, as a cheat-sheet.
     case help
 }
@@ -27,14 +29,22 @@ struct StreamScreen: View {
     @State private var audio = AudioOutput()
     @State private var pointerTimer: Timer?
     @State private var endedToken = 0
+    /// The field the person closed the keyboard on: not reopened for it
+    /// until the focus moves to another field (or leaves and comes back).
+    @State private var dismissedField: CGRect?
+    /// Closing waits a moment after the field loses the focus, so a
+    /// field that blinks out while a page reloads doesn't flicker it.
+    @State private var closeTask: Task<Void, Never>?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
+            // With the iPhone keyboard up the picture sits above it (and
+            // above the typing line); otherwise it fills the screen.
             StreamView(fps: Int(engine.prefs.fps)) { r in videoRect = r }
-                .padding(.bottom, overlay == .keyboard ? KeyboardView.height : 0)
-                .ignoresSafeArea()
+                .padding(.bottom, overlay == .keyboard ? KeyboardView.height : overlay == .typing ? 56 : 0)
+                .ignoresSafeArea(overlay == .typing ? SafeAreaRegions.container : SafeAreaRegions.all)
                 .animation(.easeInOut(duration: 0.2), value: overlay)
 
             if showsPointer, overlay == .none, engine.status.connected, videoRect.width > 0 {
@@ -72,12 +82,16 @@ struct StreamScreen: View {
             case .quickMenu: QuickMenu(overlay: $overlay)
             case .launcher: LauncherView(overlay: $overlay)
             case .keyboard: KeyboardView(overlay: $overlay)
+            case .typing: TypingView(overlay: $overlay)
             case .help: ControlsSheet(overlay: $overlay)
             }
         }
         .onAppear { start() }
         .onDisappear { stop() }
-        .onChange(of: overlay) { _, o in
+        .onChange(of: overlay) { old, o in
+            engine.typingBand = o == .keyboard || o == .typing
+            // Closed by the person while the field still has the focus.
+            if (old == .typing || old == .keyboard), o == .none { dismissedField = engine.status.textField }
             if o == .none {
                 pad.mode = .stream
             } else {
@@ -103,6 +117,7 @@ struct StreamScreen: View {
         .onChange(of: pad.connected) { _, on in
             if !on { pad.mapper.releaseAll() }
         }
+        .onChange(of: engine.status.textField) { _, field in textFocusChanged(field) }
         .onChange(of: engine.status.state) { old, s in
             if s == "ended" && overlay != .none { overlay = .none }
             // Like a console: the launcher greets you on the first connect.
@@ -186,7 +201,35 @@ struct StreamScreen: View {
         }
     }
 
+    /// A text field on the Mac got the focus (or lost it): open the chosen
+    /// keyboard by itself, and close it again once the focus has left.
+    private func textFocusChanged(_ field: CGRect?) {
+        closeTask?.cancel()
+        guard let field else {
+            dismissedField = nil
+            guard overlay == .typing || overlay == .keyboard else { return }
+            closeTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                if !Task.isCancelled, engine.status.textField == nil,
+                   overlay == .typing || overlay == .keyboard {
+                    overlay = .none
+                }
+            }
+            return
+        }
+        // Only from the plain picture: never on top of a menu, and not
+        // for a field the person just closed the keyboard on.
+        guard overlay == .none, field != dismissedField, engine.status.connected else { return }
+        switch engine.prefs.typingKeyboard {
+        case .phone: open(.typing)
+        case .controller: open(.keyboard)
+        case .off: break
+        }
+    }
+
     private func stop() {
+        closeTask?.cancel()
+        engine.typingBand = false
         pad.pop(endedToken)
         pointerTimer?.invalidate()
         pad.onStreamEvent = nil

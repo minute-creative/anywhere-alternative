@@ -15,6 +15,8 @@ struct KeyboardView: View {
     @State private var symbols = false
     @State private var token = 0
     @State private var typed = ""
+    /// The next change to `typed` is our own clear, not the person deleting.
+    @State private var clearing = false
     @FocusState private var phoneKeyboard: Bool
 
     private struct Key: Identifiable {
@@ -118,14 +120,11 @@ struct KeyboardView: View {
 
     /// The phone's keyboard: send whatever was added or removed.
     private func forward(_ old: String, _ new: String) {
-        if new.count < old.count {
-            for _ in 0..<(old.count - new.count) { engine.tap(HID.backspace) }
-        } else if new.hasPrefix(old) {
-            for ch in new.dropFirst(old.count) { typeChar(String(ch)) }
-        } else {
-            for ch in new { typeChar(String(ch)) }
-        }
-        if typed.count > 200 { typed = "" }
+        if clearing { clearing = false; return }
+        TextDiff.send(from: old, to: new, engine: engine)
+        // Keep the hidden box short. 0.6.0 cleared it by setting it to ""
+        // and the change then sent 200 deletes to the Mac.
+        if typed.count > 200 { clearing = true; typed = "" }
     }
 
     private func handle(_ ev: NavEvent) {
@@ -142,6 +141,160 @@ struct KeyboardView: View {
         case .options: engine.tap(HID.enter)
         case .l1: symbols.toggle()
         case .r1: engine.tap(HID.tab)
+        case .menu, .home: overlay = .quickMenu
+        default: break
+        }
+    }
+}
+
+/// Turns edits in a phone text box into key presses on the Mac.
+///
+/// The iPhone keyboard doesn't only add letters at the end: autocorrect
+/// swaps a whole word, dictation inserts a sentence, a suggestion
+/// replaces the last word. 0.6.0 only handled "added at the end" and
+/// "deleted at the end"; anything else retyped the whole box after the
+/// old text. Now: delete back to where old and new first differ, then
+/// type the rest. That is exact as long as the Mac's text cursor sits at
+/// the end of what was typed, which is how typing works.
+enum TextDiff {
+    /// Kept at the start of the box so Delete on an "empty" box still
+    /// reaches the Mac (iOS reports no change for Delete on an empty box).
+    static let sentinel = "\u{200B}"
+
+    @MainActor
+    static func send(from old: String, to new: String, engine: Engine) {
+        let o = Array(old.replacingOccurrences(of: sentinel, with: ""))
+        let n = Array(new.replacingOccurrences(of: sentinel, with: ""))
+        var same = 0
+        while same < o.count, same < n.count, o[same] == n[same] { same += 1 }
+        // Delete on the empty box: the sentinel itself went.
+        let removed = (o.count - same) + (old.hasPrefix(sentinel) && !new.hasPrefix(sentinel) && o.isEmpty ? 1 : 0)
+        for _ in 0..<removed { engine.tap(HID.backspace) }
+        for ch in n[same...] { press(ch, engine: engine) }
+    }
+
+    /// One character as a key press. iOS turns ' and " into curly quotes
+    /// and -- into a dash as you type; the Mac gets the plain ones.
+    @MainActor
+    static func press(_ ch: Character, engine: Engine) {
+        let plain: Character
+        switch ch {
+        case "\u{2018}", "\u{2019}": plain = "'"
+        case "\u{201C}", "\u{201D}": plain = "\""
+        case "\u{2013}", "\u{2014}": plain = "-"
+        case "\u{2026}": "...".forEach { press($0, engine: engine) }; return
+        case "\u{00A0}": plain = " "
+        case "\n": engine.tap(HID.enter); return
+        default: plain = ch
+        }
+        // Letters outside a US keyboard (é, emoji) have no key: skipped.
+        guard let u = HID.usage(for: plain) else { return }
+        engine.tap(u.0, modifiers: u.1 ? [HID.leftShift] : [])
+    }
+}
+
+/// Typing with the iPhone's own keyboard, opened by itself when a text
+/// field on the Mac gets the focus (or from the quick menu). Autocorrect,
+/// suggestions, dictation (the mic key) and other keyboards all work; the
+/// line above the keyboard shows what was typed into this field, and the
+/// keys beside it are the ones the iPhone keyboard lacks.
+struct TypingView: View {
+    @Binding var overlay: Overlay
+    @EnvironmentObject var engine: Engine
+    @EnvironmentObject var pad: Pad
+    @State private var typed = TextDiff.sentinel
+    /// The next change to `typed` is our own fresh start, not typing.
+    @State private var clearing = false
+    @State private var token = 0
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            HStack(spacing: 8) {
+                Image(systemName: engine.status.text_secure ? "lock.fill" : "keyboard")
+                    .foregroundStyle(Theme.muted)
+                field
+                    .focused($focused)
+                    .font(.system(size: 17))
+                    .submitLabel(.return)
+                    .onSubmit {
+                        engine.tap(HID.enter)
+                        freshLine()
+                        focused = true
+                    }
+                    .onChange(of: typed) { old, new in
+                        if clearing { clearing = false; return }
+                        TextDiff.send(from: old, to: new, engine: engine)
+                        // Put the Delete-catcher back, and keep the line
+                        // short (the Mac has the real text).
+                        if new.isEmpty || typed.count > 160 { freshLine() }
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.1)))
+                ForEach(extraKeys, id: \.0) { k in
+                    Button(k.0) { k.1() }
+                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                        .padding(.horizontal, 10).padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.1)))
+                }
+                Button("Done") { close() }
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 8)
+            }
+            .foregroundStyle(Theme.text)
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(Color(red: 0.08, green: 0.09, blue: 0.13).opacity(0.96))
+        }
+        .onAppear {
+            token = pad.push(handle)
+            focused = true
+        }
+        .onDisappear { pad.pop(token) }
+        // A new field (the focus moved on the Mac): start a fresh line.
+        .onChange(of: engine.status.textField) { old, new in
+            if new != nil, old != nil, new != old { freshLine() }
+        }
+        // The iPhone keyboard was put away (swipe down): close too.
+        .onChange(of: focused) { _, f in if !f { close() } }
+    }
+
+    /// Password fields: dots on the phone, no autocorrect, nothing learnt.
+    @ViewBuilder private var field: some View {
+        if engine.status.text_secure {
+            SecureField("Password", text: $typed)
+                .textContentType(.password)
+        } else {
+            TextField("Type on the Mac", text: $typed)
+                .autocorrectionDisabled(false)
+        }
+    }
+
+    private var extraKeys: [(String, () -> Void)] {
+        [
+            ("esc", { engine.tap(HID.escape) }),
+            ("tab", { engine.tap(HID.tab); freshLine() }),
+            ("←", { engine.tap(HID.left) }),
+            ("→", { engine.tap(HID.right) }),
+        ]
+    }
+
+    /// Empty the line without that counting as deleting on the Mac.
+    private func freshLine() {
+        guard typed != TextDiff.sentinel else { return }
+        clearing = true
+        typed = TextDiff.sentinel
+    }
+
+    private func close() {
+        focused = false
+        if overlay == .typing { overlay = .none }
+    }
+
+    private func handle(_ ev: NavEvent) {
+        switch ev {
+        case .back: close()
         case .menu, .home: overlay = .quickMenu
         default: break
         }

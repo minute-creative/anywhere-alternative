@@ -18,6 +18,28 @@ enum ZoomWindow {
         let y = min(1 - w, max(0, p.y - w / 2))
         return CGRect(x: x, y: y, width: w, height: w)
     }
+
+    /// While typing: the part of the picture that fills a view of `view`
+    /// size edge to edge, around `focus` (the text field, or a point).
+    /// Wide enough for the field with some room either side, never less
+    /// than 45% of the picture's width (enough to see where you are).
+    /// nil when the view is tall enough that the plain picture fits better.
+    static func band(around focus: CGRect, view: CGSize, picture: CGSize) -> CGRect? {
+        guard view.width > 0, view.height > 0, picture.width > 0, picture.height > 0 else { return nil }
+        // Height of the window (0…1) for a given width, so the window keeps
+        // the view's shape on screen.
+        let ratio = (view.height / view.width) * (picture.width / picture.height)
+        var w = min(1, max(0.45, focus.width * 1.4))
+        var h = w * ratio
+        if h > 1 {
+            h = 1
+            w = 1 / ratio
+            if w >= 1 { return nil }
+        }
+        let x = min(1 - w, max(0, focus.midX - w / 2))
+        let y = min(1 - h, max(0, focus.midY - h / 2))
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
 }
 
 struct StreamView: UIViewRepresentable {
@@ -116,10 +138,16 @@ final class StreamMetalView: MTKView, MTKViewDelegate {
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         guard let cmd = queue.makeCommandBuffer(), let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { return }
         if hasPicture, let texture {
-            // Letterbox: fit the picture, keep its shape.
             let vw = drawableSize.width, vh = drawableSize.height
+            let p = engine?.pad?.mapper.pointer ?? CGPoint(x: 0.5, y: 0.5)
+            // Typing: fill the space above the keyboard with a band of the
+            // picture around the field, not the whole screen shrunk small.
+            let focus = engine?.status.textField ?? CGRect(x: p.x, y: p.y, width: 0, height: 0)
+            let band = engine?.typingBand == true
+                ? ZoomWindow.band(around: focus, view: CGSize(width: vw, height: vh), picture: videoSize) : nil
+            // Otherwise letterbox: fit the picture, keep its shape.
             let scale = min(vw / videoSize.width, vh / videoSize.height)
-            let w = videoSize.width * scale, h = videoSize.height * scale
+            let w = band == nil ? videoSize.width * scale : vw, h = band == nil ? videoSize.height * scale : vh
             let x = (vw - w) / 2, y = (vh - h) / 2
             videoRect = CGRect(x: x / vw * bounds.width, y: y / vh * bounds.height, width: w / vw * bounds.width, height: h / vh * bounds.height)
             if videoRect != reported {
@@ -128,8 +156,9 @@ final class StreamMetalView: MTKView, MTKViewDelegate {
             }
             var rect = SIMD4<Float>(Float(x / vw * 2 - 1), Float(1 - y / vh * 2), Float((x + w) / vw * 2 - 1), Float(1 - (y + h) / vh * 2))
             // Zoom follows the pointer.
-            if let engine {
-                let p = engine.pad?.mapper.pointer ?? CGPoint(x: 0.5, y: 0.5)
+            if let band {
+                shown = band
+            } else if let engine {
                 shown = ZoomWindow.around(p, zoom: engine.zoom)
             }
             var win = SIMD4<Float>(Float(shown.minX), Float(shown.minY), Float(shown.width), Float(shown.height))
