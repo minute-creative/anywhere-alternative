@@ -98,6 +98,7 @@ struct Prefs: Codable {
         switch profile {
         case .desktop: return .desktop
         case .game: return .game
+        case .eldenRing: return .eldenPlay
         case .custom, .controller: return customMap
         }
     }
@@ -162,6 +163,9 @@ enum InputProfile: String, Codable, CaseIterable {
     case game
     /// Your own layout (Settings → Controls).
     case custom
+    /// Elden Ring's PC keys; switches between play and menu keys by itself
+    /// when the Mac says the game holds the mouse.
+    case eldenRing
     /// The controller itself, as-is (works when the host can show a
     /// virtual controller: a PC with ViGEmBus; a Mac needs Apple's
     /// entitlement, which needs the paid developer program).
@@ -172,6 +176,7 @@ enum InputProfile: String, Codable, CaseIterable {
         case .desktop: return "Desktop"
         case .game: return "Game (keys + mouse)"
         case .custom: return "Custom"
+        case .eldenRing: return "Elden Ring"
         case .controller: return "Controller pass-through"
         }
     }

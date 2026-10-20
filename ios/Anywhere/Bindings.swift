@@ -65,6 +65,9 @@ enum PadAction: Codable, Equatable, Hashable {
     case back
     /// Magnify around the pointer while held; back to normal on release.
     case magnify
+    /// Shift held with a mouse button (0 left, 1 right): Elden Ring's
+    /// strong attack and skill.
+    case shiftClick(UInt8)
 
     var label: String {
         switch self {
@@ -82,6 +85,7 @@ enum PadAction: Codable, Equatable, Hashable {
         case .speedToggle: return "Pointer speed"
         case .zoom: return "Zoom"
         case .back: return "Back"
+        case .shiftClick(let b): return b == 0 ? "Shift + Click" : "Shift + Right-click"
         case .magnify: return "Magnify (hold)"
         }
     }
@@ -148,6 +152,33 @@ struct ControlMap: Codable, Equatable {
         .l3: .speedToggle, .r3: .mouse(2), .l4: .keyboard, .r4: .launcher,
         .up: .key(HID.up), .down: .key(HID.down), .left: .key(HID.left), .right: .key(HID.right),
         .menu: .quickMenu, .options: .key(HID.enter),
+    ])
+
+    /// Elden Ring's own PC keys, laid out like its Xbox controls (owner,
+    /// 2026-10-20: the Kishi did nothing in the game, because a Mac can't
+    /// take a virtual controller). Two layouts, because A, B and the
+    /// bumpers mean different keys in play and in menus; the phone uses
+    /// this one while the Mac says the game holds the mouse.
+    static let eldenPlay = ControlMap(bindings: [
+        .leftStick: .wasd, .rightStick: .look,
+        .a: .key(HID.letter("f")!), .b: .key(HID.space), .x: .key(HID.letter("r")!), .y: .key(HID.letter("e")!),
+        .l1: .mouse(1), .r1: .mouse(0), .l2: .shiftClick(1), .r2: .shiftClick(0),
+        .l3: .key(HID.letter("x")!), .r3: .key(HID.letter("q")!), .l4: .quickMenu, .r4: .launcher,
+        .up: .key(HID.up), .down: .key(HID.down), .left: .key(HID.left), .right: .key(HID.right),
+        .menu: .key(HID.escape), .options: .key(HID.letter("g")!),
+    ])
+
+    /// Elden Ring's menus: E is OK and Q is Back (Escape can't back out of
+    /// option screens). Z / X for the tab bumpers is from one guide only;
+    /// to be confirmed in game. The right stick stays mouse look so a nudge
+    /// also tells the Mac the pointer is free.
+    static let eldenMenu = ControlMap(bindings: [
+        .leftStick: .arrows, .rightStick: .look,
+        .a: .key(HID.letter("e")!), .b: .key(HID.letter("q")!), .x: .key(HID.letter("r")!), .y: .key(HID.letter("f")!),
+        .l1: .key(HID.letter("z")!), .r1: .key(HID.letter("x")!), .l2: .none, .r2: .none,
+        .l3: .none, .r3: .none, .l4: .quickMenu, .r4: .launcher,
+        .up: .key(HID.up), .down: .key(HID.down), .left: .key(HID.left), .right: .key(HID.right),
+        .menu: .key(HID.escape), .options: .key(HID.letter("g")!),
     ])
 
     /// Keyboard-and-mouse games: W A S D, mouse look, FPS buttons.

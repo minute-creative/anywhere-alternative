@@ -35,6 +35,9 @@ struct StreamScreen: View {
     /// Closing waits a moment after the field loses the focus, so a
     /// field that blinks out while a page reloads doesn't flicker it.
     @State private var closeTask: Task<Void, Never>?
+    /// "Play keys" / "Menu keys", shown for a moment when the Elden Ring
+    /// layout switches, so it is clear which one is on.
+    @State private var layoutNote: String?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -73,6 +76,18 @@ struct StreamScreen: View {
                     }
                     Spacer()
                 }
+            }
+
+            if let note = layoutNote, overlay == .none {
+                VStack {
+                    Text(note).font(.system(size: 14, weight: .semibold))
+                        .padding(.horizontal, 14).padding(.vertical, 6)
+                        .background(Capsule().fill(Color.black.opacity(0.6)))
+                        .padding(.top, 12)
+                    Spacer()
+                }
+                .transition(.opacity)
+                .allowsHitTesting(false)
             }
 
             notice
@@ -118,6 +133,15 @@ struct StreamScreen: View {
             if !on { pad.mapper.releaseAll() }
         }
         .onChange(of: engine.status.textField) { _, field in textFocusChanged(field) }
+        .onChange(of: engine.status.cursor_captured) { _, captured in
+            guard engine.prefs.profile == .eldenRing else { return }
+            let note = captured ? "Play keys" : "Menu keys"
+            withAnimation { layoutNote = note }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_800_000_000)
+                if layoutNote == note { withAnimation { layoutNote = nil } }
+            }
+        }
         .onChange(of: engine.status.state) { old, s in
             if s == "ended" && overlay != .none { overlay = .none }
             // Like a console: the launcher greets you on the first connect.

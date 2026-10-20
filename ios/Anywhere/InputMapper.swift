@@ -25,11 +25,14 @@ final class InputMapper {
     private var repeatKey: (UInt16, TimeInterval)?
     /// The zoom to return to when a held Magnify button is let go.
     private var zoomBeforeMagnify: CGFloat?
+    /// Elden Ring layout: whether the play keys were in use last tick.
+    private var playKeys: Bool?
 
     /// Call when the stream starts and whenever the profile changes.
     func reset() {
         releaseAll()
         scrollAcc = .zero
+        playKeys = nil
     }
 
     /// Let go of everything held (leaving the stream, opening a menu, the
@@ -63,6 +66,17 @@ final class InputMapper {
         // A game on the Mac took the mouse: a pointer stick becomes mouse
         // look, like the desktop viewer's game mouse.
         let captured = e.status.cursor_captured
+        // Elden Ring: play keys while the game holds the mouse, menu keys
+        // while it shows the pointer. Let go of everything on the switch so
+        // no key from one layout stays held in the other.
+        var map = self.map
+        if profile == .eldenRing {
+            if playKeys != captured {
+                if playKeys != nil { releaseAll() }
+                playKeys = captured
+            }
+            map = captured ? .eldenPlay : .eldenMenu
+        }
         stick(captured && map[.leftStick] == .pointer ? .look : map[.leftStick], s.lx, s.ly, dt, e)
         stick(captured && map[.rightStick] == .pointer ? .look : map[.rightStick], s.rx, s.ry, dt, e)
         let buttons: [(PadControl, Bool, Bool)] = [
@@ -150,6 +164,17 @@ final class InputMapper {
         case .speedToggle: if down { fast.toggle() }
         case .zoom: if down { e.zoom = e.zoom >= 3 ? 1 : e.zoom + 1 }
         case .back: if down { e.tap(HID.openBracket, modifiers: [HID.leftGui]) }
+        case .shiftClick(let btn):
+            // Shift first, so the game sees it held when the click lands.
+            if down {
+                hold(HID.leftShift, true, e)
+                heldMouse.insert(btn)
+                e.mouseButton(btn, true)
+            } else {
+                heldMouse.remove(btn)
+                e.mouseButton(btn, false)
+                hold(HID.leftShift, false, e)
+            }
         case .magnify:
             if down, zoomBeforeMagnify == nil {
                 zoomBeforeMagnify = e.zoom
