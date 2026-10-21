@@ -189,6 +189,12 @@ fn init_logging(args: &Args) {
             "service.log"
         };
         let path = aa_platform::trust::host_dir().join(name);
+        // Keep the previous run's log as `<name>.prev.log` instead of
+        // emptying it. 2026-10-21: a second copy started while the first
+        // still served (it then waits for the port) and wiped the first
+        // one's log, the very lines needed to see why a phone got no
+        // answer. A copy still writing keeps writing into the renamed file.
+        let _ = std::fs::rename(&path, path.with_extension("prev.log"));
         if let Ok(file) = std::fs::File::create(&path) {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
