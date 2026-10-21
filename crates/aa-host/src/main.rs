@@ -162,6 +162,44 @@ fn real_host_backends(_encoder: &str) -> anyhow::Result<aa_platform::HostBackend
     Ok(aa_platform::host_backends()?)
 }
 
+/// Is someone logged in on this Mac's screen? The screen's owner is the
+/// system while the login window shows, and the person once they log in.
+#[cfg(target_os = "macos")]
+fn someone_logged_in() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/dev/console").is_ok_and(|m| m.uid() != 0)
+}
+
+/// The login-screen copy must not keep the port once someone logs in: on
+/// 2026-10-21 it kept it for 11.5 hours after the owner logged in, the
+/// logged-in copy waited for the port all that time ("port 7700 is busy"),
+/// and the phone got no answer, because the login-screen copy doesn't serve
+/// the person's desktop. Now it waits while someone is logged in, and quits
+/// as soon as someone logs in (the system starts it again, waiting, and it
+/// takes over again at the next login window).
+#[cfg(target_os = "macos")]
+async fn login_screen_handover(args: &Args) {
+    if !(args.service && at_login_screen()) {
+        return;
+    }
+    if someone_logged_in() {
+        tracing::info!("someone is logged in; the login-screen copy waits until the login window shows again");
+        while someone_logged_in() {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        tracing::info!("the login window is showing; taking over");
+    }
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if someone_logged_in() {
+                tracing::info!("someone logged in; handing the port to their copy");
+                std::process::exit(0);
+            }
+        }
+    });
+}
+
 /// Is this the copy running at the login screen (as the system)?
 fn at_login_screen() -> bool {
     #[cfg(unix)]
@@ -230,6 +268,8 @@ async fn main() -> anyhow::Result<()> {
             "sharing service starting"
         );
         let _ = std::fs::write(aa_platform::update::marker::service_version(), aa_platform::update::current());
+        #[cfg(target_os = "macos")]
+        login_screen_handover(&args).await;
         // Logging in or out: the other session's copy may still hold the
         // port for a moment. Wait for it rather than failing.
         let mut waited = 0;
@@ -238,6 +278,16 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("port {} is busy; waiting for it", args.listen.port());
             }
             waited += 1;
+            // Say so again now and then: a wait of minutes means another copy
+            // is holding the port (2026-10-21: one log line, then hours of
+            // silence while the phone got no answer).
+            if waited % 60 == 0 {
+                tracing::warn!(
+                    seconds = waited,
+                    "still waiting for port {}: another copy holds it",
+                    args.listen.port()
+                );
+            }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
