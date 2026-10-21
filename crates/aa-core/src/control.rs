@@ -112,6 +112,10 @@ pub enum ControlMessage {
         /// locked): the viewer switches to game mouse by itself.
         #[serde(default)]
         cursor_captured: bool,
+        /// The app in front on the host ("ELDEN RING", "Safari"), so a
+        /// phone can pick that game's controls by itself. Empty if unknown.
+        #[serde(default)]
+        front_app: String,
     },
     /// Host → viewer: a text field here has the keyboard focus, or none
     /// does any more. `field` is where it is, as fractions of the shared

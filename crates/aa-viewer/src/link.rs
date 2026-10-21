@@ -148,6 +148,8 @@ pub struct HostInfo {
     pub target_kbps: u32,
     /// What is shown ("Whole screen", "Safari").
     pub sharing: String,
+    /// The app in front on the host (see `StreamInfo::front_app`).
+    pub front_app: String,
     /// We may choose what is shared.
     pub full_access: bool,
     /// The host program's version ("0.6.0"); empty from hosts before 0.5.9.

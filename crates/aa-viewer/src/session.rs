@@ -389,12 +389,13 @@ pub async fn run(
                             tracing::info!("host said bye");
                             return Ok(());
                         }
-                        Ok(ControlMessage::StreamInfo { fps, kbps, sharing, warning, cursor_captured }) => {
+                        Ok(ControlMessage::StreamInfo { fps, kbps, sharing, warning, cursor_captured, front_app }) => {
                             crate::link::HOST_CURSOR_CAPTURED.store(cursor_captured, std::sync::atomic::Ordering::Relaxed);
                             crate::link::update_host_info(|i| {
                                 i.target_fps = fps;
                                 i.target_kbps = kbps;
                                 i.sharing = sharing;
+                                i.front_app = front_app;
                                 // The host's input warning, kept as one note that
                                 // goes away when the host stops sending it.
                                 if i.warning != warning {

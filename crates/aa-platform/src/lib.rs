@@ -313,6 +313,20 @@ pub fn cursor_captured() -> bool {
     }
 }
 
+/// The name of the app in front here ("ELDEN RING", "Safari"; for a
+/// Windows game through `CrossOver`, its window's title), or "" if unknown.
+/// The phone uses it to pick that game's controls. Asked once a second.
+pub fn front_app_name() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        macos::wininfo::front_app_name()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        String::new()
+    }
+}
+
 /// Phone mode (Mac host): while a phone watches, give this computer a
 /// screen of the phone's shape (`points`, logical size) and make it the
 /// main one, so the stream fills the phone with readable text. False where

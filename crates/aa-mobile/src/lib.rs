@@ -396,6 +396,8 @@ struct StatusJson {
     /// A game on the host has taken the mouse pointer: send movement, not
     /// positions, and draw no pointer.
     cursor_captured: bool,
+    /// The app in front on the Mac (picks a game's controls).
+    front_app: String,
     /// A text field on the Mac has the keyboard focus: where it is (x, y,
     /// width, height as fractions of the picture). The phone opens its
     /// keyboard and zooms to it.
@@ -435,6 +437,7 @@ pub unsafe extern "C" fn aa_mobile_status() -> *mut c_char {
             host_version: String::new(),
             has_launcher: false,
             cursor_captured: false,
+            front_app: String::new(),
             text_field: None,
             text_secure: false,
         });
@@ -474,6 +477,7 @@ pub unsafe extern "C" fn aa_mobile_status() -> *mut c_char {
         has_launcher: launcher_capable(&info.host_version),
         host_version: info.host_version,
         cursor_captured: link::HOST_CURSOR_CAPTURED.load(std::sync::atomic::Ordering::Relaxed),
+        front_app: info.front_app.clone(),
         text_field: info.text_field.map(|f| f.0),
         text_secure: info.text_field.is_some_and(|f| f.1),
     })
