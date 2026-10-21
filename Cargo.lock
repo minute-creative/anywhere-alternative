@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "aa-app"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "aa-core",
  "aa-platform",
@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "aa-core"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "aa-host"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "aa-core",
  "aa-platform",
@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "aa-mobile"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "aa-core",
  "aa-platform",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "aa-platform"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "aa-core",
  "anyhow",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "aa-vcam"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "aa-core",
  "windows",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "aa-viewer"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "aa-core",
  "aa-platform",
