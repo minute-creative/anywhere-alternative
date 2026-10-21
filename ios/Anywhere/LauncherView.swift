@@ -48,33 +48,39 @@ struct LauncherView: View {
     private var isDesktop: Bool { focused?.id == Self.desktop.id }
 
     var body: some View {
-        // 0.6.0 on the phone: the hero (150 pt icon, 40 pt name), the strip
-        // and the hints were taller than a phone held sideways, so the
-        // strip sank under the bottom edge (only the green "open" dots
-        // showed) and the Full access note was never seen. The hero now
-        // takes only the height that is left after the fixed parts.
-        GeometryReader { geo in
-            let heroSize = max(64, min(150, geo.size.height - Self.fixedHeight))
-            ZStack {
-                background
-                VStack(alignment: .leading, spacing: 0) {
-                    topBar.padding(.horizontal, 40).padding(.top, 10)
-                    Spacer(minLength: 4)
+        // The strip of apps and the hints have fixed heights and always
+        // show; the hero gets whatever height is left. 0.6.0 let the hero
+        // push the strip under the bottom edge; 0.6.1 sized the hero from
+        // a guessed height and with the Full access note (two lines) it
+        // still did (owner's screenshot, Claude focused, no apps visible).
+        // Now the hero tries a few sizes, largest first, and SwiftUI uses
+        // the first that fits the space (`ViewThatFits`).
+        ZStack {
+            background
+            VStack(alignment: .leading, spacing: 0) {
+                topBar.padding(.horizontal, 40).padding(.top, 10)
+                Group {
                     if !engine.status.has_launcher {
                         Notice(symbol: "arrow.down.circle", title: "Update the Mac's Anywhere",
                                detail: "It runs \(engine.status.host_version.isEmpty ? "an older version" : engine.status.host_version); the launcher needs 0.6.0 or newer. On the Mac: Anywhere → Settings → Update now. Press B for the picture.")
-                            .frame(maxWidth: .infinity)
                     } else if engine.apps.isEmpty && waited > 6 {
                         Notice(symbol: "hourglass", title: "No list from the Mac yet", detail: "Press B, then open the launcher again.")
-                            .frame(maxWidth: .infinity)
                     } else {
-                        hero(size: heroSize).padding(.horizontal, 40)
+                        ViewThatFits(in: .vertical) {
+                            hero(size: 140, note: true)
+                            hero(size: 110, note: true)
+                            hero(size: 88, note: true)
+                            hero(size: 72, note: false)
+                            hero(size: 56, note: false)
+                        }
+                        .padding(.horizontal, 40)
                     }
-                    Spacer(minLength: 4)
-                    strip
-                    HintBar(hints: hints)
-                        .padding(.horizontal, 40).padding(.bottom, 6)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .clipped()
+                strip
+                HintBar(hints: hints)
+                    .padding(.horizontal, 40).padding(.bottom, 6)
             }
         }
         .onAppear {
@@ -85,8 +91,6 @@ struct LauncherView: View {
         .onChange(of: tab) { _, _ in col = min(col, max(0, current.apps.count - 1)) }
     }
 
-    /// Height of everything except the hero: top bar, strip, hints, gaps.
-    private static let fixedHeight: CGFloat = 40 + Self.stripHeight + 36 + 20
     /// The strip: a 92 pt tile grown 1.12x when focused, plus its name.
     private static let stripHeight: CGFloat = 138
 
@@ -123,15 +127,15 @@ struct LauncherView: View {
         }
     }
 
-    private func hero(size: CGFloat) -> some View {
+    private func hero(size: CGFloat, note: Bool) -> some View {
         HStack(spacing: 28) {
             bigIcon.frame(width: size, height: size)
             VStack(alignment: .leading, spacing: 6) {
-                Text(focused?.name ?? "").font(.system(size: max(26, size * 0.27), weight: .bold, design: .rounded))
+                Text(focused?.name ?? "").font(.system(size: max(24, size * 0.28), weight: .bold, design: .rounded))
                     .lineLimit(1).minimumScaleFactor(0.6)
                 Text(subtitle).font(.system(size: 16)).foregroundStyle(Theme.muted)
                 // Shown here, not in the bottom row, so it is always seen.
-                if !engine.status.full_access, engine.status.has_launcher, !isDesktop {
+                if note, !engine.status.full_access, engine.status.has_launcher, !isDesktop {
                     Text("Opens on the whole desktop. For just this app, on the Mac: Share → this phone → Full access.")
                         .font(.system(size: 13)).foregroundStyle(Theme.warn).lineLimit(2)
                 }
