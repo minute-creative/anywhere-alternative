@@ -727,6 +727,16 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   code to keep it short sent hundreds of deletes. Programmatic resets skip
   the next change.
 
+- **Two copies, one port: the waiting one must say so, and the wrong one
+  must leave.** The Mac's login-screen copy kept port 7700 for hours after
+  the owner logged in; the logged-in copy logged one "port busy" line and
+  waited silently, and starting it also emptied the serving copy's log.
+  Copies now hand over on login, warn every minute while waiting, and
+  logs rotate instead of being emptied.
+- **Env vars reach every compile, not just the one you mean.**
+  MACOSX_DEPLOYMENT_TARGET set for CMake's Opus also hit the build scripts
+  that run on the Mac ("invalid version -mmacosx-version-min=17.0").
+
 ## 10. Measured so far
 
 | Date | Machine | Path | Result |

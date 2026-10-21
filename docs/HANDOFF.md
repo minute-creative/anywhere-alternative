@@ -158,6 +158,18 @@ Also fixed: a pipeline rebuild dropped the viewer's Resolution setting.
 To test on hardware: Phone mode on/off, menu bar + front app on the phone
 screen, the Mac monitor keeps working, everything back on disconnect,
 and a host crash leaves the Mac normal.
+**0.6.2 (2026-10-21), CI green, owner to release:** launcher hero via
+ViewThatFits (0.6.1's guessed height still hid the app row); Games (auto)
+controls (front_app in StreamInfo picks a per-game layout, Elden Ring
+built in, general WASD layout otherwise, pointer/click/Esc in menus,
+quick menu → Game buttons saves a layout per game); service.log rotated
+to .prev.log; login-screen copy waits while someone is logged in and
+quits at login (it held port 7700 for 11.5 h after login on 2026-10-21,
+the logged-in copy waited, the phone got "no answer"). Opus for iOS was
+built "min 26.5" (CMake read Xcode's MACOSX_DEPLOYMENT_TARGET): now
+unset in build-rust.sh (setting it to 17.0 broke host build scripts).
+Owner plans Black Myth: Wukong via CrossOver: ask for its front_app name
+to add a built-in layout.
 **Version is 0.6.1**; the owner releases it (0.6.0 was published before
 the text-field and game-pointer host code).
 Flaky test: `usbip_server_survives_garbage_and_still_serves` (50 ms sleep

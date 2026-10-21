@@ -665,3 +665,18 @@ Phone mode is private API, so it is looked up at run time and the host
 falls back to the normal screen if it is missing. Noticed along the way:
 the Mac host's pipeline rebuild never re-applied the viewer's Resolution
 setting.
+
+## Day 19 — 0.6.2: no answer over Tailscale, games for every title
+
+Owner on 0.6.1: Elden Ring L1/R1 did nothing and the camera didn't turn,
+Phone mode didn't show, the launcher hid its app row, and the phone got
+"no answer" over Tailscale. The Mac hadn't fetched 0.6.1 yet (download
+count 0); after it did, the logs (copied into the project folder and read
+through the linked Mac) showed the login-screen copy holding the port
+since 03:59 while the owner's copy waited 11.5 h. Fixed the handover, the
+log truncation, the launcher (ViewThatFits), and added Games (auto) with
+per-game layouts (owner: "it should adapt to all games on the Mac").
+Xcode's 136 "Object file" warnings: Opus pieces marked iOS 26.5; the
+first fix (MACOSX_DEPLOYMENT_TARGET=17.0) broke host build scripts, the
+second (unset) is in. Camera not turning in Elden Ring: still to test on
+0.6.2 with the right stick.
