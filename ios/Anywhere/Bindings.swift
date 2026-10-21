@@ -120,7 +120,7 @@ enum PadAction: Codable, Equatable, Hashable {
 
     /// Everything a button can be set to, in the order the editor cycles.
     static let buttonChoices: [PadAction] = {
-        var out: [PadAction] = [.none, .mouse(0), .mouse(1), .mouse(2), .back, .keyboard, .launcher, .quickMenu, .speedToggle, .zoom, .magnify]
+        var out: [PadAction] = [.none, .mouse(0), .mouse(1), .mouse(2), .shiftClick(0), .shiftClick(1), .back, .keyboard, .launcher, .quickMenu, .speedToggle, .zoom, .magnify]
         out += [HID.space, HID.enter, HID.escape, HID.tab, HID.backspace, HID.leftShift, HID.leftCtrl, HID.leftAlt, HID.leftGui].map(PadAction.key)
         out += [HID.up, HID.down, HID.left, HID.right].map(PadAction.key)
         out += (0x04...0x1D).map { PadAction.key(UInt16($0)) } // A–Z
@@ -150,6 +150,18 @@ struct ControlMap: Codable, Equatable {
         .a: .mouse(0), .b: .back, .x: .keyboard, .y: .mouse(1),
         .l1: .key(HID.leftGui), .r1: .key(HID.leftShift), .l2: .magnify, .r2: .mouse(0),
         .l3: .speedToggle, .r3: .mouse(2), .l4: .keyboard, .r4: .launcher,
+        .up: .key(HID.up), .down: .key(HID.down), .left: .key(HID.left), .right: .key(HID.right),
+        .menu: .quickMenu, .options: .key(HID.enter),
+    ])
+
+    /// Any game's menus, launchers and windowed parts (the pointer is
+    /// free): the pointer on the left stick, click on A, Escape on B, so
+    /// nearly every game menu works without knowing its keys.
+    static let gameMenu = ControlMap(bindings: [
+        .leftStick: .pointer, .rightStick: .scroll,
+        .a: .mouse(0), .b: .key(HID.escape), .x: .keyboard, .y: .mouse(1),
+        .l1: .key(HID.leftShift), .r1: .key(HID.tab), .l2: .magnify, .r2: .mouse(0),
+        .l3: .speedToggle, .r3: .mouse(2), .l4: .quickMenu, .r4: .launcher,
         .up: .key(HID.up), .down: .key(HID.down), .left: .key(HID.left), .right: .key(HID.right),
         .menu: .quickMenu, .options: .key(HID.enter),
     ])

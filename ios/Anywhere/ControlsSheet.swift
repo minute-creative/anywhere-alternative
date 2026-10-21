@@ -14,7 +14,8 @@ struct ControlsSheet: View {
             Color.black.opacity(0.7).ignoresSafeArea().onTapGesture { overlay = .none }
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Text(engine.prefs.profile.label + (engine.prefs.profile == .eldenRing ? (engine.status.cursor_captured ? " · play keys" : " · menu keys") : ""))
+                    Text(engine.prefs.profile.label + (engine.prefs.profile == .eldenRing || engine.prefs.profile == .game
+                        ? " · \(engine.gameName) · " + (engine.status.cursor_captured ? "play keys" : "menu keys") : ""))
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                     Spacer()
                     Text("Home: quick menu · any button closes this").font(.system(size: 13)).foregroundStyle(Theme.muted)
@@ -23,8 +24,7 @@ struct ControlsSheet: View {
                     Text("The pad is sent as a controller. A Mac cannot show a virtual controller without Apple's entitlement; a PC with ViGEmBus can.")
                         .font(.system(size: 15)).foregroundStyle(Theme.muted)
                 } else {
-                    let m = engine.prefs.profile == .eldenRing && !engine.status.cursor_captured
-                        ? ControlMap.eldenMenu : engine.prefs.activeMap
+                    let m = engine.currentMap
                     let all = PadControl.allCases
                     let half = (all.count + 1) / 2
                     HStack(alignment: .top, spacing: 28) {

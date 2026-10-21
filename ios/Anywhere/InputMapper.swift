@@ -27,12 +27,15 @@ final class InputMapper {
     private var zoomBeforeMagnify: CGFloat?
     /// Elden Ring layout: whether the play keys were in use last tick.
     private var playKeys: Bool?
+    /// Games layout last tick (switching games lets go of held keys too).
+    private var lastGameMap: ControlMap?
 
     /// Call when the stream starts and whenever the profile changes.
     func reset() {
         releaseAll()
         scrollAcc = .zero
         playKeys = nil
+        lastGameMap = nil
     }
 
     /// Let go of everything held (leaving the stream, opening a menu, the
@@ -70,12 +73,15 @@ final class InputMapper {
         // while it shows the pointer. Let go of everything on the switch so
         // no key from one layout stays held in the other.
         var map = self.map
-        if profile == .eldenRing {
-            if playKeys != captured {
+        if profile == .eldenRing || profile == .game {
+            // Which game, and play or menu: the layout follows both.
+            let now = e.currentMap
+            if playKeys != captured || now != lastGameMap {
                 if playKeys != nil { releaseAll() }
                 playKeys = captured
+                lastGameMap = now
             }
-            map = captured ? .eldenPlay : .eldenMenu
+            map = now
         }
         stick(captured && map[.leftStick] == .pointer ? .look : map[.leftStick], s.lx, s.ly, dt, e)
         stick(captured && map[.rightStick] == .pointer ? .look : map[.rightStick], s.rx, s.ry, dt, e)

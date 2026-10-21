@@ -12,6 +12,8 @@ enum Overlay: Equatable {
     case keyboard
     /// The iPhone's own keyboard, typing into the Mac's focused field.
     case typing
+    /// Edit the buttons for the game in front (saved for that game).
+    case editGame
     /// The current layout, as a cheat-sheet.
     case help
 }
@@ -98,6 +100,10 @@ struct StreamScreen: View {
             case .launcher: LauncherView(overlay: $overlay)
             case .keyboard: KeyboardView(overlay: $overlay)
             case .typing: TypingView(overlay: $overlay)
+            case .editGame:
+                ControlsView(target: .game(engine.gameKey, engine.gameName)) { overlay = .none }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Theme.bg.ignoresSafeArea())
             case .help: ControlsSheet(overlay: $overlay)
             }
         }
@@ -134,8 +140,9 @@ struct StreamScreen: View {
         }
         .onChange(of: engine.status.textField) { _, field in textFocusChanged(field) }
         .onChange(of: engine.status.cursor_captured) { _, captured in
-            guard engine.prefs.profile == .eldenRing else { return }
-            let note = captured ? "Play keys" : "Menu keys"
+            guard engine.prefs.profile == .eldenRing || engine.prefs.profile == .game else { return }
+            let game = engine.prefs.profile == .game ? "\(engine.gameName) · " : ""
+            let note = game + (captured ? "play keys" : "menu keys")
             withAnimation { layoutNote = note }
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 1_800_000_000)
@@ -163,7 +170,7 @@ struct StreamScreen: View {
 
     /// The pointer is drawn when a stick moves it (not in mouse-look games).
     private var showsPointer: Bool {
-        let m = engine.prefs.activeMap
+        let m = engine.currentMap
         return engine.prefs.profile != .controller && !engine.status.cursor_captured
             && (m[.leftStick] == .pointer || m[.rightStick] == .pointer)
     }

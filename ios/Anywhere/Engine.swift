@@ -50,6 +50,8 @@ struct Status: Codable {
     var host_version: String = ""
     var has_launcher: Bool = false
     var cursor_captured: Bool = false
+    /// The app in front on the Mac ("ELDEN RING", "Safari").
+    var front_app: String = ""
     /// A text field on the Mac has the keyboard focus: x, y, width, height
     /// as fractions of the picture. nil when none has.
     var text_field: [Float]?
@@ -95,6 +97,9 @@ struct Prefs: Codable {
     /// Phone mode: the Mac adds a screen of this phone's shape with large
     /// text while connected and shows that (owner's choice, 2026-10-20).
     var phoneMode: Bool = true
+    /// Play layouts the person changed for one game, by the game's name
+    /// (lower case). Games not in here use the built-in layout.
+    var gameMaps: [String: ControlMap] = [:]
 
     /// The control map the chosen profile means.
     var activeMap: ControlMap {
@@ -124,6 +129,7 @@ struct Prefs: Codable {
         launcherOnConnect = try c.decodeIfPresent(Bool.self, forKey: .launcherOnConnect) ?? launcherOnConnect
         typingKeyboard = (try? c.decodeIfPresent(TypingKeyboard.self, forKey: .typingKeyboard)) ?? typingKeyboard
         phoneMode = try c.decodeIfPresent(Bool.self, forKey: .phoneMode) ?? phoneMode
+        gameMaps = (try? c.decodeIfPresent([String: ControlMap].self, forKey: .gameMaps)) ?? gameMaps
     }
 
     static func load() -> Prefs {
@@ -163,7 +169,10 @@ enum TypingKeyboard: String, Codable, CaseIterable {
 enum InputProfile: String, Codable, CaseIterable {
     /// Sticks move the pointer and scroll; buttons click. For using the Mac.
     case desktop
-    /// WASD on the left stick, mouse on the right, FPS-style buttons.
+    /// Games, picked by the game in front: its own layout if known or
+    /// changed by the person, else WASD + mouse look; play keys while the
+    /// game holds the mouse, pointer + click in its menus (owner,
+    /// 2026-10-20: "it should adapt to all games on the Mac").
     case game
     /// Your own layout (Settings → Controls).
     case custom
@@ -178,7 +187,7 @@ enum InputProfile: String, Codable, CaseIterable {
     var label: String {
         switch self {
         case .desktop: return "Desktop"
-        case .game: return "Game (keys + mouse)"
+        case .game: return "Games (auto)"
         case .custom: return "Custom"
         case .eldenRing: return "Elden Ring"
         case .controller: return "Controller pass-through"
@@ -267,6 +276,41 @@ final class Engine: ObservableObject {
         if prefs.phoneMode { aa_mobile_set_phone_display(size.0, size.1) } else { aa_mobile_set_phone_display(0, 0) }
         _ = aa_mobile_connect(host, prefs.resolution, prefs.fps, hz, prefs.maxMbps, prefs.muteMac, mock)
         status.state = "connecting"
+    }
+
+    /// The game in front, as a key for its saved layout ("" if unknown).
+    var gameKey: String { status.front_app.lowercased().trimmingCharacters(in: .whitespaces) }
+
+    /// A short name for the game in front, for labels.
+    var gameName: String {
+        let n = status.front_app.components(separatedBy: " · ").last ?? ""
+        return n.isEmpty ? "this game" : n
+    }
+
+    /// The play layout for the game in front: the person's own for it,
+    /// else a built-in one for games we know, else the general game layout.
+    var gamePlayMap: ControlMap { prefs.gameMaps[gameKey] ?? Self.builtInGameMap(gameKey) }
+
+    /// The built-in play layout for a game (before the person changes it).
+    static func builtInGameMap(_ key: String) -> ControlMap {
+        key.contains("elden ring") || key.contains("eldenring") ? .eldenPlay : .game
+    }
+
+    /// The menu layout for the game in front (pointer is free).
+    var gameMenuMap: ControlMap {
+        if prefs.gameMaps[gameKey] == nil, gameKey.contains("elden ring") || gameKey.contains("eldenring") {
+            return .eldenMenu
+        }
+        return .gameMenu
+    }
+
+    /// The layout in use this moment, following the game's play / menu state.
+    var currentMap: ControlMap {
+        switch prefs.profile {
+        case .game: return status.cursor_captured ? gamePlayMap : gameMenuMap
+        case .eldenRing: return status.cursor_captured ? .eldenPlay : .eldenMenu
+        default: return prefs.activeMap
+        }
     }
 
     /// The Mac screen Phone mode asks for, in Mac points: 1080 wide

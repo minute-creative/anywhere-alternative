@@ -39,6 +39,10 @@ struct QuickMenu: View {
                 engine.prefs.profile = all[(i + 1) % all.count]
             },
             Item(id: "help", symbol: "questionmark.circle.fill", title: "Show controls", value: "What the buttons do") { overlay = .help },
+            // Games (auto): fix a wrong button once for the game in front.
+            Item(id: "gamekeys", symbol: "slider.horizontal.3", title: "Game buttons", value: "For \(engine.gameName)") {
+                overlay = .editGame
+            },
             Item(id: "zoom", symbol: "plus.magnifyingglass", title: "Zoom", value: engine.zoom == 1 ? "Off" : "\(Int(engine.zoom))×") {
                 engine.zoom = engine.zoom >= 3 ? 1 : engine.zoom + 1
             },
