@@ -26,6 +26,15 @@ done
 
 # The C parts (OpenH264, Opus) need to know the lowest iOS we run on.
 export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
+# Opus is built with CMake, which takes its lowest version from
+# MACOSX_DEPLOYMENT_TARGET instead, for every Apple system. Xcode sets that
+# to the newest macOS (26.5 in October 2026), so all 143 Opus pieces were
+# marked "iOS 26.5 or newer" and Xcode warned ~136 times that they are
+# newer than the app's iOS 17 (owner, 2026-10-21); on an older iPhone the
+# sound could fail. Same value as the iOS one; build scripts that run on
+# the Mac itself are unaffected in practice (17.0 is older than any Mac
+# they run on).
+export MACOSX_DEPLOYMENT_TARGET="$IPHONEOS_DEPLOYMENT_TARGET"
 # Xcode exports SDKROOT for the app's SDK; cargo's C compiler would pick it
 # up for the C code, but the Rust linker must not: use the right one.
 unset SDKROOT
@@ -34,6 +43,13 @@ libs=()
 for target in "${targets[@]}"; do
   if ! rustup target list --installed | grep -q "^$target$"; then
     rustup target add "$target"
+  fi
+  # Opus built before the fix above keeps its old version mark until it is
+  # built again: once per target, throw that build away (~20 s to redo).
+  marker="target/$target/.opus-ios-$IPHONEOS_DEPLOYMENT_TARGET"
+  if [ ! -f "$marker" ]; then
+    cargo clean -p opusic-sys --release --target "$target" || true
+    mkdir -p "target/$target" && touch "$marker"
   fi
   cargo build -p aa-mobile --release --target "$target"
   libs+=("target/$target/release/libaa_mobile.a")
