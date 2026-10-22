@@ -1,5 +1,5 @@
 // The slot and kind helpers are only used by the Mac/Windows reader.
-#![cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#![cfg_attr(not(any(target_os = "macos", target_os = "windows", target_os = "ios")), allow(dead_code))]
 #![allow(clippy::doc_markdown)] // controller names read better plain
 
 //! Game controllers on this machine → virtual controllers on the host.
@@ -260,11 +260,173 @@ mod real {
     }
 }
 
+/// iPhone/iPad: Apple's `GameController` framework instead of gilrs (which
+/// has no iOS backend). It sees MFi pads like the Razer Kishi and Bluetooth
+/// Xbox/PlayStation pads, with the same face-button layout as gilrs's
+/// South/East/West/North. Same slots, same 250 Hz snapshots, same 100 ms
+/// repeats and 2 s plug notices as the Mac/PC reader above.
+#[cfg(target_os = "ios")]
+mod apple {
+    use std::collections::{HashMap, HashSet};
+    use std::time::{Duration, Instant};
+
+    use aa_core::input::{gamepad_buttons as b, GamepadKind, GamepadState, InputEvent};
+    use objc2::rc::{autoreleasepool, Retained};
+    use objc2_game_controller::{GCController, GCControllerButtonInput, GCDevice, GCExtendedGamepad};
+    use tokio::sync::mpsc;
+
+    use super::{kind_of, SlotTable};
+    use crate::link::ViewerCommand;
+
+    const REPEAT_MS: u64 = 100;
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn stick(v: f32) -> i16 {
+        (v.clamp(-1.0, 1.0) * 32767.0) as i16
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn trigger(v: f32) -> u8 {
+        (v.clamp(0.0, 1.0) * 255.0) as u8
+    }
+
+    fn pressed(btn: Option<Retained<GCControllerButtonInput>>) -> bool {
+        btn.is_some_and(|b| unsafe { b.isPressed() })
+    }
+
+    fn snapshot(gp: &GCExtendedGamepad) -> GamepadState {
+        unsafe {
+            let dpad = gp.dpad();
+            let map = [
+                (Some(gp.buttonA()), b::CROSS),
+                (Some(gp.buttonB()), b::CIRCLE),
+                (Some(gp.buttonX()), b::SQUARE),
+                (Some(gp.buttonY()), b::TRIANGLE),
+                (Some(gp.leftShoulder()), b::L1),
+                (Some(gp.rightShoulder()), b::R1),
+                (gp.leftThumbstickButton(), b::L3),
+                (gp.rightThumbstickButton(), b::R3),
+                (gp.buttonOptions(), b::SHARE),
+                (Some(gp.buttonMenu()), b::OPTIONS),
+                (gp.buttonHome(), b::PS),
+                (Some(dpad.up()), b::DPAD_UP),
+                (Some(dpad.down()), b::DPAD_DOWN),
+                (Some(dpad.left()), b::DPAD_LEFT),
+                (Some(dpad.right()), b::DPAD_RIGHT),
+            ];
+            let buttons = map.into_iter().filter(|(btn, _)| pressed(btn.clone())).fold(0, |acc, (_, bit)| acc | bit);
+            let (ls, rs) = (gp.leftThumbstick(), gp.rightThumbstick());
+            GamepadState {
+                buttons,
+                left_x: stick(ls.xAxis().value()),
+                left_y: stick(ls.yAxis().value()),
+                right_x: stick(rs.xAxis().value()),
+                right_y: stick(rs.yAxis().value()),
+                left_trigger: trigger(gp.leftTrigger().value()),
+                right_trigger: trigger(gp.rightTrigger().value()),
+            }
+        }
+    }
+
+    /// Every connected controller that has the full gamepad layout, keyed by
+    /// its object address (stable while it stays connected).
+    fn connected() -> Vec<(usize, String, Retained<GCExtendedGamepad>)> {
+        let mut out = Vec::new();
+        unsafe {
+            for c in &GCController::controllers() {
+                let Some(gp) = c.extendedGamepad() else { continue };
+                let name = c.vendorName().map_or_else(|| "controller".to_owned(), |n| n.to_string());
+                out.push((Retained::as_ptr(&c) as usize, name, gp));
+            }
+        }
+        out
+    }
+
+    pub fn spawn(commands: mpsc::Sender<ViewerCommand>) {
+        let _ = std::thread::Builder::new().name("aa-pads".into()).spawn(move || {
+            let mut slots = SlotTable::<usize>::default();
+            let mut kinds: HashMap<u8, GamepadKind> = HashMap::new();
+            let mut leaving: Vec<(u8, Instant)> = Vec::new();
+            let mut last: HashMap<usize, (GamepadState, Instant)> = HashMap::new();
+            let mut known: HashSet<usize> = HashSet::new();
+            let mut last_announce = Instant::now();
+            let send = |ev: InputEvent| commands.blocking_send(ViewerCommand::Input(ev)).is_ok();
+            loop {
+                let alive = autoreleasepool(|_| {
+                    let pads = connected();
+                    // Unplugged since last pass.
+                    let gone: Vec<usize> =
+                        known.iter().copied().filter(|k| !pads.iter().any(|(id, _, _)| id == k)).collect();
+                    for id in gone {
+                        known.remove(&id);
+                        last.remove(&id);
+                        if let Some(slot) = slots.release(id) {
+                            tracing::info!(slot, "controller disconnected");
+                            kinds.remove(&slot);
+                            leaving.push((slot, Instant::now()));
+                            if !send(InputEvent::GamepadDetach { slot }) {
+                                return false;
+                            }
+                        }
+                    }
+                    for (id, name, gp) in &pads {
+                        let slot = match slots.find(*id) {
+                            Some(s) => s,
+                            None => {
+                                let Some(slot) = slots.take(*id) else { continue };
+                                let kind = kind_of(name, None);
+                                tracing::info!(slot, name, ?kind, "controller connected");
+                                kinds.insert(slot, kind);
+                                known.insert(*id);
+                                leaving.retain(|(s, _)| *s != slot);
+                                if !send(InputEvent::GamepadAttach { slot, kind }) {
+                                    return false;
+                                }
+                                slot
+                            }
+                        };
+                        let state = snapshot(gp);
+                        let due = last.get(id).map_or(true, |(prev, at)| {
+                            *prev != state || at.elapsed() >= Duration::from_millis(REPEAT_MS)
+                        });
+                        if due {
+                            match commands.try_send(ViewerCommand::Input(InputEvent::Gamepad { slot, state })) {
+                                Ok(()) => {
+                                    last.insert(*id, (state, Instant::now()));
+                                }
+                                Err(mpsc::error::TrySendError::Full(_)) => {}
+                                Err(mpsc::error::TrySendError::Closed(_)) => return false,
+                            }
+                        }
+                    }
+                    true
+                });
+                if !alive {
+                    return;
+                }
+                if last_announce.elapsed() >= Duration::from_secs(2) {
+                    last_announce = Instant::now();
+                    for (&slot, &kind) in &kinds {
+                        send(InputEvent::GamepadAttach { slot, kind });
+                    }
+                    leaving.retain(|(_, since)| since.elapsed() < Duration::from_secs(7));
+                    for &(slot, _) in &leaving {
+                        send(InputEvent::GamepadDetach { slot });
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(4));
+            }
+        });
+    }
+}
+
 /// Start watching controllers; events go out through the command channel.
 pub fn spawn(commands: tokio::sync::mpsc::Sender<crate::link::ViewerCommand>) {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     real::spawn(commands);
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "ios")]
+    apple::spawn(commands);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "ios")))]
     drop(commands);
 }
 

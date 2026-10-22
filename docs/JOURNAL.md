@@ -544,6 +544,26 @@ and a still Mac hands out none. Added `ScreenCapture::refresh` and a
 probing up to the user's 80 Mbps cap regardless of need; capped at twice
 the sharp rate. Also found the Mac capture queue kept the oldest frames.
 
+## Day 20 — Anywhere on the iPhone (2026-10-20)
+
+The owner had been trying to run PC/Steam games on the iPhone itself
+(a separate experiment, "iOSDeck": Linux VMs in UTM with FEX and Steam);
+it ran, but Steam doesn't fit in the memory iOS gives one app. So the
+goal became: stream the Mac mini's games to the iPhone with Anywhere,
+from anywhere, with a Razer Kishi.
+
+The viewer already decodes with VideoToolbox and draws with wgpu/Metal,
+both of which exist on iOS, so the plan was to reuse it rather than write
+an iPhone app. Steps: split `aa-viewer` into a library, build it as a
+static library for `aarch64-apple-ios`, hand-write a minimal Xcode
+project around it, read settings from the iOS Settings app, controllers
+from GameController. First build linked after one fix
+(`IPHONEOS_DEPLOYMENT_TARGET`), first phone run streamed at 60 fps over
+Tailscale, but only in the top-left corner, and the pairing code kept
+coming back. Cross-tested fixes in the iPhone Simulator on the Mac
+(which found a third bug: GPU limits) before reinstalling on the phone.
+See HANDOFF "iPhone viewer" and ARCHITECTURE §9.
+
 ## Things we deliberately did not do (yet)
 
 - No WebRTC, no TCP, no QUIC: latency budget.

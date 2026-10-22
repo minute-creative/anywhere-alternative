@@ -10,3 +10,10 @@ tools/sim/chaos-report.md
 # compatibility test (scripts/compat)
 old-builds/
 old-target/
+
+# iPhone helper output (packaging/ios/scripts)
+ios-*-log.txt
+ios-viewer.log
+sim-shot.png
+sim-viewer.log
+sim-pair-code.txt

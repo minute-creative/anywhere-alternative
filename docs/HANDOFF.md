@@ -14,7 +14,8 @@ for setup. Everything below is true as of the last commit on `main`.
   by running `cargo` from the wrong directory):
   - PC (Windows 11, PowerShell): `cd $HOME\anywhere-alternative`
   - Mac (Apple Silicon M4 Pro, Terminal): `cd ~/anywhere-alternative`
-- The repo is **private** and must stay private. Push directly to `main`.
+- The repo is **public** (owner's decision, 2026-10-18): never commit
+  personal details. Push directly to `main`.
 - When something fails on their machine, ask for the exact log lines rather
   than guessing.
 
@@ -28,6 +29,21 @@ for setup. Everything below is true as of the last commit on `main`.
 
 Their router reassigns the PC's address often (seen 192.168.1.3 → .5); the
 viewer now discovers the host by broadcast so no address is needed.
+
+## iPhone viewer (2026-10-20, branch `ios-viewer`)
+
+Owner asked to play the Mac mini's games (App Store, Steam, anything) on
+their iPhone 14 Plus from anywhere, with a Razer Kishi, using Anywhere
+instead of Steam Link. Built: the Rust viewer as an iOS static library in
+a small Xcode app (`packaging/ios`, details in `docs/IOS.md`). Verified on
+the owner's phone over Tailscale: 60 fps, HEVC hardware decode, ~26 ms,
+0% loss. Fixed after the first phone test: picture stuck in the top-left
+corner (no window size on iOS), one-use pairing code coming back on every
+start (`synchronize()` + retry as paired), Simulator GPU limits. Not yet
+confirmed on the phone after those fixes: full screen, Kishi in a game.
+Next: audio, touch as mouse, keyboard, phone name instead of "localhost",
+CI build for the iPhone target. Builds only on the owner's Mac
+(`packaging/ios/scripts/ios-update.command`, phone on cable).
 
 ## What works (verified by the owner on real hardware)
 
@@ -611,7 +627,11 @@ crates/aa-host        session.rs (UDP loop, negotiation, control),
                       pipeline.rs (capture/encode/audio/input threads)
 crates/aa-viewer      session.rs (receive, reassemble, decode thread, stats),
                       window.rs (winit+wgpu), overlay.rs (egui settings),
-                      audio.rs (sink), discover.rs (LAN broadcast)
+                      audio.rs (sink), discover.rs (LAN broadcast),
+                      ios.rs (iPhone entry), pads.rs (gilrs / GameController)
+packaging/ios         iPhone app: Xcode project, Settings bundle, build and
+                      helper scripts (docs/IOS.md)
+.claude/skills        how-to skills for Claude sessions
 ```
 
 Key cross-cutting facts:

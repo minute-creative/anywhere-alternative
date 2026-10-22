@@ -1,0 +1,302 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A1000000000000000000B001 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000F001 /* main.m */; };
+		A1000000000000000000B002 /* Settings.bundle in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000F003 /* Settings.bundle */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A1000000000000000000F001 /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
+		A1000000000000000000F002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A1000000000000000000F003 /* Settings.bundle */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.plug-in"; path = Settings.bundle; sourceTree = "<group>"; };
+		A1000000000000000000F004 /* Anywhere.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Anywhere.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		A10000000000000000009001 = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000009002 /* AnywhereiOS */,
+				A10000000000000000009003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10000000000000000009002 /* AnywhereiOS */ = {
+			isa = PBXGroup;
+			children = (
+				A1000000000000000000F001 /* main.m */,
+				A1000000000000000000F002 /* Info.plist */,
+				A1000000000000000000F003 /* Settings.bundle */,
+			);
+			path = AnywhereiOS;
+			sourceTree = "<group>";
+		};
+		A10000000000000000009003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A1000000000000000000F004 /* Anywhere.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10000000000000000007001 /* Anywhere */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000004002 /* Build configuration list for PBXNativeTarget "Anywhere" */;
+			buildPhases = (
+				A10000000000000000006001 /* Build Rust viewer */,
+				A10000000000000000006002 /* Sources */,
+				A10000000000000000006003 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Anywhere;
+			productName = Anywhere;
+			productReference = A1000000000000000000F004 /* Anywhere.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000000000000000005001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					A10000000000000000007001 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+				};
+			};
+			buildConfigurationList = A10000000000000000004001 /* Build configuration list for PBXProject "AnywhereiOS" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A10000000000000000009001;
+			productRefGroup = A10000000000000000009003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A10000000000000000007001 /* Anywhere */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A10000000000000000006003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000000000000000000B002 /* Settings.bundle in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A10000000000000000006001 /* Build Rust viewer */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Build Rust viewer";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "\"$SRCROOT/build-rust.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10000000000000000006002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000000000000000000B001 /* main.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A1000000000000000000C0D1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+			};
+			name = Debug;
+		};
+		A1000000000000000000C0E1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		A1000000000000000000C1D1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = PGYRXU4773;
+				ENABLE_BITCODE = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AnywhereiOS/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../target/aarch64-apple-ios/release";
+				MARKETING_VERSION = 0.5.13;
+				OTHER_LDFLAGS = (
+					"-laa_viewer",
+					"-lc++",
+					"-lresolv",
+					"-framework",
+					"Foundation",
+					"-framework",
+					"UIKit",
+					"-framework",
+					"Metal",
+					"-framework",
+					"QuartzCore",
+					"-framework",
+					"CoreGraphics",
+					"-framework",
+					"VideoToolbox",
+					"-framework",
+					"CoreMedia",
+					"-framework",
+					"CoreVideo",
+					"-framework",
+					"CoreFoundation",
+					"-framework",
+					"GameController",
+					"-framework",
+					"AudioToolbox",
+					"-framework",
+					"AVFoundation",
+					"-framework",
+					"Security",
+					"-framework",
+					"SystemConfiguration",
+					"-framework",
+					"IOSurface",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.minutecreative.anywhere.ios;
+				PRODUCT_NAME = Anywhere;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A1000000000000000000C1E1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = PGYRXU4773;
+				ENABLE_BITCODE = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AnywhereiOS/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../target/aarch64-apple-ios/release";
+				MARKETING_VERSION = 0.5.13;
+				OTHER_LDFLAGS = (
+					"-laa_viewer",
+					"-lc++",
+					"-lresolv",
+					"-framework",
+					"Foundation",
+					"-framework",
+					"UIKit",
+					"-framework",
+					"Metal",
+					"-framework",
+					"QuartzCore",
+					"-framework",
+					"CoreGraphics",
+					"-framework",
+					"VideoToolbox",
+					"-framework",
+					"CoreMedia",
+					"-framework",
+					"CoreVideo",
+					"-framework",
+					"CoreFoundation",
+					"-framework",
+					"GameController",
+					"-framework",
+					"AudioToolbox",
+					"-framework",
+					"AVFoundation",
+					"-framework",
+					"Security",
+					"-framework",
+					"SystemConfiguration",
+					"-framework",
+					"IOSurface",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.minutecreative.anywhere.ios;
+				PRODUCT_NAME = Anywhere;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10000000000000000004001 /* Build configuration list for PBXProject "AnywhereiOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1000000000000000000C0D1 /* Debug */,
+				A1000000000000000000C0E1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000004002 /* Build configuration list for PBXNativeTarget "Anywhere" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1000000000000000000C1D1 /* Debug */,
+				A1000000000000000000C1E1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A10000000000000000005001 /* Project object */;
+}

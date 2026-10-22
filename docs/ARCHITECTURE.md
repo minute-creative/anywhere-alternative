@@ -451,6 +451,15 @@ If macOS refuses the sends (Local Network privacy) the error says which
 setting to switch on. Test switches on the host: `AA_SIMULATE_FIREWALL`
 (ignore `Discover`), `AA_SIMULATE_NO_BEACON`.
 
+### iPhone viewer (2026-10-20)
+
+`aa-viewer` is a library plus a one-line binary. The iOS app's `main`
+calls `aa_viewer_ios_main` (`aa-viewer/src/ios.rs`), which reads the
+Settings app, then runs the same viewer with the same arguments a Mac
+would get. Decode reuses `macos/decoder.rs`; controllers come from Apple's
+GameController framework instead of gilrs. iOS forbids LAN broadcast, so
+the phone connects by address (Tailscale or home). Details: `docs/IOS.md`.
+
 ## 7. Connectivity (stage 3)
 
 Built 2026-10-08 (0.4.0), Tailscale first; our own server later.
@@ -670,6 +679,19 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
   Vanguard running, SendInput returns success and the click vanishes. Detect
   the `vgc` service instead and tell the viewer.
 
+- **A fixed window size shrinks the iPhone's picture** (iPhone viewer,
+  2026-10-20): `with_inner_size(1280, 720)` is a request on Mac/PC but on
+  iOS it sized the view to 1139x720 inside a 2778x1284 screen, so the
+  stream sat in the top-left corner. No size is set on iOS.
+- **wgpu's default limits aren't the floor everywhere** (2026-10-20): the
+  iPhone Simulator's Metal offers 15 inter-stage variables, the default
+  asks for 16. The viewer requests `adapter.limits()`.
+- **A one-use setting must be saved before the app can die** (2026-10-20):
+  removing the pairing code from iOS settings without `synchronize()` left
+  it on disk when the app was swiped away, so every start failed with
+  "That code isn't right". Now saved at once, and a failed pairing retries
+  as an already-paired phone.
+
 ## 10. Measured so far
 
 | Date | Machine | Path | Result |
@@ -678,6 +700,7 @@ Recorded because each one cost a debugging round and is easy to reintroduce.
 | 2026-10-06 | same | DXGI → Quick Sync via Media Foundation, zero-copy | locked 60 fps, 0% loss, ~31 Mbps, <1 ms assembly; bench 110 fps @1080p, 73 @1440p |
 | 2026-10-07 | same → Mac mini M4 Pro, Wi-Fi | + WASAPI loopback → Opus 128 kbps | audio plays; crackled with a fixed 30 ms buffer (link ping 36–187 ms) → adaptive buffer shipped |
 | 2026-10-07 | same | process-loopback tap, host mute, LAN discovery, VideoToolbox decode, HEVC negotiation | all compile on CI; owner verification pending (see docs/HANDOFF.md) |
+| 2026-10-20 | iPhone 14 Plus (A15, iOS 27) viewer → Mac mini M4 Pro host, Tailscale | SCK → VideoToolbox HEVC → VideoToolbox decode on the phone, Kishi via GameController | 60 fps, 1.1 Mbps (still desktop), 26 ms, 0% loss; occasional repair-frame skips and VT -12903 decode errors |
 
 ### Gaming simulation, 2026-10-07 (mock pipeline, 2-core cloud box)
 

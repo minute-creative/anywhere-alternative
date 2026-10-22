@@ -52,6 +52,16 @@ objc2-av-foundation = "0.3"
 # it (reading a large image every poll would be wasteful).
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
 
+# iPhone/iPad viewer: the same VideoToolbox decoder as the Mac (it only uses
+# frameworks iOS has too). Nothing else from the Mac backends is used there.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-video-toolbox = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
+objc2-core-foundation = "0.3"
+
 # Audio playback. cpal needs ALSA headers on Linux, which CI/dev containers
 # may lack, and we never ship a Linux viewer, so it is Mac/Windows only.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]

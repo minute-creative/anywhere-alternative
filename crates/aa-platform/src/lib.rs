@@ -48,6 +48,8 @@ pub mod trust;
 pub mod update;
 pub mod usbip;
 
+#[cfg(target_os = "ios")]
+pub mod ios;
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "windows")]
@@ -347,7 +349,11 @@ pub fn display_refresh_hz() -> Option<u16> {
     {
         windows::display_refresh_hz()
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "ios")]
+    {
+        Some(ios::display_refresh_hz())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "ios")))]
     {
         None
     }
@@ -430,7 +436,11 @@ pub fn viewer_backends() -> Result<ViewerBackends> {
     {
         windows::viewer_backends()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "ios")]
+    {
+        ios::viewer_backends()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "ios")))]
     {
         Err(PlatformError::Unavailable("no real viewer backend for this OS; use --mock".into()))
     }

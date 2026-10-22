@@ -136,7 +136,14 @@ impl Gpu {
         }))?;
         tracing::info!(adapter = ?adapter.get_info().name, backend = ?adapter.get_info().backend, "gpu");
         let (device, queue) = pollster::block_on(
-            adapter.request_device(&wgpu::DeviceDescriptor { label: Some("aa-viewer"), ..Default::default() }),
+            // Ask for what this GPU actually has rather than wgpu's desktop
+            // defaults: the iPhone Simulator refused them (one shader limit
+            // of 15 where the default asks 16), so the window never opened.
+            adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("aa-viewer"),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            }),
         )?;
 
         let size = window.inner_size();
@@ -693,8 +700,13 @@ impl ApplicationHandler<Wake> for App {
         if self.window.is_some() {
             return;
         }
-        let mut attrs =
-            Window::default_attributes().with_title(&self.title).with_inner_size(PhysicalSize::new(1280, 720));
+        let mut attrs = Window::default_attributes().with_title(&self.title);
+        // A starting size for desktop windows only. On an iPhone a size here
+        // shrinks the drawing area to 1139x720 in the corner of a 2778x1284
+        // screen (iPhone, 2026-10-20); there the window simply fills the screen.
+        if !cfg!(target_os = "ios") {
+            attrs = attrs.with_inner_size(PhysicalSize::new(1280, 720));
+        }
         if self.fullscreen {
             attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
         }
@@ -875,6 +887,19 @@ impl ApplicationHandler<Wake> for App {
             }
             WindowEvent::RedrawRequested => {
                 self.follow_host_cursor();
+                // The window's real size, every frame. An iPhone app starts
+                // upright and turns to landscape without always sending a
+                // Resized event, so the picture was drawn for a portrait
+                // screen into the top-left corner (iPhone, first test,
+                // 2026-10-20). Cheap: two numbers compared.
+                if let (Some(g), Some(w)) = (&mut self.gpu, &self.window) {
+                    let now = w.inner_size();
+                    if now.width > 0 && (now.width, now.height) != (g.config.width, g.config.height) {
+                        tracing::info!(width = now.width, height = now.height, "window size changed");
+                        g.resize(now);
+                        self.refit();
+                    }
+                }
                 let Some(gpu) = &mut self.gpu else { return };
                 let Some(window) = self.window.clone() else { return };
                 let window = window.as_ref();

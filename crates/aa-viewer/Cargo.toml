@@ -6,6 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# The viewer is a library so the iPhone app (crates/aa-ios) can start it
+# from its own `main`; the `aa-viewer` command is a two-line wrapper.
+[lib]
+name = "aa_viewer"
+path = "src/lib.rs"
+
 [[bin]]
 name = "aa-viewer"
 path = "src/main.rs"
@@ -40,3 +46,11 @@ hidapi = { version = "2.6", default-features = false }
 
 [lints]
 workspace = true
+
+# iPhone/iPad: controllers through Apple's GameController framework (MFi
+# pads like the Razer Kishi, plus Xbox and PlayStation pads over Bluetooth),
+# and the app's settings (host address, pairing code) from the Settings app.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-game-controller = "0.3"

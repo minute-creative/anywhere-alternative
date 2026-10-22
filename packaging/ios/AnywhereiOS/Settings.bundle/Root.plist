@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>StringsTable</key><string>Root</string>
+	<key>PreferenceSpecifiers</key>
+	<array>
+		<dict>
+			<key>Type</key><string>PSGroupSpecifier</string>
+			<key>Title</key><string>Computer to watch</string>
+			<key>FooterText</key><string>Its Tailscale address (100.x.y.z) works at home and away. The pairing code comes from the computer's Share page. It's needed only once: after the first connection this field empties itself and the phone is remembered.</string>
+		</dict>
+		<dict>
+			<key>Type</key><string>PSTextFieldSpecifier</string>
+			<key>Title</key><string>Address</string>
+			<key>Key</key><string>host</string>
+			<key>KeyboardType</key><string>URL</string>
+			<key>AutocapitalizationType</key><string>None</string>
+			<key>AutocorrectionType</key><string>No</string>
+			<key>DefaultValue</key><string></string>
+		</dict>
+		<dict>
+			<key>Type</key><string>PSTextFieldSpecifier</string>
+			<key>Title</key><string>Pairing code</string>
+			<key>Key</key><string>pair_code</string>
+			<key>KeyboardType</key><string>NumberPad</string>
+			<key>DefaultValue</key><string></string>
+		</dict>
+		<dict>
+			<key>Type</key><string>PSGroupSpecifier</string>
+			<key>Title</key><string>Picture</string>
+		</dict>
+		<dict>
+			<key>Type</key><string>PSMultiValueSpecifier</string>
+			<key>Title</key><string>Resolution</string>
+			<key>Key</key><string>resolution</string>
+			<key>DefaultValue</key><string>1080</string>
+			<key>Titles</key><array><string>720p</string><string>1080p</string></array>
+			<key>Values</key><array><string>720</string><string>1080</string></array>
+		</dict>
+		<dict>
+			<key>Type</key><string>PSTextFieldSpecifier</string>
+			<key>Title</key><string>Max Mbps (optional)</string>
+			<key>Key</key><string>max_mbps</string>
+			<key>KeyboardType</key><string>NumberPad</string>
+			<key>DefaultValue</key><string></string>
+		</dict>
+	</array>
+</dict>
+</plist>
